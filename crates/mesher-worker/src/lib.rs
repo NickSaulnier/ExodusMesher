@@ -2,14 +2,16 @@
 //! wraps [`run`] with the stdin/stdout protocol; keeping the logic here lets
 //! tests drive it in-process too.
 //!
-//! Pipeline so far: parse, diagnose, select. Each stage runs only if no fatal
-//! record came before it.
+//! Pipeline so far: parse, diagnose, select, then (unless `no_repair`) repair
+//! and the surface gate. Diagnosis runs if parsing produced geometry; repair
+//! runs on every selected part without a fatal defect of its own.
 
 use std::path::Path;
 
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
 use mesher_core::model::SurfaceModel;
-use mesher_core::protocol::{Job, OVERLAY_FILE, REPORT_FILE, WorkerMessage};
+use mesher_core::protocol::{Job, OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE, WorkerMessage};
+use mesher_core::repair::repair;
 use mesher_core::{Action, DefectCode, ExitStatus, Outcome, Record, RecordLog, Report, Stage};
 
 /// Run a job to completion, sending progress, records and the final result to
@@ -31,11 +33,11 @@ pub fn run(job: &Job, emit: &mut dyn FnMut(&WorkerMessage)) -> i32 {
     report.stages_run.push(Stage::Parse);
     report.input.stats = model.as_ref().map(SurfaceModel::stats);
 
-    let mut overlay = None;
+    let mut files: Vec<(&str, String)> = Vec::new();
     let mut internal_error = None;
     if let Some(model) = model.as_ref().filter(|_| !log.has_fatal()) {
-        match diagnose_and_select(job, model, &mut log, &mut report, emit) {
-            Ok(text) => overlay = Some(text),
+        match process(job, model, &mut log, &mut report, emit) {
+            Ok(outputs) => files = outputs,
             Err(message) => internal_error = Some(message),
         }
     }
@@ -54,10 +56,6 @@ pub fn run(job: &Job, emit: &mut dyn FnMut(&WorkerMessage)) -> i32 {
         });
     }
 
-    let files: Vec<(&str, String)> = overlay
-        .into_iter()
-        .map(|text| (OVERLAY_FILE, text))
-        .collect();
     let report_path = write_outputs(
         job,
         &mut report,
@@ -75,20 +73,21 @@ pub fn run(job: &Job, emit: &mut dyn FnMut(&WorkerMessage)) -> i32 {
     exit_code
 }
 
-/// Diagnose, select parts and check selected pairs. Returns the overlay as
-/// .vtp text, or an internal-error message.
-fn diagnose_and_select(
+/// Diagnose, select parts, check selected pairs, then repair and gate.
+/// Returns the files to write, or an internal-error message.
+fn process(
     job: &Job,
     model: &SurfaceModel,
     log: &mut RecordLog,
     report: &mut Report,
     emit: &mut dyn FnMut(&WorkerMessage),
-) -> Result<String, String> {
+) -> Result<Vec<(&'static str, String)>, String> {
+    let tol = Tolerances::default();
     emit(&WorkerMessage::Progress {
         stage: Stage::Diagnose,
         fraction: 0.0,
     });
-    let diagnosis = diagnose(model, &Tolerances::default(), log).map_err(|e| e.0)?;
+    let diagnosis = diagnose(model, &tol, log).map_err(|e| e.0)?;
     report.stages_run.push(Stage::Diagnose);
 
     emit(&WorkerMessage::Progress {
@@ -111,7 +110,34 @@ fn diagnose_and_select(
             }
         }
     }
-    Ok(mesher_io::vtp::overlay_vtp(model, &part_of, &overlay))
+    let mut files = vec![(
+        OVERLAY_FILE,
+        mesher_io::vtp::overlay_vtp(model, &part_of, &overlay),
+    )];
+
+    let Some(selected) = selected.filter(|_| !job.config.no_repair) else {
+        return Ok(files);
+    };
+    emit(&WorkerMessage::Progress {
+        stage: Stage::Repair,
+        fraction: 0.0,
+    });
+    let repaired = repair(model, &diagnosis, &selected, &tol, log).map_err(|e| e.0)?;
+    report.stages_run.push(Stage::Repair);
+    report.stages_run.push(Stage::SurfaceGate);
+    for r in &repaired {
+        if let Some(p) = report.parts.get_mut(r.part) {
+            p.repair = Some(r.summary);
+        }
+    }
+    if !repaired.is_empty() {
+        let surfaces: Vec<mesher_io::NamedSurface<'_>> = repaired
+            .iter()
+            .map(|r| (r.name.as_str(), &r.points[..], &r.faces[..]))
+            .collect();
+        files.push((REPAIRED_FILE, mesher_io::write_obj(&surfaces)));
+    }
+    Ok(files)
 }
 
 /// Write auxiliary files, then finish and write the report. Any write failure

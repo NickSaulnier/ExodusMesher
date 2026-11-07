@@ -159,7 +159,19 @@ fn multi_object_and_concave_crlf_inputs() {
     assert_eq!(parts, vec![("left", 4, true), ("right", 4, true)]);
     assert_eq!(
         report.stages_run,
-        vec![Stage::Parse, Stage::Diagnose, Stage::Select]
+        vec![
+            Stage::Parse,
+            Stage::Diagnose,
+            Stage::Select,
+            Stage::Repair,
+            Stage::SurfaceGate
+        ]
+    );
+    assert!(
+        report
+            .parts
+            .iter()
+            .all(|p| p.repair.is_some_and(|r| r.gate_passed))
     );
 
     // A single flat pentagon: parsed into 3 triangles, then diagnosed as an
@@ -253,4 +265,51 @@ fn malformed_job_exits_70() {
         .unwrap();
     child.stdin.take().unwrap().write_all(b"{not json").unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(70));
+}
+
+#[test]
+fn repair_writes_a_gated_surface_and_no_repair_stops_after_selection() {
+    // A cube with one face missing: repaired by filling the hole.
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("holed.obj");
+    let cube = std::fs::read_to_string(fixture("cube.obj")).unwrap();
+    std::fs::write(
+        &input,
+        cube.replace(
+            "f 5 6 7 8
+",
+            "",
+        ),
+    )
+    .unwrap();
+    let out = dir.path().join("out");
+    let run = run_worker(&input.display().to_string(), &out);
+    assert_eq!(run.exit_code, 10);
+    let report = run.report_file.unwrap();
+    let summary = report.parts[0].repair.unwrap();
+    assert!(summary.gate_passed);
+    assert_eq!((summary.faces_before, summary.faces_after), (10, 12));
+    let filled = report
+        .records
+        .iter()
+        .find(|r| r.stage == Stage::Repair && r.code == DefectCode::TopBoundaryEdge)
+        .unwrap();
+    assert_eq!(filled.outcome, Some(mesher_core::Outcome::Applied));
+    let repaired = std::fs::read_to_string(out.join("repaired.obj")).unwrap();
+    assert_eq!(repaired.lines().filter(|l| l.starts_with("f ")).count(), 12);
+
+    // Lint mode: same findings, nothing repaired, no repaired surface.
+    let out = dir.path().join("lint");
+    let mut job = job_for(&input.display().to_string(), &out);
+    job.config.no_repair = true;
+    let run = run_job(&job, &out);
+    assert_eq!(run.exit_code, 10);
+    let report = run.report_file.unwrap();
+    assert_eq!(
+        report.stages_run,
+        vec![Stage::Parse, Stage::Diagnose, Stage::Select]
+    );
+    assert!(report.parts[0].repair.is_none());
+    assert!(report.records.iter().all(|r| r.stage != Stage::Repair));
+    assert!(!out.join("repaired.obj").exists());
 }

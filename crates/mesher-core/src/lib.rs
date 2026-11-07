@@ -6,11 +6,12 @@ pub mod exit;
 pub mod model;
 pub mod overlay;
 pub mod protocol;
+pub mod repair;
 pub mod report;
 
 pub use exit::ExitStatus;
 pub use report::{
     Action, Attempt, AttemptOutcome, DefectCode, InputInfo, InputStats, JobConfig, Kernel,
-    Location, Outcome, PartSource, PartSummary, Record, RecordLog, Report, Severity, Stage,
-    Summary,
+    Location, Outcome, PartSource, PartSummary, Record, RecordLog, RepairSummary, Report, Severity,
+    Stage, Summary,
 };

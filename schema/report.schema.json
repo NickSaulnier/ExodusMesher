@@ -265,6 +265,11 @@
           "const": "GEO_CAPACITY_EXCEEDED"
         },
         {
+          "description": "A repair changed the shell count or enclosed volume beyond its limit",
+          "type": "string",
+          "const": "REPAIR_GUARD_EXCEEDED"
+        },
+        {
           "description": "Worker panicked, timed out or ran out of memory",
           "type": "string",
           "const": "MESH_WORKER_FAILED"
@@ -527,6 +532,17 @@
         "name": {
           "type": "string"
         },
+        "repair": {
+          "description": "Present when the part was repaired.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepairSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "selected": {
           "type": "boolean"
         },
@@ -624,6 +640,44 @@
         "code",
         "severity",
         "stage"
+      ]
+    },
+    "RepairSummary": {
+      "description": "Face and vertex counts through repair, and the surface gate's verdict.",
+      "type": "object",
+      "properties": {
+        "faces_after": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "faces_before": {
+          "description": "Triangles in the part as parsed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "gate_passed": {
+          "type": "boolean"
+        },
+        "vertices_after": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vertices_before": {
+          "description": "Vertices entering repair (after merging duplicates).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "faces_before",
+        "faces_after",
+        "vertices_before",
+        "vertices_after",
+        "gate_passed"
       ]
     },
     "Severity": {

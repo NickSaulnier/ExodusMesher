@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use mesher_core::protocol::{Job, REPORT_FILE};
-use mesher_core::{ExitStatus, JobConfig, Report, Severity};
+use mesher_core::{ExitStatus, JobConfig, Outcome, Report, Severity, Stage};
 
 #[derive(Parser)]
 #[command(
@@ -138,8 +138,15 @@ fn print_summary(report: &Report, report_path: Option<&str>) {
             report.parts.len()
         );
         for p in &report.parts {
+            let repair = p.repair.map_or_else(String::new, |r| {
+                format!(
+                    "; repaired to {} faces, gate {}",
+                    r.faces_after,
+                    if r.gate_passed { "passed" } else { "failed" }
+                )
+            });
             println!(
-                "    {}{} {}: {} triangles, {} shell{}",
+                "    {}{} {}: {} triangles, {} shell{}{repair}",
                 if p.selected { "*" } else { " " },
                 p.index,
                 p.name,
@@ -153,18 +160,49 @@ fn print_summary(report: &Report, report_path: Option<&str>) {
         "  findings: {} info, {} warnings, {} errors, {} fatal",
         s.info, s.warnings, s.errors, s.fatal
     );
+    // Findings per code, then what repair and the gate made of them. Counts come
+    // from the detailed records (the summary's per-code totals mix stages).
     for (code, count) in &s.by_code {
-        let first = report.records.iter().find(|r| r.code == *code);
+        let of_code = || report.records.iter().filter(|r| r.code == *code);
+        let found: Vec<_> = of_code()
+            .filter(|r| !matches!(r.stage, Stage::Repair | Stage::SurfaceGate))
+            .collect();
+        let tally = |stage: Stage, outcome: Option<Outcome>| {
+            of_code()
+                .filter(|r| r.stage == stage && (outcome.is_none() || r.outcome == outcome))
+                .count()
+        };
+        let mut after = Vec::new();
+        for (n, label) in [
+            (tally(Stage::Repair, Some(Outcome::Applied)), "repaired"),
+            (tally(Stage::Repair, Some(Outcome::Failed)), "repair failed"),
+            (tally(Stage::SurfaceGate, None), "still failing the gate"),
+        ] {
+            if n > 0 {
+                after.push(format!("{label} {n}"));
+            }
+        }
+        let first = found.first().copied().or_else(|| of_code().next());
         let severity = first.map_or(code.default_severity(), |r| r.severity);
         let at = first
             .and_then(|r| r.location.obj_lines.first())
             .map(|l| format!(", first at line {l}"))
             .unwrap_or_default();
+        let truncated = if count.reported < count.total {
+            "+"
+        } else {
+            ""
+        };
+        let after = if after.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", after.join(", "))
+        };
         println!(
-            "    {:<7} {} x{}{at}",
+            "    {:<7} {} x{}{truncated}{after}{at}",
             severity_label(severity),
             code.as_str(),
-            count.total
+            found.len()
         );
     }
     let stages: Vec<String> = report

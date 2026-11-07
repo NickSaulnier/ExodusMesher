@@ -15,6 +15,7 @@ schemars.workspace = true
 
 [dev-dependencies]
 jsonschema.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

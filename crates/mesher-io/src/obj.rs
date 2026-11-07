@@ -455,6 +455,33 @@ fn name<'a>(tokens: impl Iterator<Item = &'a [u8]>) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
+/// A named triangle surface: `(name, points, faces)` with 0-based indices.
+pub type NamedSurface<'a> = (&'a str, &'a [[f64; 3]], &'a [[u32; 3]]);
+
+/// Write triangle surfaces as OBJ text, one `o` object per surface, with
+/// full-precision coordinates. Deterministic.
+#[must_use]
+pub fn write_obj(surfaces: &[NamedSurface<'_>]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::from(
+        "# written by ExodusMesher
+",
+    );
+    let mut base = 1u64;
+    for (name, points, faces) in surfaces {
+        let _ = writeln!(s, "o {name}");
+        for p in *points {
+            let _ = writeln!(s, "v {} {} {}", p[0], p[1], p[2]);
+        }
+        for f in *faces {
+            let [a, b, c] = f.map(|v| u64::from(v) + base);
+            let _ = writeln!(s, "f {a} {b} {c}");
+        }
+        base += points.len() as u64;
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,5 +677,24 @@ f 4 1 5 8
             vec![(DefectCode::ParsePolygonFallback, vec![5])]
         );
         assert_eq!(log.records()[0].location.faces, vec![0, 1]);
+    }
+
+    #[test]
+    fn written_obj_parses_back() {
+        let pts = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.1, 0.2, 1e-17],
+        ];
+        let text = write_obj(&[
+            ("a", &pts[..3], &[[0, 1, 2]]),
+            ("b", &pts[1..], &[[0, 1, 2]]),
+        ]);
+        let (m, log) = parse(&text);
+        assert!(log.records().is_empty());
+        assert_eq!(m.objects, vec!["a", "b"]);
+        assert_eq!(m.vertices[5], pts[3]);
+        assert_eq!(m.triangles[1].vertices, [3, 4, 5]);
     }
 }

@@ -7,10 +7,11 @@
 //! duplicate faces set aside. That way one root cause gives one record (a
 //! duplicated vertex is reported as such, not as a ring of boundary edges).
 
+pub(crate) mod analysis;
 mod part;
 mod parts;
 mod select;
-mod uf;
+pub(crate) mod uf;
 mod weld;
 
 use mesher_geom::Aabb;
@@ -33,6 +34,13 @@ pub struct Tolerances {
     pub open_sheet_volume_ratio: f64,
     /// Bounding-box diagonals outside this range suggest wrong units.
     pub suspect_scale: (f64, f64),
+    /// Holes with more boundary edges than this are not filled.
+    pub max_hole_edges: usize,
+    /// Holes whose fill would be more than this fraction of the closed
+    /// shell's area are not filled (they may be intentional openings).
+    pub max_hole_fraction: f64,
+    /// Repairs may change the total enclosed volume by at most this fraction.
+    pub max_volume_change: f64,
 }
 
 impl Default for Tolerances {
@@ -42,6 +50,9 @@ impl Default for Tolerances {
             sliver_angle_degrees: 1.0,
             open_sheet_volume_ratio: 1e-6,
             suspect_scale: (1e-4, 1e6),
+            max_hole_edges: 256,
+            max_hole_fraction: 0.2,
+            max_volume_change: 0.01,
         }
     }
 }
@@ -64,6 +75,16 @@ pub struct Part {
     pub bounds: Aabb,
     /// A fatal defect means the part cannot be meshed.
     pub fatal: bool,
+    /// Clean-up that repair applies first, as diagnosis predicted it:
+    /// duplicate-vertex clusters (model vertex indices, two or more each)...
+    pub merged: Vec<Vec<u32>>,
+    /// ...degenerate faces removed, each with whether a T-junction split was
+    /// needed across its long edge...
+    pub degenerate: Vec<(u32, bool)>,
+    /// ...duplicate-face groups (the first copy is kept)...
+    pub duplicates: Vec<Vec<u32>>,
+    /// ...and the faces flipped to agree with their neighbours, per component.
+    pub reoriented: Vec<Vec<u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +119,7 @@ impl Diagnosis {
                     [p.bounds.min, p.bounds.max]
                 },
                 selected: selected.contains(&i),
+                repair: None,
             })
             .collect()
     }

@@ -520,6 +520,7 @@ version = "0.1.0"
 dependencies = [
  "jsonschema",
  "mesher-geom",
+ "proptest",
  "schemars",
  "serde",
  "serde_json",
@@ -550,6 +551,7 @@ version = "0.1.0"
 dependencies = [
  "mesher-core",
  "mesher-io",
+ "serde_json",
 ]
 
 [[package]]

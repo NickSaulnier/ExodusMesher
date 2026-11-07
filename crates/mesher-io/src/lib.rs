@@ -5,4 +5,4 @@ pub mod obj;
 pub mod vtp;
 
 pub use mesher_core::model::{Polygon, SurfaceModel, Triangle};
-pub use obj::{ObjModel, parse_obj, read_obj};
+pub use obj::{NamedSurface, ObjModel, parse_obj, read_obj, write_obj};

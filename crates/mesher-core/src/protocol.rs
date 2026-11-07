@@ -14,6 +14,9 @@ pub const REPORT_FILE: &str = "report.json";
 /// Name of the defect overlay the worker writes after diagnosis.
 pub const OVERLAY_FILE: &str = "defects.vtp";
 
+/// Name of the repaired surface the worker writes after repair.
+pub const REPAIRED_FILE: &str = "repaired.obj";
+
 /// Environment variable that makes the worker fail on purpose (`panic` or
 /// `hang`), so tests can exercise the front ends' failure handling.
 pub const TEST_FAULT_ENV: &str = "MESHER_TEST_FAULT";

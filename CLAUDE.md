@@ -4,7 +4,7 @@ Pure-Rust automatic surface + volume mesher for .obj files, with Exodus II outpu
 
 ## How to work
 
-- Build milestone by milestone (`PLAN.md` > Milestones). Do not start the next milestone until the current one's exit criterion passes. Track progress in the task checklists under `PLAN.md` > Phases and task breakdown, ticking items as they land. Milestones 1–3 are done; next is Milestone 4: Repair.
+- Build milestone by milestone (`PLAN.md` > Milestones). Do not start the next milestone until the current one's exit criterion passes. Track progress in the task checklists under `PLAN.md` > Phases and task breakdown, ticking items as they land. Milestones 1–4 are done; next is Milestone 5: Writers.
 - The synthetic defect suite lives in `tests/synthetic/` (workspace crate `mesher-synthetic`); run `cargo test -p mesher-synthetic -- --nocapture` to see precision and recall per code. Any new diagnosis or repair behaviour needs a case there.
 - Integration tests in `crates/*/tests/` allow `unwrap`/`expect`/`panic` at file level; library and binary code must not use them.
 - After changing report types, regenerate the committed schema: `UPDATE_SCHEMA=1 cargo test -p mesher-core --test schema`.

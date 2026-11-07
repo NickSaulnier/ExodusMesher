@@ -102,6 +102,7 @@ defect_codes! {
     MeshRecoveryFailed = "MESH_RECOVERY_FAILED", Error, "Constrained Delaunay could not recover a facet";
     MeshBudgetExceeded = "MESH_BUDGET_EXCEEDED", Error, "Steiner-point or element budget hit";
     GeoCapacityExceeded = "GEO_CAPACITY_EXCEEDED", Fatal, "Part too large for 32-bit vertex and face indices";
+    RepairGuardExceeded = "REPAIR_GUARD_EXCEEDED", Error, "A repair changed the shell count or enclosed volume beyond its limit";
     MeshWorkerFailed = "MESH_WORKER_FAILED", Error, "Worker panicked, timed out or ran out of memory";
     VolInvertedTet = "VOL_INVERTED_TET", Error, "Tetrahedron with non-positive volume";
     VolLowQuality = "VOL_LOW_QUALITY", Warning, "Non-orthogonality, skewness or volume ratio out of bounds";
@@ -514,6 +515,21 @@ pub struct PartSummary {
     /// Bounding box `[min, max]`.
     pub bounds: [[f64; 3]; 2],
     pub selected: bool,
+    /// Present when the part was repaired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<RepairSummary>,
+}
+
+/// Face and vertex counts through repair, and the surface gate's verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepairSummary {
+    /// Triangles in the part as parsed.
+    pub faces_before: u64,
+    pub faces_after: u64,
+    /// Vertices entering repair (after merging duplicates).
+    pub vertices_before: u64,
+    pub vertices_after: u64,
+    pub gate_passed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

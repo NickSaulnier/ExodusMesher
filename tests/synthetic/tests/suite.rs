@@ -1,6 +1,10 @@
-//! Milestone 3 exit criterion: every injected defect is detected with its exact
-//! location, and clean shapes produce no findings, at several scales and
-//! offsets. Prints precision and recall per defect code.
+//! Exit criteria for Milestones 3 and 4, at several scales and offsets:
+//! - diagnosis: every injected defect is detected with its exact location, and
+//!   clean shapes produce no findings (prints precision and recall per code);
+//! - repair: every repairable finding has a matching repair record, the
+//!   repaired parts pass the surface gate (or fail it exactly where expected),
+//!   no guard trips, and the face and vertex counts before and after repair are
+//!   fully explained by the repair records.
 
 #![allow(
     clippy::unwrap_used,
@@ -12,8 +16,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
+use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::report::MAX_LOCATION_ITEMS;
-use mesher_core::{DefectCode, JobConfig, Record, RecordLog};
+use mesher_core::{DefectCode, JobConfig, Outcome, Record, RecordLog, Stage};
 use mesher_io::parse_obj;
 use mesher_synthetic::{Scene, Solid};
 
@@ -34,6 +39,10 @@ struct Case {
     parts_count: Option<usize>,
     /// Also run scaled and translated copies.
     variants: bool,
+    /// Codes the surface gate should fail on after repair (empty: it passes).
+    gate_fails: Vec<DefectCode>,
+    /// Codes whose repair should be recorded as failed.
+    repair_fails: Vec<DefectCode>,
 }
 
 fn case(name: &'static str, scene: Scene, expect: Vec<(DefectCode, Key)>) -> Case {
@@ -44,6 +53,8 @@ fn case(name: &'static str, scene: Scene, expect: Vec<(DefectCode, Key)>) -> Cas
         expect,
         parts_count: None,
         variants: true,
+        gate_fails: Vec::new(),
+        repair_fails: Vec::new(),
     }
 }
 
@@ -175,6 +186,34 @@ fn cases() -> Vec<Case> {
             vec![(GeoDegenerateFace, faces([n]))],
         ));
     }
+    {
+        // A collapsed sliver at a T-junction: the front face uses the long edge
+        // p-q while the bottom face uses p-m and m-q.
+        let mut s = Solid::grid_cube(2);
+        let pts = s.points.clone();
+        let id = |p: [f64; 3]| s.find(p).unwrap();
+        let (p, m, q) = (
+            id([0.0, 0.0, 0.0]),
+            id([1.0, 0.0, 0.0]),
+            id([2.0, 0.0, 0.0]),
+        );
+        let (r, a, b) = (
+            id([1.0, 0.0, 1.0]),
+            id([0.0, 0.0, 1.0]),
+            id([2.0, 0.0, 1.0]),
+        );
+        s.tris.retain(|t| {
+            !t.iter()
+                .all(|&v| pts[v as usize][1] == 0.0 && pts[v as usize][2] <= 1.0)
+        });
+        s.tris.extend([[p, q, r], [p, r, a], [q, b, r], [p, m, q]]);
+        let n = s.tris.len() as u32 - 1;
+        out.push(case(
+            "degenerate face at a T-junction",
+            Scene::single(s),
+            vec![(GeoDegenerateFace, faces([n]))],
+        ));
+    }
     for (name, reversed) in [
         ("duplicate face", false),
         ("duplicate face, reversed", true),
@@ -221,11 +260,15 @@ fn cases() -> Vec<Case> {
                 .collect(),
             points: ico.points.clone(),
         };
-        out.push(case(
-            "hole, open bowl",
-            Scene::single(bowl),
-            vec![(TopBoundaryEdge, Key::Any)],
-        ));
+        out.push(Case {
+            gate_fails: vec![TopBoundaryEdge],
+            repair_fails: vec![TopBoundaryEdge],
+            ..case(
+                "hole, open bowl (too large to fill)",
+                Scene::single(bowl),
+                vec![(TopBoundaryEdge, Key::Any)],
+            )
+        });
     }
     {
         let s = cube().union(&Solid::cuboid([1.0, 1.0, 0.0], [2.0, 2.0, 1.0]));
@@ -313,18 +356,24 @@ fn cases() -> Vec<Case> {
     {
         let mut s = Solid::icosphere(1);
         s.points[0] = s.points[0].map(|c| -1.5 * c);
-        out.push(case(
-            "self-intersection (vertex pushed through)",
-            Scene::single(s),
-            vec![(IntSelfIntersection, Key::Any)],
-        ));
+        out.push(Case {
+            gate_fails: vec![IntSelfIntersection],
+            ..case(
+                "self-intersection (vertex pushed through)",
+                Scene::single(s),
+                vec![(IntSelfIntersection, Key::Any)],
+            )
+        });
     }
     let shifted = || Solid::cuboid([0.5, 0.25, 0.25], [1.5, 1.25, 1.25]);
-    out.push(case(
-        "shell overlap within one part",
-        Scene::default().with(Some("pair"), cube().union(&shifted())),
-        vec![(IntShellOverlap, Key::Any)],
-    ));
+    out.push(Case {
+        gate_fails: vec![IntShellOverlap],
+        ..case(
+            "shell overlap within one part",
+            Scene::default().with(Some("pair"), cube().union(&shifted())),
+            vec![(IntShellOverlap, Key::Any)],
+        )
+    });
 
     // PART_
     out.push(case(
@@ -388,12 +437,13 @@ fn cases() -> Vec<Case> {
     out
 }
 
-struct Outcome {
+struct Run {
     records: Vec<Record>,
     parts: usize,
+    repaired: Vec<RepairedPart>,
 }
 
-fn run(scene: &Scene, parts: &[&str]) -> Outcome {
+fn run(scene: &Scene, parts: &[&str]) -> Run {
     let obj = scene.to_obj();
     let mut log = RecordLog::new();
     let model = parse_obj(obj.as_bytes(), &mut log, &mut |_| {});
@@ -407,13 +457,132 @@ fn run(scene: &Scene, parts: &[&str]) -> Outcome {
         parts: parts.iter().map(|s| (*s).to_owned()).collect(),
         ..JobConfig::default()
     };
+    let mut repaired = Vec::new();
     if let Some(selected) = select_parts(&diagnosis, &config, &mut log) {
         let mut overlay = diagnosis.overlay.clone();
         check_part_pairs(&model, &diagnosis, &selected, &mut log, &mut overlay).unwrap();
+        repaired = repair(
+            &model,
+            &diagnosis,
+            &selected,
+            &Tolerances::default(),
+            &mut log,
+        )
+        .unwrap();
     }
-    Outcome {
+    Run {
         records: log.records().to_vec(),
         parts: diagnosis.parts.len(),
+        repaired,
+    }
+}
+
+/// How the suite compares locations for each repairable code.
+fn repair_key(code: DefectCode, r: &Record) -> Option<Key> {
+    use DefectCode::*;
+    match code {
+        GeoDegenerateFace | GeoDuplicateFace | TopInconsistentOrientation | TopInvertedShell => {
+            Some(Key::Faces(r.location.faces.clone()))
+        }
+        GeoDuplicateVertex | TopBoundaryEdge | TopNonmanifoldEdge | TopNonmanifoldVertex => {
+            Some(Key::Vertices(r.location.vertices.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn check_repair(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) {
+    let repaired: BTreeSet<&str> = run.repaired.iter().map(|r| r.name.as_str()).collect();
+    let stage = |s: Stage| run.records.iter().filter(move |r| r.stage == s);
+
+    // Every repairable finding on a repaired part has its repair record.
+    for finding in stage(Stage::Diagnose) {
+        let Some(key) = repair_key(finding.code, finding) else {
+            continue;
+        };
+        if !finding
+            .part
+            .as_deref()
+            .is_some_and(|p| repaired.contains(p))
+        {
+            continue;
+        }
+        let want = if c.repair_fails.contains(&finding.code) {
+            Outcome::Failed
+        } else {
+            Outcome::Applied
+        };
+        let found = stage(Stage::Repair).any(|r| {
+            r.code == finding.code
+                && r.part == finding.part
+                && r.outcome == Some(want)
+                && repair_key(r.code, r) == Some(key.clone())
+        });
+        if !found {
+            failures.push(format!(
+                "{label}: no {want:?} repair record for {} at {key:?}",
+                finding.code.as_str()
+            ));
+        }
+    }
+
+    // Gate verdict and guards.
+    let gate: BTreeSet<DefectCode> = stage(Stage::SurfaceGate).map(|r| r.code).collect();
+    let want: BTreeSet<DefectCode> = c.gate_fails.iter().copied().collect();
+    if gate != want {
+        failures.push(format!(
+            "{label}: gate failed on {gate:?}, expected {want:?}"
+        ));
+    }
+    for p in &run.repaired {
+        if p.summary.gate_passed != want.is_empty() {
+            failures.push(format!(
+                "{label}: part {} gate_passed = {}",
+                p.name, p.summary.gate_passed
+            ));
+        }
+    }
+    if run
+        .records
+        .iter()
+        .any(|r| r.code == DefectCode::RepairGuardExceeded)
+    {
+        failures.push(format!("{label}: a repair guard tripped"));
+    }
+
+    // Accounting: counts before and after are explained by the repair records.
+    for p in &run.repaired {
+        let applied: Vec<&Record> = stage(Stage::Repair)
+            .filter(|r| {
+                r.part.as_deref() == Some(p.name.as_str()) && r.outcome == Some(Outcome::Applied)
+            })
+            .collect();
+        let sum = |k: &str| -> i64 {
+            applied
+                .iter()
+                .map(|r| {
+                    r.measured
+                        .get(k)
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0)
+                })
+                .sum()
+        };
+        let s = p.summary;
+        let faces = s.faces_after as i64 - s.faces_before as i64;
+        if faces != sum("faces_added") - sum("faces_removed") {
+            failures.push(format!(
+                "{label}: part {} face count change {faces} not explained by records",
+                p.name
+            ));
+        }
+        let verts = s.vertices_after as i64 - s.vertices_before as i64;
+        if verts != sum("vertices_added") {
+            failures.push(format!(
+                "{label}: part {} vertex count change {verts} not explained by records",
+                p.name
+            ));
+        }
     }
 }
 
@@ -444,8 +613,13 @@ fn synthetic_suite() {
                     failures.push(format!("{label}: {} parts, expected {n}", outcome.parts));
                 }
             }
+            check_repair(&c, &outcome, &label, &mut failures);
             let mut detected: BTreeMap<DefectCode, Vec<&Record>> = BTreeMap::new();
-            for r in &outcome.records {
+            for r in outcome
+                .records
+                .iter()
+                .filter(|r| matches!(r.stage, Stage::Diagnose | Stage::Select))
+            {
                 detected.entry(r.code).or_default().push(r);
             }
             let codes: BTreeSet<DefectCode> = detected

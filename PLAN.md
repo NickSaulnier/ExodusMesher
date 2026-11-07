@@ -196,6 +196,7 @@ Every finding is a structured record with a stable code, a severity, a location 
 | `MESH_RECOVERY_FAILED` | Constrained Delaunay could not recover a facet | Error, triggers fallback |
 | `MESH_BUDGET_EXCEEDED` | Steiner-point or element budget hit | Error, triggers fallback |
 | `GEO_CAPACITY_EXCEEDED` | Part too large for 32-bit vertex and face indices | Fatal |
+| `REPAIR_GUARD_EXCEEDED` | A repair changed the shell count or enclosed volume beyond its limit | Error |
 | `MESH_WORKER_FAILED` | Worker panicked, timed out or ran out of memory | Error, triggers fallback |
 | `VOL_INVERTED_TET` | Tetrahedron with non-positive volume | Error |
 | `VOL_LOW_QUALITY` | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
@@ -387,17 +388,31 @@ Crates are created when their first milestone starts, so early builds do not pul
 - *Parts.* `o` objects take precedence over `g` groups; faces before the first statement form the part `default`. Without either, parts are connected components through shared merged vertices, and an inward-facing component inside another joins it as a cavity. Parts are ordered by their first triangle; `--parts` takes names or 1-based indices.
 - *Part pairs.* Exact contact classification (`mesher_geom::classify_contact`): faces that cross each other, or coplanar faces sharing area with normals aligned, mean overlapping volumes (`PART_OVERLAP`); coplanar faces sharing area with opposed normals form an interface (`PART_SHARED_INTERFACE`); contact along edges or points only is ignored. With no contact at all, a winding-number test catches one part inside another.
 - *Known limitation.* Two faces that cross each other's planes but meet at a single point are classified as crossing, so parts touching edge-to-edge at a point can be reported as overlapping. Revisit if real inputs hit it.
-- *Exit code during Milestone 3.* Diagnosis warnings give exit 10 ("succeeded after repairs") although repair does not run until Milestone 4; the label becomes accurate then.
+- *Exit code during Milestone 3.* Diagnosis warnings gave exit 10 ("succeeded after repairs") before repair existed; since Milestone 4 that is accurate, except in `--no-repair` mode, where 10 means "repairable defects found".
 - *Deferred to Milestone 10:* a per-file time budget for the intersection tests, which are quadratic in the worst case (every face box overlapping every other).
 
 ### Phase 3: Repair and output
 
-**Milestone 4: Repair.**
+**Milestone 4: Repair.** Done (Nov 7, 2026): in the synthetic suite every repairable finding has a matching applied repair record, every repaired part passes the surface gate except the three cases built to fail it (a hole too large to fill, a self-intersection, overlapping shells), no guard trips, and each part's face and vertex counts before and after are fully explained by its repair records. A mutation check (disabling hole filling, then edge pairing) makes the suite fail exactly on the affected cases.
 
-- [ ] Ordered repairs: merge, remove degenerates and duplicates, reorient, flip inverted shells, split non-manifold edges and vertices, fill small holes
-- [ ] Provenance maps updated by every repair; before-and-after logged per record
-- [ ] Shell-count and enclosed-volume guards
-- [ ] Surface gate; `--no-repair` stops after diagnosis
+- [x] Ordered repairs: merge, remove degenerates and duplicates, reorient, flip inverted shells, split non-manifold edges and vertices, fill small holes
+- [x] Provenance maps updated by every repair; before-and-after logged per record
+- [x] Shell-count and enclosed-volume guards (`REPAIR_GUARD_EXCEEDED`)
+- [x] Surface gate; `--no-repair` stops after diagnosis
+- [x] T-junctions: a collinear (collapsed) face is removed by splitting the face across its long edge at the middle vertex, in the shared clean-up, so diagnosis and repair agree
+- [x] Worker writes `repaired.obj` (one object per repaired part); the report's part summaries gain face and vertex counts and the gate verdict; the CLI shows both
+- [x] Property test: diagnosis and repair are total and deterministic on random degenerate-heavy soups (20,000 cases run once)
+
+**Decisions made in Milestone 4.**
+
+- *One analysis, three stages.* `diagnose::analysis::analyze_surface` computes every topological and geometric fact once; diagnosis, repair and the gate each turn it into their own records, so the gate judges exactly what diagnosis judges.
+- *Diagnosis predicts the clean-up.* Merging, removing degenerate and duplicate faces, T-junction splits and reorientation happen in diagnosis's clean-up (they are needed to diagnose root causes); repair records them as applied and continues from that surface.
+- *Repair record severity.* A fix applied is `info` (its finding already carries the warning, so warnings are not counted twice); a fix that could not be made is `error`. Records carry `faces_added`, `faces_removed` and `vertices_added`, so counts before and after can be audited.
+- *Non-manifold splitting is exact.* Faces around an edge are sorted by angle with `orient3d` and paired as solids (a face traversing the edge `v→u` followed counter-clockwise by one traversing `u→v`); fans at each vertex then get their own vertex copies. Copies keep their origin, and the gate's intersection test uses origins, so solids that met at a split edge or vertex are not flagged for touching there.
+- *Hole filling.* Only simple loops (each vertex with one boundary edge in and one out) of at most 256 edges whose fill is at most 20% of the closed shell's area; ear clipping in the loop's plane, else a fan from a new centroid vertex. Larger holes are left open as possible intentional openings (`TOP_BOUNDARY_EDGE`, outcome `failed`, severity `error`).
+- *Guards.* Vertex-connected pieces (by origin) must not change, and the total enclosed volume (sum of absolute shell volumes, holes closed) must change by at most 1%.
+- *Gate.* One `surface_gate` error per failed check per part: holes, non-manifold edges or vertices, inconsistent orientation, inverted shells, open sheets, self-intersections, shell overlaps. Slivers are not gated (remeshing is Milestone 10).
+- *Not repaired here:* self-intersections and shell overlaps (the stuffing fallback, Milestone 6), slivers (remeshing, Milestone 10), and bare T-junction slits with no collapsed face to remove (they show as zero-area holes that filling refuses).
 
 **Milestone 5: Writers.**
 
