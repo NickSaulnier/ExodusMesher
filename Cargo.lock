@@ -765,6 +765,7 @@ dependencies = [
  "mesher-core",
  "mesher-geom",
  "mesher-io",
+ "mesher-tet",
  "netcdf3",
  "tempfile",
  "tritet",

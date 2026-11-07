@@ -16,6 +16,7 @@ mesher-geom.workspace = true
 workspace = true
 
 [dev-dependencies]
+mesher-tet.workspace = true
 mesher-io.workspace = true
 netcdf3.workspace = true
 tempfile.workspace = true

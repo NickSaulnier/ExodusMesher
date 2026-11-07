@@ -457,7 +457,21 @@ Crates are created when their first milestone starts, so early builds do not pul
 - *Exit code 20 for every meshed run* until the Delaunay kernel lands: stuffing is by definition the fallback.
 - *Known gap:* a feature thinner than the element size is lost (the synthetic spike case is rejected at 15% deviation); the fix is a smaller element size or, later, grading.
 
-**Milestone 7: Delaunay kernel.** Flat tet array with ghost vertex, BRIO insertion, walking point location, Bowyer–Watson; property tests and TetGen comparison.
+**Milestone 7: Delaunay kernel.** Done (Nov 7, 2026): on random point sets of 5 to 20,000 points, and on clustered point sets spanning three orders of magnitude in scale, the tetrahedralization matches TetGen's exactly (same count, same tets).
+
+- [x] `mesher_tet::delaunay`: flat tet array with four vertices and four neighbours each, free list, ghost vertex at infinity (always stored last), positively oriented real tets
+- [x] Bowyer–Watson insertion with exact predicates; ghost conflict: beyond the hull face, or coplanar and strictly inside its circumcircle; visibility walk with deterministic pseudo-random face order (scan fallback)
+- [x] BRIO: seeded shuffle, rounds of doubling size, Morton order within each round
+- [x] Incremental `insert` for later Steiner points; `check()` for structural invariants; exact duplicates reported, not inserted; all-coplanar input refused (`DelaunayError::Flat`)
+- [x] Property tests against brute force: structure valid, every distinct point a vertex, no point strictly inside any circumsphere, faces conform, hull closed, outward and convex. Inputs: random points, integer grids, exactly cospherical points (all 30 integer points with x² + y² + z² = 25, with and without the centre), cube-surface grids, nearly flat sets (6,000 cases each run once)
+- [x] TetGen comparison in `tests/oracle/tetgen_delaunay.rs`
+
+**Decisions made in Milestone 7.**
+
+- *Exact coplanar in-circle without projection.* `in_circumcircle_coplanar` uses `insphere` with an off-plane point: every sphere through three points meets their plane in their circumcircle. A first version projected onto a coordinate plane, which keeps orientations but turns circles into ellipses; the cube-grid property test caught it. A regression test on the tilted plane x + y + z = 3 guards it.
+- *Walks never start on a ghost.* The last-created tet can be a ghost; starting the walk there located points in the wrong tet (found by inserting a cube's centre). The walk now steps into the hull first, and a cavity is never seeded from a ghost the point does not conflict with.
+- *Cavity growth for degeneracies.* If a cavity boundary face cannot see the new point (only possible with cospherical or coplanar points), the cavity grows across it; the result stays a valid triangulation, and on the degenerate test sets it stays Delaunay.
+- *Performance.* About 2.3× TetGen's time in release builds (146 ms against 63 ms for 20,000 points). Profiling is deferred to Milestone 10, as the risk table says.
 
 **Milestone 8: Recovery and refinement.** Edge and facet recovery with a Steiner budget, region marking, Delaunay refinement, sliver removal, finite-volume quality metrics, `mesher-fvm` Poisson check.
 

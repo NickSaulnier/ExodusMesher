@@ -4,7 +4,7 @@ Pure-Rust automatic surface + volume mesher for .obj files, with Exodus II outpu
 
 ## How to work
 
-- Build milestone by milestone (`PLAN.md` > Milestones). Do not start the next milestone until the current one's exit criterion passes. Track progress in the task checklists under `PLAN.md` > Phases and task breakdown, ticking items as they land. Milestones 1–4 are done. Milestone 5 (Writers) is done and checked in ParaView; only its SEACAS check is open, deferred by decision (do it before Milestone 10). Milestone 6 (Stuffing kernel) is done; next is Milestone 7: Delaunay kernel.
+- Build milestone by milestone (`PLAN.md` > Milestones). Do not start the next milestone until the current one's exit criterion passes. Track progress in the task checklists under `PLAN.md` > Phases and task breakdown, ticking items as they land. Milestones 1–4 are done. Milestone 5 (Writers) is done and checked in ParaView; only its SEACAS check is open, deferred by decision (do it before Milestone 10). Milestones 6 (Stuffing) and 7 (Delaunay) are done; next is Milestone 8: Recovery and refinement.
 - The synthetic defect suite lives in `tests/synthetic/` (workspace crate `mesher-synthetic`); run `cargo test -p mesher-synthetic -- --nocapture` to see precision and recall per code. Any new diagnosis or repair behaviour needs a case there.
 - TetGen oracle tests live in `tests/oracle/` (crate `mesher-oracle`, needs MSVC); they write sample files to `target/tmp/oracle/`.
 - Integration tests in `crates/*/tests/` allow `unwrap`/`expect`/`panic` at file level; library and binary code must not use them.

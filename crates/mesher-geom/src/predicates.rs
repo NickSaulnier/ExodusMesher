@@ -68,6 +68,39 @@ pub fn orient2d(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Sign {
     Sign::of(robust::orient2d(coord2(a), coord2(b), coord2(c)))
 }
 
+/// Exact in-circle test: `Positive` when `d` is strictly inside the circle
+/// through `a`, `b`, `c` given counter-clockwise; the sign reverses for
+/// clockwise `a`, `b`, `c`; `Zero` when concyclic.
+#[must_use]
+pub fn incircle(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> Sign {
+    Sign::of(robust::incircle(coord2(a), coord2(b), coord2(c), coord2(d)))
+}
+
+/// Is `d` strictly inside the circumcircle of triangle `abc`, all four
+/// coplanar in 3D? `false` for a degenerate triangle.
+///
+/// Exact without projecting (a projection onto a coordinate plane keeps
+/// orientations but turns circles into ellipses): every sphere through `a`,
+/// `b`, `c` meets their plane in exactly their circumcircle, so `d` is inside
+/// the circle exactly when it is inside the sphere through `a`, `b`, `c` and
+/// any point `q` off the plane. `q` is `a` moved along an axis on which the
+/// plane's normal is exactly nonzero, so it is exactly off the plane.
+#[must_use]
+pub fn in_circumcircle_coplanar(a: Point3, b: Point3, c: Point3, d: Point3) -> bool {
+    let Some(k) = plane_axis(a, b, c) else {
+        return false;
+    };
+    let mut q = a;
+    q[k] = if a[k] + 1.0 != a[k] {
+        a[k] + 1.0
+    } else {
+        a[k] * 2.0
+    };
+    let side = orient3d(a, b, c, q);
+    let inside = insphere(a, b, c, q, d);
+    side != Sign::Zero && inside != Sign::Zero && inside == side
+}
+
 /// Exact 3D orientation: the sign of `det[b-a, c-a, d-a]`, `Positive` for a
 /// positive-volume tetrahedron `abcd`.
 #[must_use]
@@ -177,6 +210,50 @@ mod tests {
         assert!(collinear(O, X, [-7.0, 0.0, 0.0]));
         assert!(collinear(O, O, O));
         assert!(!collinear(O, X, Y));
+    }
+
+    #[test]
+    fn incircle_and_coplanar_circumcircle() {
+        let (a, b, c) = ([0.0, 0.0], [1.0, 0.0], [0.0, 1.0]);
+        assert_eq!(incircle(a, b, c, [0.4, 0.4]), Sign::Positive);
+        assert_eq!(incircle(a, b, c, [2.0, 2.0]), Sign::Negative);
+        assert_eq!(incircle(a, b, c, [1.0, 1.0]), Sign::Zero);
+        assert_eq!(incircle(a, c, b, [0.4, 0.4]), Sign::Negative);
+        // The same in a tilted plane z = x.
+        let lift = |p: [f64; 2]| [p[0], p[1], p[0]];
+        assert!(in_circumcircle_coplanar(
+            lift(a),
+            lift(b),
+            lift(c),
+            lift([0.4, 0.4])
+        ));
+        assert!(in_circumcircle_coplanar(
+            lift(a),
+            lift(c),
+            lift(b),
+            lift([0.4, 0.4])
+        ));
+        assert!(!in_circumcircle_coplanar(
+            lift(a),
+            lift(b),
+            lift(c),
+            lift([1.0, 1.0])
+        ));
+        // A plane where projecting onto a coordinate plane distorts circles:
+        // x + y + z = 3. (4, 1, 3) are on a circle about (1, 1, 1) of radius
+        // sqrt(2); (-1, 2, 2) is outside it, (1, 1, 1) inside.
+        let (p4, p1, p3) = ([2.0, 0.0, 1.0], [1.0, 2.0, 0.0], [1.0, 0.0, 2.0]);
+        assert!(!in_circumcircle_coplanar(p4, p1, p3, [-1.0, 2.0, 2.0]));
+        assert!(in_circumcircle_coplanar(p4, p1, p3, [1.0, 1.0, 1.0]));
+        assert!(in_circumcircle_coplanar(p4, p3, p1, [1.0, 1.0, 1.0]));
+        // Far from the origin, where a + 1 would round.
+        let big = |p: Point3| p.map(|x| x + 1e17);
+        assert!(!in_circumcircle_coplanar(
+            big(p4),
+            big(p1),
+            big(p3),
+            big([-1.0, 2.0, 2.0])
+        ));
     }
 
     #[test]
