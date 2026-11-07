@@ -1,12 +1,16 @@
 //! Report types, exit codes and the worker protocol shared by every ExodusMesher
 //! crate. Later milestones add parts, diagnosis, repair, gates and sizing here.
 
+pub mod diagnose;
 pub mod exit;
+pub mod model;
+pub mod overlay;
 pub mod protocol;
 pub mod report;
 
 pub use exit::ExitStatus;
 pub use report::{
     Action, Attempt, AttemptOutcome, DefectCode, InputInfo, InputStats, JobConfig, Kernel,
-    Location, Outcome, Record, RecordLog, Report, Severity, Stage, Summary,
+    Location, Outcome, PartSource, PartSummary, Record, RecordLog, Report, Severity, Stage,
+    Summary,
 };

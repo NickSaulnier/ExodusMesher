@@ -519,6 +519,7 @@ name = "mesher-core"
 version = "0.1.0"
 dependencies = [
  "jsonschema",
+ "mesher-geom",
  "schemars",
  "serde",
  "serde_json",
@@ -541,6 +542,14 @@ dependencies = [
  "mesher-geom",
  "proptest",
  "serde_json",
+]
+
+[[package]]
+name = "mesher-synthetic"
+version = "0.1.0"
+dependencies = [
+ "mesher-core",
+ "mesher-io",
 ]
 
 [[package]]

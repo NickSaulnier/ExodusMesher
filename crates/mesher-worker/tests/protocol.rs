@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use mesher_core::protocol::{Job, PROTOCOL_VERSION, WorkerMessage};
-use mesher_core::{DefectCode, JobConfig, Report};
+use mesher_core::{DefectCode, JobConfig, Report, Stage};
 
 fn fixture(name: &str) -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -24,12 +24,19 @@ struct Run {
     report_file: Option<Report>,
 }
 
-fn run_worker(input: &str, out: &Path) -> Run {
-    let job = Job {
+fn job_for(input: &str, out: &Path) -> Job {
+    Job {
         input: input.to_owned(),
         output_dir: out.display().to_string(),
         config: JobConfig::default(),
-    };
+    }
+}
+
+fn run_worker(input: &str, out: &Path) -> Run {
+    run_job(&job_for(input, out), out)
+}
+
+fn run_job(job: &Job, out: &Path) -> Run {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mesher-worker"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -40,7 +47,7 @@ fn run_worker(input: &str, out: &Path) -> Run {
         .stdin
         .take()
         .unwrap()
-        .write_all(serde_json::to_string(&job).unwrap().as_bytes())
+        .write_all(serde_json::to_string(job).unwrap().as_bytes())
         .unwrap();
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -140,14 +147,62 @@ fn multi_object_and_concave_crlf_inputs() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("two_objects.obj"), dir.path());
     assert_eq!(run.exit_code, 0);
-    let stats = run.report_file.unwrap().input.stats.unwrap();
+    let report = run.report_file.unwrap();
+    let stats = report.input.stats.as_ref().unwrap();
     assert_eq!(stats.objects, vec!["left", "right"]);
     assert_eq!(stats.groups, vec!["left_shell"]);
+    let parts: Vec<(&str, u64, bool)> = report
+        .parts
+        .iter()
+        .map(|p| (p.name.as_str(), p.triangles, p.selected))
+        .collect();
+    assert_eq!(parts, vec![("left", 4, true), ("right", 4, true)]);
+    assert_eq!(
+        report.stages_run,
+        vec![Stage::Parse, Stage::Diagnose, Stage::Select]
+    );
 
+    // A single flat pentagon: parsed into 3 triangles, then diagnosed as an
+    // open sheet, which is fatal for its part.
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("concave_pentagon_crlf.obj"), dir.path());
+    assert_eq!(run.exit_code, 30);
+    let report = run.report_file.unwrap();
+    assert_eq!(report.input.stats.unwrap().triangles, 3);
+    let codes: Vec<DefectCode> = report.records.iter().map(|r| r.code).collect();
+    assert_eq!(codes, vec![DefectCode::TopOpenSheet]);
+    assert_eq!(report.records[0].location.faces, vec![0, 1, 2]);
+}
+
+#[test]
+fn diagnosis_writes_an_overlay_and_honours_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_worker(&fixture("cube.obj"), dir.path());
     assert_eq!(run.exit_code, 0);
-    assert_eq!(run.report_file.unwrap().input.stats.unwrap().triangles, 3);
+    let vtp = std::fs::read_to_string(dir.path().join("defects.vtp")).unwrap();
+    assert!(vtp.contains(r#"NumberOfPoints="8""#) && vtp.contains(r#"NumberOfPolys="12""#));
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("two_objects.obj"), dir.path());
+    job.config.parts = vec!["right".into()];
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 0);
+    let selected: Vec<bool> = run
+        .report_file
+        .unwrap()
+        .parts
+        .iter()
+        .map(|p| p.selected)
+        .collect();
+    assert_eq!(selected, vec![false, true]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("two_objects.obj"), dir.path());
+    job.config.parts = vec!["middle".into()];
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 30);
+    let report = run.report_file.unwrap();
+    assert_eq!(report.records[0].code, DefectCode::PartEmptySelection);
 }
 
 #[test]

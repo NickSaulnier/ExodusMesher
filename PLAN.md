@@ -8,7 +8,7 @@ Build, entirely in Rust, a mesher that turns any .obj file into a validated surf
 
 **Input class.** OBJ files as they occur in the wild: triangles, quads and n-gons; multiple objects and groups; duplicate vertices; degenerate faces; holes; non-manifold edges; self-intersections; inconsistent orientation; several or nested shells; unknown units. Normals, texture coordinates and materials are read and ignored.
 
-**Parts.** Each `o` object or `g` group is a part; a file with neither is split into connected components. The GUI and the CLI's `--parts` flag select which parts to mesh.
+**Parts.** Each `o` object is a part (or, in a file without `o`, each `g` group); a file with neither is split into connected components, with enclosed cavities kept in the component around them. The GUI and the CLI's `--parts` flag select which parts to mesh.
 
 **Outputs.**
 
@@ -195,6 +195,7 @@ Every finding is a structured record with a stable code, a severity, a location 
 | `QUAL_SUSPECT_SCALE` | Bounding box suggests wrong units | Info; tolerances are relative |
 | `MESH_RECOVERY_FAILED` | Constrained Delaunay could not recover a facet | Error, triggers fallback |
 | `MESH_BUDGET_EXCEEDED` | Steiner-point or element budget hit | Error, triggers fallback |
+| `GEO_CAPACITY_EXCEEDED` | Part too large for 32-bit vertex and face indices | Fatal |
 | `MESH_WORKER_FAILED` | Worker panicked, timed out or ran out of memory | Error, triggers fallback |
 | `VOL_INVERTED_TET` | Tetrahedron with non-positive volume | Error |
 | `VOL_LOW_QUALITY` | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
@@ -364,15 +365,30 @@ Crates are created when their first milestone starts, so early builds do not pul
 - *Vectors.* Points are plain `[f64; 3]` with small helpers in `mesher-geom::vec3`; `nalgebra` waits until a milestone needs matrices (smoothing, sizing).
 - *Floating-point queries.* Ray casts and nearest points are measurements, not topology. Their BVH culling is padded so it never drops a triangle a linear scan would accept; tests compare results within `1e-9` relative.
 
-**Milestone 3: Diagnosis and parts.**
+**Milestone 3: Diagnosis and parts.** Done (Nov 7, 2026): the synthetic suite (`tests/synthetic/`: 33 cases, 95 runs across three scales and offsets) shows precision and recall of 1.000 for every code it covers, with zero findings on the clean shapes.
 
-- [ ] Map `GeomError` to records: non-finite coordinates and out-of-range indices cannot reach diagnosis from the parser (assert in tests); `TooLarge` needs a new code (add it to the taxonomy then)
-- [ ] Exclude degenerate faces from intersection tests (they get `GEO_DEGENERATE_FACE`; `faces_intersect` falls back to plain contact for them)
-- [ ] Part splitting: `o`/`g` names, else connected components
-- [ ] Detectors for every `GEO_`, `TOP_`, `INT_`, `PART_` and `QUAL_` code
-- [ ] Relative tolerances from the bounding-box diagonal; `QUAL_SUSPECT_SCALE`
-- [ ] Defect overlay writer (.vtp)
-- [ ] Synthetic suite in `tests/synthetic/`: clean shapes plus one-defect injectors, asserting exact codes and locations; precision and recall per code
+- [x] Map `GeomError` to records: `TooLarge` becomes the new `GEO_CAPACITY_EXCEEDED` (fatal for the part); the other variants cannot come from the parser, so they surface as `MESH_WORKER_FAILED` with exit code 70 (a bug)
+- [x] Exclude degenerate faces from intersection tests (they get `GEO_DEGENERATE_FACE`; `faces_intersect` falls back to plain contact for them)
+- [x] Part splitting: `o`/`g` names, else connected components (cavities stay with the component that encloses them)
+- [x] Detectors for every `GEO_`, `TOP_`, `INT_`, `PART_` and `QUAL_` code (all but `GEO_CAPACITY_EXCEEDED` exercised by the suite)
+- [x] Relative tolerances from the bounding-box diagonal; `QUAL_SUSPECT_SCALE`
+- [x] Defect overlay writer (.vtp), written by the worker as `defects.vtp`
+- [x] Synthetic suite in `tests/synthetic/`: clean shapes plus one-defect injectors, asserting exact codes and locations; precision and recall per code
+- [x] Worker runs parse, diagnose and select; the report gains `parts` (index, name, source, triangle, vertex and shell counts, bounds, selection) for the GUI part tree; the CLI prints them
+
+**Decisions made in Milestone 3.**
+
+- *Diagnose on the repaired-to-be surface.* Topology is judged after merging duplicate vertices and setting aside degenerate and duplicate faces, the first steps repair will take. One root cause gives one record: a duplicated vertex is reported once, not as a ring of boundary edges. Every diagnosis record has outcome `deferred`.
+- *Locations.* `faces` are triangle indices (a polygon's triangles are consecutive); `vertices` are model indices, with merged vertices named by the smallest index in their cluster. Location lists are capped at 256 entries, with full counts in `measured` (`faces_total` and so on).
+- *Records are per root cause, not per element:* one `TOP_BOUNDARY_EDGE` per hole (boundary loop), one `TOP_INCONSISTENT_ORIENTATION` per orientation component (listing the minority faces to flip), one `INT_SHELL_OVERLAP` per pair of shells, but one `INT_SELF_INTERSECTION` per face pair.
+- *Thresholds* (`diagnose::Tolerances`, not yet user-configurable): merge tolerance 1e-7 × diagonal; sliver below 1°; open sheet when the shell's volume with holes closed is at most 1e-6 × area^1.5; suspect scale when the diagonal is outside [1e-4, 1e6].
+- *Inverted shells use nesting.* A shell's expected volume sign alternates with how many other disjoint shells of its part contain it (by winding number), so cavities are legitimately inward-facing. Shells that intersect each other are excluded from nesting and reported as `INT_SHELL_OVERLAP` instead.
+- *Open sheets suppress their holes.* A shell that encloses nothing gets `TOP_OPEN_SHEET` (fatal for the part) and no `TOP_BOUNDARY_EDGE` records, since filling holes cannot help it.
+- *Parts.* `o` objects take precedence over `g` groups; faces before the first statement form the part `default`. Without either, parts are connected components through shared merged vertices, and an inward-facing component inside another joins it as a cavity. Parts are ordered by their first triangle; `--parts` takes names or 1-based indices.
+- *Part pairs.* Exact contact classification (`mesher_geom::classify_contact`): faces that cross each other, or coplanar faces sharing area with normals aligned, mean overlapping volumes (`PART_OVERLAP`); coplanar faces sharing area with opposed normals form an interface (`PART_SHARED_INTERFACE`); contact along edges or points only is ignored. With no contact at all, a winding-number test catches one part inside another.
+- *Known limitation.* Two faces that cross each other's planes but meet at a single point are classified as crossing, so parts touching edge-to-edge at a point can be reported as overlapping. Revisit if real inputs hit it.
+- *Exit code during Milestone 3.* Diagnosis warnings give exit 10 ("succeeded after repairs") although repair does not run until Milestone 4; the label becomes accurate then.
+- *Deferred to Milestone 10:* a per-file time budget for the intersection tests, which are quadratic in the worst case (every face box overlapping every other).
 
 ### Phase 3: Repair and output
 

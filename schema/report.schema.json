@@ -16,6 +16,13 @@
     "input": {
       "$ref": "#/$defs/InputInfo"
     },
+    "parts": {
+      "description": "Parts found by diagnosis, in index order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PartSummary"
+      }
+    },
     "records": {
       "type": "array",
       "items": {
@@ -59,6 +66,7 @@
         "skip_line",
         "drop_face",
         "fan_triangulate",
+        "remesh",
         "merge",
         "remove",
         "fill_hole",
@@ -252,6 +260,11 @@
           "const": "MESH_BUDGET_EXCEEDED"
         },
         {
+          "description": "Part too large for 32-bit vertex and face indices",
+          "type": "string",
+          "const": "GEO_CAPACITY_EXCEEDED"
+        },
+        {
           "description": "Worker panicked, timed out or ran out of memory",
           "type": "string",
           "const": "MESH_WORKER_FAILED"
@@ -405,7 +418,7 @@
       ]
     },
     "Location": {
-      "description": "Where a finding is. Vertex and face indices are 0-based into the parsed\narrays; `obj_lines` are 1-based line numbers in the input file.",
+      "description": "Where a finding is. `vertices` are 0-based indices into the parsed vertex\nlist and `faces` are 0-based indices into the triangulated face list (a\npolygon with n corners becomes n - 2 consecutive triangles); `obj_lines` are\n1-based line numbers in the input file. Each list holds at most\n[`MAX_LOCATION_ITEMS`] entries; a truncated list has its full length in the\nrecord's `measured` map (`vertices_total`, `faces_total`, `obj_lines_total`).",
       "type": "object",
       "properties": {
         "faces": {
@@ -464,6 +477,89 @@
           "type": "string",
           "const": "deferred"
         }
+      ]
+    },
+    "PartSource": {
+      "description": "How a part was formed.",
+      "oneOf": [
+        {
+          "description": "An `o` statement (faces before any `o` form the part `default`).",
+          "type": "string",
+          "const": "object"
+        },
+        {
+          "description": "A `g` statement, in a file without `o` statements.",
+          "type": "string",
+          "const": "group"
+        },
+        {
+          "description": "A connected component, in a file with neither; enclosed cavities join\nthe component that contains them.",
+          "type": "string",
+          "const": "component"
+        }
+      ]
+    },
+    "PartSummary": {
+      "description": "One part, as the GUI part tree shows it.",
+      "type": "object",
+      "properties": {
+        "bounds": {
+          "description": "Bounding box `[min, max]`.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 3,
+            "minItems": 3
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "index": {
+          "description": "1-based; `--parts` accepts this or the name.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "selected": {
+          "type": "boolean"
+        },
+        "shells": {
+          "description": "Edge-connected surface pieces.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source": {
+          "$ref": "#/$defs/PartSource"
+        },
+        "triangles": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vertices": {
+          "description": "Distinct vertices after merging duplicates.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "index",
+        "name",
+        "source",
+        "triangles",
+        "vertices",
+        "shells",
+        "bounds",
+        "selected"
       ]
     },
     "Record": {

@@ -131,6 +131,24 @@ fn print_summary(report: &Report, report_path: Option<&str>) {
         }
         println!("{line}");
     }
+    if !report.parts.is_empty() {
+        println!(
+            "  parts ({} selected of {}):",
+            report.parts.iter().filter(|p| p.selected).count(),
+            report.parts.len()
+        );
+        for p in &report.parts {
+            println!(
+                "    {}{} {}: {} triangles, {} shell{}",
+                if p.selected { "*" } else { " " },
+                p.index,
+                p.name,
+                p.triangles,
+                p.shells,
+                if p.shells == 1 { "" } else { "s" }
+            );
+        }
+    }
     println!(
         "  findings: {} info, {} warnings, {} errors, {} fatal",
         s.info, s.warnings, s.errors, s.fatal

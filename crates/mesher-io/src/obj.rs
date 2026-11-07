@@ -14,63 +14,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use mesher_core::{Action, DefectCode, InputStats, Outcome, Record, RecordLog, Severity, Stage};
+use mesher_core::model::{Polygon, SurfaceModel, Triangle};
+use mesher_core::{Action, DefectCode, Outcome, Record, RecordLog, Severity, Stage};
 use mesher_geom::polygon::{
     FanReason, MAX_EAR_CLIP_VERTICES, TriangulationMethod, triangulate_polygon,
 };
 
-/// A source face as written in the file, with vertex indices into
-/// [`ObjModel::vertices`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Polygon {
-    pub vertices: Vec<u32>,
-    /// 1-based OBJ line (the first line of a continued statement).
-    pub line: u32,
-    /// Index into [`ObjModel::objects`] of the active `o` statement.
-    pub object: Option<u32>,
-    /// Index into [`ObjModel::groups`] of the active `g` statement.
-    pub group: Option<u32>,
-}
-
-/// A triangle from triangulating a polygon; winding follows the polygon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Triangle {
-    pub vertices: [u32; 3],
-    /// Index into [`ObjModel::polygons`].
-    pub polygon: u32,
-}
-
-/// The parsed geometry plus provenance.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ObjModel {
-    /// Well-formed vertices, in file order.
-    pub vertices: Vec<[f64; 3]>,
-    /// 1-based OBJ line of each vertex.
-    pub vertex_lines: Vec<u32>,
-    pub polygons: Vec<Polygon>,
-    pub triangles: Vec<Triangle>,
-    /// `o` names in order of first appearance.
-    pub objects: Vec<String>,
-    /// `g` names in order of first appearance.
-    pub groups: Vec<String>,
-    pub bytes: u64,
-    pub lines: u64,
-}
-
-impl ObjModel {
-    #[must_use]
-    pub fn stats(&self) -> InputStats {
-        InputStats {
-            bytes: self.bytes,
-            lines: self.lines,
-            vertices: self.vertices.len() as u64,
-            polygons: self.polygons.len() as u64,
-            triangles: self.triangles.len() as u64,
-            objects: self.objects.clone(),
-            groups: self.groups.clone(),
-        }
-    }
-}
+/// The OBJ reader's output; an alias kept for readability at call sites.
+pub type ObjModel = SurfaceModel;
 
 /// Read and parse an OBJ file. On an I/O error, records `PARSE_READ_FAILED` and
 /// returns `None`.
@@ -469,9 +420,11 @@ fn triangulate(
         .collect();
     let result = triangulate_polygon(&points);
     if let TriangulationMethod::Fan(reason) = result.method {
+        let first = model.triangles.len() as u32;
+        let produced = first..first + result.triangles.len() as u32;
         let mut record = Record::new(DefectCode::ParsePolygonFallback, Stage::Parse)
             .line(line)
-            .face(polygon)
+            .faces(produced)
             .measured("polygon_vertices", vertices.len() as u64)
             .measured("reason", reason.as_str())
             .action(Action::FanTriangulate, Outcome::Applied);
@@ -696,6 +649,6 @@ f 4 1 5 8
             codes(&log),
             vec![(DefectCode::ParsePolygonFallback, vec![5])]
         );
-        assert_eq!(log.records()[0].location.faces, vec![0]);
+        assert_eq!(log.records()[0].location.faces, vec![0, 1]);
     }
 }

@@ -20,7 +20,8 @@ pub type Point3 = [f64; 3];
 pub use bvh::{Aabb, Bvh, Nearest, Ray, RayHit};
 pub use halfedge::{EdgeId, EdgeKind, HalfEdge, SurfaceMesh};
 pub use intersect::{
-    faces_intersect, segment_intersects_triangle, segments_intersect, triangles_intersect,
+    Contact, classify_contact, coplanar_interiors_overlap, faces_intersect,
+    segment_intersects_triangle, segments_intersect, triangles_intersect,
 };
 pub use polygon::{FanReason, MAX_EAR_CLIP_VERTICES, Triangulation, TriangulationMethod};
 pub use predicates::Sign;

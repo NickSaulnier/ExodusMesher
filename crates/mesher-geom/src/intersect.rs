@@ -232,6 +232,78 @@ fn beyond_shared_edge(u: Point3, w: Point3, a: Point3, b: Point3) -> bool {
     orient2d_projected(u, w, a, k) == orient2d_projected(u, w, b, k)
 }
 
+/// How two faces from different solids meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Contact {
+    /// No common point beyond shared vertices or edges.
+    None,
+    /// They touch along a vertex, an edge or a line without either passing
+    /// through the other, or coplanar faces meet with no common area.
+    Touching,
+    /// Each face passes through the other's plane where they meet.
+    Crossing,
+    /// Coplanar with a common area and normals pointing the same way: the
+    /// solids behind them are on the same side, so their volumes overlap.
+    CoplanarAligned,
+    /// Coplanar with a common area and opposite normals: a shared interface.
+    CoplanarOpposed,
+}
+
+/// Classify the contact between faces of two different closed surfaces, for
+/// telling overlapping solids from solids that share an interface. Faces of
+/// zero area only ever touch.
+#[must_use]
+pub fn classify_contact(ia: [u32; 3], a: [Point3; 3], ib: [u32; 3], b: [Point3; 3]) -> Contact {
+    if !faces_intersect(ia, a, ib, b) {
+        return Contact::None;
+    }
+    let (Some(ka), Some(_)) = (plane_axis(a[0], a[1], a[2]), plane_axis(b[0], b[1], b[2])) else {
+        return Contact::Touching;
+    };
+    let side_b = b.map(|q| orient3d(a[0], a[1], a[2], q));
+    if side_b.iter().all(|&s| s == Sign::Zero) {
+        if !coplanar_interiors_overlap(a, b) {
+            return Contact::Touching;
+        }
+        let na = orient2d_projected(a[0], a[1], a[2], ka);
+        let nb = orient2d_projected(b[0], b[1], b[2], ka);
+        return if na == nb {
+            Contact::CoplanarAligned
+        } else {
+            Contact::CoplanarOpposed
+        };
+    }
+    let side_a = a.map(|q| orient3d(b[0], b[1], b[2], q));
+    let straddles = |s: [Sign; 3]| s.contains(&Sign::Positive) && s.contains(&Sign::Negative);
+    if straddles(side_a) && straddles(side_b) {
+        Contact::Crossing
+    } else {
+        Contact::Touching
+    }
+}
+
+/// Do two coplanar triangles of nonzero area share interior points (a common
+/// area, not just an edge or a corner)? Separating-axis test with exact
+/// orientations: interiors are disjoint exactly when some edge line has the
+/// other triangle entirely on its closed outer side.
+#[must_use]
+pub fn coplanar_interiors_overlap(a: [Point3; 3], b: [Point3; 3]) -> bool {
+    let Some(k) = plane_axis(a[0], a[1], a[2]) else {
+        return false;
+    };
+    let a2 = a.map(|p| project(p, k));
+    let b2 = b.map(|p| project(p, k));
+    let separated_by_edges_of = |t: [[f64; 2]; 3], other: [[f64; 2]; 3]| {
+        let s = orient2d(t[0], t[1], t[2]);
+        s != Sign::Zero
+            && (0..3).any(|i| {
+                let (p, q) = (t[i], t[(i + 1) % 3]);
+                other.iter().all(|&r| orient2d(p, q, r) != s)
+            })
+    };
+    !(separated_by_edges_of(a2, b2) || separated_by_edges_of(b2, a2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +385,55 @@ mod tests {
         assert!(triangles_intersect(
             line,
             [[1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0]]
+        ));
+    }
+
+    #[test]
+    fn contact_kinds() {
+        let ids_a = [0, 1, 2];
+        let ids_b = [3, 4, 5];
+        let a = [O, [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]];
+        let opposed = [[0.5, 0.5, 0.0], [0.5, 1.0, 0.0], [1.0, 0.5, 0.0]];
+        let aligned = [[0.5, 0.5, 0.0], [1.0, 0.5, 0.0], [0.5, 1.0, 0.0]];
+        let crossing = [[0.5, 0.5, -1.0], [0.5, 0.5, 1.0], [1.0, 0.2, 0.0]];
+        let resting = [[0.5, 0.5, 0.0], [0.5, 0.5, 1.0], [1.0, 0.2, 1.0]];
+        let edge_to_edge = [[0.0, 0.0, 0.0], [0.0, -1.0, 0.0], [2.0, 0.0, 0.0]];
+        assert_eq!(
+            classify_contact(ids_a, a, ids_b, opposed),
+            Contact::CoplanarOpposed
+        );
+        assert_eq!(
+            classify_contact(ids_a, a, ids_b, aligned),
+            Contact::CoplanarAligned
+        );
+        assert_eq!(
+            classify_contact(ids_a, a, ids_b, crossing),
+            Contact::Crossing
+        );
+        assert_eq!(
+            classify_contact(ids_a, a, ids_b, resting),
+            Contact::Touching
+        );
+        assert_eq!(
+            classify_contact(ids_a, a, ids_b, edge_to_edge),
+            Contact::Touching
+        );
+        let far = [[5.0, 5.0, 5.0], [6.0, 5.0, 5.0], [5.0, 6.0, 5.0]];
+        assert_eq!(classify_contact(ids_a, a, ids_b, far), Contact::None);
+    }
+
+    #[test]
+    fn coplanar_overlap_needs_area() {
+        let a = [O, X, Y];
+        assert!(coplanar_interiors_overlap(
+            a,
+            [[0.2, 0.2, 0.0], [0.4, 0.2, 0.0], [0.2, 0.4, 0.0]]
+        ));
+        assert!(coplanar_interiors_overlap(a, a));
+        assert!(!coplanar_interiors_overlap(a, [X, Y, [1.0, 1.0, 0.0]]));
+        assert!(!coplanar_interiors_overlap(
+            a,
+            [O, [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]]
         ));
     }
 }

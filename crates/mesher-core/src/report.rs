@@ -18,6 +18,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// still counts every occurrence.
 pub const MAX_RECORDS_PER_CODE: u64 = 100;
 
+/// At most this many entries per location list.
+pub const MAX_LOCATION_ITEMS: usize = 256;
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
@@ -98,6 +101,7 @@ defect_codes! {
     QualSuspectScale = "QUAL_SUSPECT_SCALE", Info, "Bounding box suggests wrong units";
     MeshRecoveryFailed = "MESH_RECOVERY_FAILED", Error, "Constrained Delaunay could not recover a facet";
     MeshBudgetExceeded = "MESH_BUDGET_EXCEEDED", Error, "Steiner-point or element budget hit";
+    GeoCapacityExceeded = "GEO_CAPACITY_EXCEEDED", Fatal, "Part too large for 32-bit vertex and face indices";
     MeshWorkerFailed = "MESH_WORKER_FAILED", Error, "Worker panicked, timed out or ran out of memory";
     VolInvertedTet = "VOL_INVERTED_TET", Error, "Tetrahedron with non-positive volume";
     VolLowQuality = "VOL_LOW_QUALITY", Warning, "Non-orthogonality, skewness or volume ratio out of bounds";
@@ -133,6 +137,7 @@ pub enum Action {
     SkipLine,
     DropFace,
     FanTriangulate,
+    Remesh,
     Merge,
     Remove,
     FillHole,
@@ -157,8 +162,12 @@ pub enum Outcome {
     Deferred,
 }
 
-/// Where a finding is. Vertex and face indices are 0-based into the parsed
-/// arrays; `obj_lines` are 1-based line numbers in the input file.
+/// Where a finding is. `vertices` are 0-based indices into the parsed vertex
+/// list and `faces` are 0-based indices into the triangulated face list (a
+/// polygon with n corners becomes n - 2 consecutive triangles); `obj_lines` are
+/// 1-based line numbers in the input file. Each list holds at most
+/// [`MAX_LOCATION_ITEMS`] entries; a truncated list has its full length in the
+/// record's `measured` map (`vertices_total`, `faces_total`, `obj_lines_total`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Location {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -245,6 +254,51 @@ impl Record {
         self
     }
 
+    /// Set the face list (sorted, deduplicated, capped at [`MAX_LOCATION_ITEMS`]).
+    #[must_use]
+    pub fn faces(mut self, faces: impl IntoIterator<Item = u32>) -> Record {
+        let (list, total) = capped(faces);
+        if let Some(total) = total {
+            self = self.measured("faces_total", total);
+        }
+        self.location.faces = list;
+        self
+    }
+
+    /// Set the vertex list (sorted, deduplicated, capped).
+    #[must_use]
+    pub fn vertex_set(mut self, vertices: impl IntoIterator<Item = u32>) -> Record {
+        let (list, total) = capped(vertices);
+        if let Some(total) = total {
+            self = self.measured("vertices_total", total);
+        }
+        self.location.vertices = list;
+        self
+    }
+
+    /// Set the input-line list (sorted, deduplicated, capped; zeros dropped).
+    #[must_use]
+    pub fn lines(mut self, lines: impl IntoIterator<Item = u32>) -> Record {
+        let (list, total) = capped(lines.into_iter().filter(|&l| l > 0));
+        if let Some(total) = total {
+            self = self.measured("obj_lines_total", total);
+        }
+        self.location.obj_lines = list;
+        self
+    }
+
+    #[must_use]
+    pub fn point(mut self, point: [f64; 3]) -> Record {
+        self.location.point = Some(point);
+        self
+    }
+
+    #[must_use]
+    pub fn part(mut self, part: &str) -> Record {
+        self.part = Some(part.to_owned());
+        self
+    }
+
     #[must_use]
     pub fn measured(mut self, key: &str, value: impl Into<Value>) -> Record {
         self.measured.insert(key.to_owned(), value.into());
@@ -268,6 +322,21 @@ impl Record {
     pub fn hint(mut self, hint: impl Into<String>) -> Record {
         self.hint = Some(hint.into());
         self
+    }
+}
+
+/// Sort, deduplicate and cap a list; the second value is the full length when
+/// it was truncated.
+fn capped(items: impl IntoIterator<Item = u32>) -> (Vec<u32>, Option<u64>) {
+    let mut list: Vec<u32> = items.into_iter().collect();
+    list.sort_unstable();
+    list.dedup();
+    let total = list.len();
+    if total > MAX_LOCATION_ITEMS {
+        list.truncate(MAX_LOCATION_ITEMS);
+        (list, Some(total as u64))
+    } else {
+        (list, None)
     }
 }
 
@@ -417,6 +486,36 @@ pub struct InputInfo {
     pub stats: Option<InputStats>,
 }
 
+/// How a part was formed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PartSource {
+    /// An `o` statement (faces before any `o` form the part `default`).
+    Object,
+    /// A `g` statement, in a file without `o` statements.
+    Group,
+    /// A connected component, in a file with neither; enclosed cavities join
+    /// the component that contains them.
+    Component,
+}
+
+/// One part, as the GUI part tree shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PartSummary {
+    /// 1-based; `--parts` accepts this or the name.
+    pub index: u32,
+    pub name: String,
+    pub source: PartSource,
+    pub triangles: u64,
+    /// Distinct vertices after merging duplicates.
+    pub vertices: u64,
+    /// Edge-connected surface pieces.
+    pub shells: u64,
+    /// Bounding box `[min, max]`.
+    pub bounds: [[f64; 3]; 2],
+    pub selected: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolInfo {
     pub name: String,
@@ -432,6 +531,9 @@ pub struct Report {
     pub config: JobConfig,
     /// Stages that ran, in order.
     pub stages_run: Vec<Stage>,
+    /// Parts found by diagnosis, in index order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PartSummary>,
     pub records: Vec<Record>,
     pub attempts: Vec<Attempt>,
     pub summary: Summary,
@@ -453,6 +555,7 @@ impl Report {
             },
             config,
             stages_run: Vec::new(),
+            parts: Vec::new(),
             records: Vec::new(),
             attempts: Vec::new(),
             summary: Summary::default(),
