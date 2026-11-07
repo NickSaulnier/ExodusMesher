@@ -2,17 +2,24 @@
 //! wraps [`run`] with the stdin/stdout protocol; keeping the logic here lets
 //! tests drive it in-process too.
 //!
-//! Pipeline so far: parse, diagnose, select, then (unless `no_repair`) repair
-//! and the surface gate. Diagnosis runs if parsing produced geometry; repair
-//! runs on every selected part without a fatal defect of its own.
+//! Pipeline: parse, diagnose, select, then (unless `no_repair`) repair, the
+//! surface gate, volume meshing (isosurface stuffing until the Delaunay kernel
+//! lands), the volume gate, and the mesh files. Diagnosis runs if parsing
+//! produced geometry; repair and meshing run on every selected part without a
+//! fatal defect of its own.
 
 use std::path::Path;
 
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
 use mesher_core::model::SurfaceModel;
-use mesher_core::protocol::{Job, OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE, WorkerMessage};
+use mesher_core::protocol::{
+    Job, MESH_EXODUS_FILE, MESH_MSH_FILE, MESH_VTU_FILE, OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE,
+    WorkerMessage,
+};
 use mesher_core::repair::repair;
+use mesher_core::volume::{assemble, mesh_parts};
 use mesher_core::{Action, DefectCode, ExitStatus, Outcome, Record, RecordLog, Report, Stage};
+use mesher_io::exodus::{ExodusError, ExodusOptions, QaRecord, write_exodus};
 
 /// Run a job to completion, sending progress, records and the final result to
 /// `emit`. Returns the exit code. Never panics on bad input.
@@ -137,7 +144,90 @@ fn process(
             .collect();
         files.push((REPAIRED_FILE, mesher_io::write_obj(&surfaces)));
     }
+
+    emit(&WorkerMessage::Progress {
+        stage: Stage::VolumeMesh,
+        fraction: 0.0,
+    });
+    let meshes = mesh_parts(&repaired, &job.config, log).map_err(|e| e.0)?;
+    report.stages_run.push(Stage::VolumeMesh);
+    report.stages_run.push(Stage::VolumeGate);
+    report.attempts.extend(meshes.attempts.iter().cloned());
+    for (i, summary) in &meshes.summaries {
+        if let Some(p) = report.parts.get_mut(*i) {
+            p.mesh = Some(*summary);
+        }
+    }
+    if meshes.meshed.is_empty() {
+        return Ok(files);
+    }
+    let mesh = assemble(&meshes.meshed);
+    report.stages_run.push(Stage::Emit);
+    files.push((MESH_MSH_FILE, mesher_io::msh::msh_text(&mesh)));
+    files.push((MESH_VTU_FILE, mesher_io::vtu::vtu_text(&mesh)));
+    write_mesh_exodus(job, &mesh, &meshes.meshed, log);
     Ok(files)
+}
+
+/// Write `mesh.exo`, recording any failure.
+fn write_mesh_exodus(
+    job: &Job,
+    mesh: &mesher_core::mesh::VolumeMesh,
+    parts: &[mesher_core::volume::MeshedPart],
+    log: &mut RecordLog,
+) {
+    let dir = Path::new(&job.output_dir);
+    let path = dir.join(MESH_EXODUS_FILE);
+    let failed = |log: &mut RecordLog, why: String| {
+        log.push(
+            Record::new(DefectCode::OutWriteFailed, Stage::Emit)
+                .measured("path", path.display().to_string())
+                .action(Action::Abort, Outcome::Applied)
+                .hint(why),
+        );
+    };
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        failed(log, format!("could not create {}: {err}", dir.display()));
+        return;
+    }
+    let mut info = vec![
+        format!("input: {}", job.input),
+        format!(
+            "element size {} x part diagonal; max deviation {}",
+            job.config.element_size, job.config.max_deviation
+        ),
+    ];
+    info.extend(parts.iter().map(|p| {
+        format!(
+            "block {}: {} tets (isosurface stuffing)",
+            p.name,
+            p.tets.len()
+        )
+    }));
+    let options = ExodusOptions {
+        title: format!("ExodusMesher mesh of {}", job.input),
+        qa: vec![QaRecord {
+            program: "ExodusMesher".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            ..QaRecord::default()
+        }],
+        info,
+    };
+    match write_exodus(&path, mesh, &options, log) {
+        Ok(()) | Err(ExodusError::Empty) => {}
+        Err(ExodusError::Capacity { variable, bytes }) => {
+            log.push(
+                Record::new(DefectCode::ExoCapacityExceeded, Stage::Emit)
+                    .measured("variable", variable)
+                    .measured("bytes", bytes)
+                    .threshold("max_variable_bytes", mesher_io::exodus::MAX_VARIABLE_BYTES)
+                    .hint(
+                        "the mesh is too large for the 64-bit-offset format; raise --element-size",
+                    ),
+            );
+        }
+        Err(ExodusError::Write(e)) => failed(log, format!("could not write the Exodus file: {e}")),
+    }
 }
 
 /// Write auxiliary files, then finish and write the report. Any write failure

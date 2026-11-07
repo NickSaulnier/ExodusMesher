@@ -47,12 +47,18 @@ struct RunArgs {
     /// Conformal paths only; never use the stuffing fallback.
     #[arg(long)]
     strict: bool,
-    /// Largest acceptable fallback deviation, relative to the bounding-box diagonal.
-    #[arg(long, default_value_t = JobConfig::default().max_deviation)]
+    /// Largest acceptable fallback deviation, relative to each part's bounding-box diagonal.
+    #[arg(long, default_value_t = JobConfig::default().max_deviation, value_parser = positive)]
     max_deviation: f64,
+    /// Target element size, relative to each part's bounding-box diagonal.
+    #[arg(long, default_value_t = JobConfig::default().element_size, value_parser = positive)]
+    element_size: f64,
     /// Kill the worker after this many seconds.
-    #[arg(long, default_value_t = 3600.0, value_parser = positive_seconds)]
+    #[arg(long, default_value_t = 3600.0, value_parser = positive)]
     timeout: f64,
+    /// Cap the worker's memory at this many MiB (Windows and Linux).
+    #[arg(long, default_value_t = 8192)]
+    memory_limit: u64,
     /// Path to the mesher-worker binary [default: $MESHER_WORKER, else next to this executable].
     #[arg(long)]
     worker: Option<PathBuf>,
@@ -83,20 +89,24 @@ fn run(args: RunArgs) -> i32 {
             no_repair: args.no_repair,
             strict: args.strict,
             max_deviation: args.max_deviation,
+            element_size: args.element_size,
         },
     };
     let worker = args.worker.unwrap_or_else(default_worker_path);
-    let timeout = Duration::try_from_secs_f64(args.timeout).unwrap_or(Duration::MAX);
+    let limits = supervise::Limits {
+        timeout: Duration::try_from_secs_f64(args.timeout).unwrap_or(Duration::from_secs(3600)),
+        memory: usize::try_from(args.memory_limit.saturating_mul(1 << 20)).ok(),
+    };
 
-    let (report, report_path) = supervise::run_job(&worker, &job, timeout);
+    let (report, report_path) = supervise::run_job(&worker, &job, limits);
     print_summary(&report, report_path.as_deref());
     report.summary.exit_code
 }
 
-fn positive_seconds(text: &str) -> Result<f64, String> {
+fn positive(text: &str) -> Result<f64, String> {
     match text.parse::<f64>() {
         Ok(s) if s > 0.0 && s.is_finite() => Ok(s),
-        _ => Err("expected a positive number of seconds".to_owned()),
+        _ => Err("expected a positive number".to_owned()),
     }
 }
 
@@ -154,6 +164,17 @@ fn print_summary(report: &Report, report_path: Option<&str>) {
                 p.shells,
                 if p.shells == 1 { "" } else { "s" }
             );
+            if let Some(m) = p.mesh {
+                println!(
+                    "       {} {} tets, dihedral {:.1}°–{:.1}°, deviation {:.2}% of diagonal ({:?})",
+                    if m.accepted { "meshed:" } else { "rejected:" },
+                    m.tets,
+                    m.min_dihedral_degrees,
+                    m.max_dihedral_degrees,
+                    100.0 * m.hausdorff_relative,
+                    m.kernel
+                );
+            }
         }
     }
     println!(

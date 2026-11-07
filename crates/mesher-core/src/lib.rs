@@ -9,10 +9,11 @@ pub mod overlay;
 pub mod protocol;
 pub mod repair;
 pub mod report;
+pub mod volume;
 
 pub use exit::ExitStatus;
 pub use report::{
     Action, Attempt, AttemptOutcome, DefectCode, InputInfo, InputStats, JobConfig, Kernel,
-    Location, Outcome, PartSource, PartSummary, Record, RecordLog, RepairSummary, Report, Severity,
-    Stage, Summary,
+    Location, MeshSummary, Outcome, PartSource, PartSummary, Record, RecordLog, RepairSummary,
+    Report, Severity, Stage, Summary,
 };

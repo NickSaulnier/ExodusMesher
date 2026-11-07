@@ -103,6 +103,7 @@ defect_codes! {
     MeshBudgetExceeded = "MESH_BUDGET_EXCEEDED", Error, "Steiner-point or element budget hit";
     GeoCapacityExceeded = "GEO_CAPACITY_EXCEEDED", Fatal, "Part too large for 32-bit vertex and face indices";
     RepairGuardExceeded = "REPAIR_GUARD_EXCEEDED", Error, "A repair changed the shell count or enclosed volume beyond its limit";
+    MeshStrictUnmet = "MESH_STRICT_UNMET", Error, "--strict was given but no conformal mesh could be produced";
     MeshWorkerFailed = "MESH_WORKER_FAILED", Error, "Worker panicked, timed out or ran out of memory";
     VolInvertedTet = "VOL_INVERTED_TET", Error, "Tetrahedron with non-positive volume";
     VolLowQuality = "VOL_LOW_QUALITY", Warning, "Non-orthogonality, skewness or volume ratio out of bounds";
@@ -417,8 +418,11 @@ pub struct JobConfig {
     pub no_repair: bool,
     /// Conformal paths only; never use the stuffing fallback.
     pub strict: bool,
-    /// Largest acceptable fallback deviation, relative to the bounding-box diagonal.
+    /// Largest acceptable fallback deviation, relative to the part's bounding-box diagonal.
     pub max_deviation: f64,
+    /// Target element size (the stuffing lattice spacing), relative to the
+    /// part's bounding-box diagonal.
+    pub element_size: f64,
 }
 
 impl Default for JobConfig {
@@ -427,7 +431,8 @@ impl Default for JobConfig {
             parts: Vec::new(),
             no_repair: false,
             strict: false,
-            max_deviation: 0.01,
+            max_deviation: 0.05,
+            element_size: 0.03,
         }
     }
 }
@@ -518,6 +523,32 @@ pub struct PartSummary {
     /// Present when the part was repaired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair: Option<RepairSummary>,
+    /// Present when a volume mesh was attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshSummary>,
+}
+
+/// The volume mesh of one part and its quality.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MeshSummary {
+    pub kernel: Kernel,
+    /// Whether the mesh passed the volume gate and was written.
+    pub accepted: bool,
+    pub tets: u64,
+    pub nodes: u64,
+    /// Element size used (absolute).
+    pub element_size: f64,
+    pub volume: f64,
+    /// Signed volume enclosed by the repaired surface (for a surface that
+    /// failed the gate, overlapping shells count their overlap twice).
+    pub surface_volume: f64,
+    pub min_dihedral_degrees: f64,
+    pub max_dihedral_degrees: f64,
+    /// Two-sided Hausdorff distance between the input surface and the mesh
+    /// boundary (sampled at vertices and face centroids), absolute and
+    /// relative to the part's bounding-box diagonal.
+    pub hausdorff: f64,
+    pub hausdorff_relative: f64,
 }
 
 /// Face and vertex counts through repair, and the surface gate's verdict.

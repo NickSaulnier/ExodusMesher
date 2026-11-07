@@ -13,6 +13,7 @@ mesher-core.workspace = true
 mesher-io.workspace = true
 
 [dev-dependencies]
+mesher-tet.workspace = true
 serde_json.workspace = true
 
 [lints]

@@ -11,6 +11,7 @@ rust-version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 mesher-geom.workspace = true
+mesher-tet.workspace = true
 schemars.workspace = true
 
 [dev-dependencies]

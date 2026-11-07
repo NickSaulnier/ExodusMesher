@@ -67,7 +67,7 @@ fn assert_handles(bytes: &[u8]) -> i32 {
     let output = mesher(&input, &out, &[], None);
     let code = output.status.code().unwrap();
     assert!(
-        [0, 10, 30].contains(&code),
+        [0, 10, 20, 30].contains(&code),
         "exit {code}; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -87,17 +87,20 @@ fn clean_and_defective_fixtures() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("cube");
     let output = mesher(&fixture("cube.obj"), &out, &[], None);
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(20));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("8 vertices, 6 polygons, 12 triangles"),
         "{stdout}"
     );
-    assert!(stdout.contains("exit 0: clean"), "{stdout}");
+    assert!(
+        stdout.contains("exit 20: succeeded via fallback"),
+        "{stdout}"
+    );
 
     let out = dir.path().join("defects");
     let output = mesher(&fixture("cube_parse_defects.obj"), &out, &[], None);
-    assert_eq!(output.status.code(), Some(10));
+    assert_eq!(output.status.code(), Some(20));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("PARSE_BAD_LINE x2, first at line 11"),
@@ -253,4 +256,27 @@ proptest! {
     fn random_bytes_yield_reports(bytes in prop::collection::vec(any::<u8>(), 0..4096)) {
         assert_handles(&bytes);
     }
+}
+
+#[test]
+fn memory_cap_stops_a_runaway_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    let output = mesher(
+        &fixture("cube.obj"),
+        &out,
+        &["--memory-limit", "64"],
+        Some("alloc"),
+    );
+    let r = report(&out);
+    let failure = r.records.last().unwrap();
+    assert_eq!(
+        failure.code,
+        DefectCode::MeshWorkerFailed,
+        "{:?}",
+        r.records
+    );
+    assert_eq!(failure.measured["reason"], "out_of_memory", "{failure:?}");
+    // Running out of memory is a failure, not a bug.
+    assert_eq!(output.status.code(), Some(30));
 }

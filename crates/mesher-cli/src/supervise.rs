@@ -1,11 +1,15 @@
 //! Runs the worker process: sends the job, reads protocol lines, enforces the
-//! timeout, and builds a `MESH_WORKER_FAILED` report when the worker dies.
+//! timeout and memory cap (`process_control`: a job object on Windows,
+//! `setrlimit` on Linux), and builds a `MESH_WORKER_FAILED` report when the
+//! worker dies.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use process_control::{ChildExt, Control};
 
 use mesher_core::protocol::{Job, WorkerMessage};
 use mesher_core::{Action, DefectCode, ExitStatus, Outcome, Record, RecordLog, Report, Stage};
@@ -23,18 +27,27 @@ enum Event {
 enum Failure {
     Spawn(std::io::Error),
     Timeout,
-    Died { status: Option<i32> },
+    OutOfMemory,
+    Died { status: Option<i64> },
+}
+
+/// Limits the worker runs under.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub timeout: Duration,
+    /// Memory cap in bytes (enforced on Windows and Linux).
+    pub memory: Option<usize>,
 }
 
 /// Run the job in a worker process. Always returns a report, plus the path it
 /// was written to (`None` if it could not be written).
-pub fn run_job(worker: &Path, job: &Job, timeout: Duration) -> (Report, Option<String>) {
+pub fn run_job(worker: &Path, job: &Job, limits: Limits) -> (Report, Option<String>) {
     let mut streamed = Vec::new();
-    let (failure, stderr) = match spawn_and_read(worker, job, timeout, &mut streamed) {
+    let (failure, stderr) = match spawn_and_read(worker, job, limits, &mut streamed) {
         Ok(result) => return result,
         Err(failure) => failure,
     };
-    failure_report(job, streamed, failure, &stderr, timeout)
+    failure_report(job, streamed, failure, &stderr, limits)
 }
 
 type Delivered = (Report, Option<String>);
@@ -42,7 +55,7 @@ type Delivered = (Report, Option<String>);
 fn spawn_and_read(
     worker: &Path,
     job: &Job,
-    timeout: Duration,
+    limits: Limits,
     streamed: &mut Vec<Record>,
 ) -> Result<Delivered, (Failure, String)> {
     let mut child = Command::new(worker)
@@ -81,16 +94,28 @@ fn spawn_and_read(
         })
     });
 
-    let deadline = Instant::now().checked_add(timeout);
+    // Wait under the limits; the reader threads collect output meanwhile.
+    let control = child
+        .controlled()
+        .time_limit(limits.timeout)
+        .terminate_for_timeout();
+    #[cfg(any(
+        windows,
+        target_os = "android",
+        all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))
+    ))]
+    let control = match limits.memory {
+        Some(bytes) => control.memory_limit(bytes),
+        None => control,
+    };
+    let waited = control.wait();
+    let timed_out = matches!(waited, Ok(None));
+    let status = waited.ok().flatten().and_then(|s| s.code());
+
     let mut delivered = None;
-    let mut timed_out = false;
-    loop {
-        let event = match deadline {
-            Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
-            None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-        };
+    for event in rx.iter() {
         match event {
-            Ok(Event::Line(line)) => match WorkerMessage::from_line(&line) {
+            Event::Line(line) => match WorkerMessage::from_line(&line) {
                 Ok(WorkerMessage::Record { record }) => streamed.push(*record),
                 Ok(WorkerMessage::Result {
                     report,
@@ -101,15 +126,9 @@ fn spawn_and_read(
                 // line is ignored here and surfaces only if no result follows.
                 Ok(_) | Err(_) => {}
             },
-            Ok(Event::Eof) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                timed_out = true;
-                let _ = child.kill();
-                break;
-            }
+            Event::Eof => break,
         }
     }
-    let status = child.wait().ok().and_then(|s| s.code());
     let stderr = stderr_thread
         .and_then(|t| t.join().ok())
         .map(|bytes| tail(&String::from_utf8_lossy(&bytes)))
@@ -118,6 +137,7 @@ fn spawn_and_read(
     match delivered {
         Some(result) if !timed_out => Ok(result),
         _ if timed_out => Err((Failure::Timeout, stderr)),
+        _ if stderr.contains("memory allocation of") => Err((Failure::OutOfMemory, stderr)),
         _ => Err((Failure::Died { status }, stderr)),
     }
 }
@@ -135,7 +155,7 @@ fn failure_report(
     streamed: Vec<Record>,
     failure: Failure,
     stderr: &str,
-    timeout: Duration,
+    limits: Limits,
 ) -> (Report, Option<String>) {
     let mut log = RecordLog::new();
     for record in streamed {
@@ -153,8 +173,17 @@ fn failure_report(
         Failure::Timeout => {
             record = record
                 .measured("reason", "timeout")
-                .threshold("timeout_seconds", timeout.as_secs_f64())
+                .threshold("timeout_seconds", limits.timeout.as_secs_f64())
                 .hint("the worker was killed after the timeout");
+            false
+        }
+        Failure::OutOfMemory => {
+            record = record
+                .measured("reason", "out_of_memory")
+                .hint("the worker hit its memory cap; raise --memory-limit or --element-size");
+            if let Some(bytes) = limits.memory {
+                record = record.threshold("memory_limit_bytes", bytes as u64);
+            }
             false
         }
         Failure::Died { status } => {

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6a79c59cdcb08cfc35f7b5dad2c82eb08a0786c21d18be44461fb5adac481010 # shrinks to s = Torus { c: [0.0, 0.0, 0.0], big: 1.929974734231209, small: 0.3949855383338231 }, cells = 16.60121184962572

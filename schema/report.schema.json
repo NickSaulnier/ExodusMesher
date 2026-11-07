@@ -270,6 +270,11 @@
           "const": "REPAIR_GUARD_EXCEEDED"
         },
         {
+          "description": "--strict was given but no conformal mesh could be produced",
+          "type": "string",
+          "const": "MESH_STRICT_UNMET"
+        },
+        {
           "description": "Worker panicked, timed out or ran out of memory",
           "type": "string",
           "const": "MESH_WORKER_FAILED"
@@ -387,11 +392,17 @@
       "description": "User-facing job settings (the policy flags). Recorded in the report.",
       "type": "object",
       "properties": {
-        "max_deviation": {
-          "description": "Largest acceptable fallback deviation, relative to the bounding-box diagonal.",
+        "element_size": {
+          "description": "Target element size (the stuffing lattice spacing), relative to the\npart's bounding-box diagonal.",
           "type": "number",
           "format": "double",
-          "default": 0.01
+          "default": 0.03
+        },
+        "max_deviation": {
+          "description": "Largest acceptable fallback deviation, relative to the part's bounding-box diagonal.",
+          "type": "number",
+          "format": "double",
+          "default": 0.05
         },
         "no_repair": {
           "description": "Diagnose and report only.",
@@ -464,6 +475,73 @@
         }
       }
     },
+    "MeshSummary": {
+      "description": "The volume mesh of one part and its quality.",
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "description": "Whether the mesh passed the volume gate and was written.",
+          "type": "boolean"
+        },
+        "element_size": {
+          "description": "Element size used (absolute).",
+          "type": "number",
+          "format": "double"
+        },
+        "hausdorff": {
+          "description": "Two-sided Hausdorff distance between the input surface and the mesh\nboundary (sampled at vertices and face centroids), absolute and\nrelative to the part's bounding-box diagonal.",
+          "type": "number",
+          "format": "double"
+        },
+        "hausdorff_relative": {
+          "type": "number",
+          "format": "double"
+        },
+        "kernel": {
+          "$ref": "#/$defs/Kernel"
+        },
+        "max_dihedral_degrees": {
+          "type": "number",
+          "format": "double"
+        },
+        "min_dihedral_degrees": {
+          "type": "number",
+          "format": "double"
+        },
+        "nodes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "surface_volume": {
+          "description": "Signed volume enclosed by the repaired surface (for a surface that\nfailed the gate, overlapping shells count their overlap twice).",
+          "type": "number",
+          "format": "double"
+        },
+        "tets": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "volume": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "kernel",
+        "accepted",
+        "tets",
+        "nodes",
+        "element_size",
+        "volume",
+        "surface_volume",
+        "min_dihedral_degrees",
+        "max_dihedral_degrees",
+        "hausdorff",
+        "hausdorff_relative"
+      ]
+    },
     "Outcome": {
       "description": "Result of the action.",
       "oneOf": [
@@ -528,6 +606,17 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "mesh": {
+          "description": "Present when a volume mesh was attempted.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MeshSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "name": {
           "type": "string"

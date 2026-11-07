@@ -94,10 +94,11 @@ fn result_of(run: &Run) -> (&Report, &Option<String>) {
 }
 
 #[test]
-fn clean_cube_exits_zero() {
+fn clean_cube_is_meshed_via_the_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube.obj"), dir.path());
-    assert_eq!(run.exit_code, 0);
+    // Stuffing is the only volume kernel until Milestone 8: exit 20.
+    assert_eq!(run.exit_code, 20);
     assert!(matches!(
         run.messages.first(),
         Some(WorkerMessage::Started { protocol, .. }) if *protocol == PROTOCOL_VERSION
@@ -116,7 +117,7 @@ fn clean_cube_exits_zero() {
 fn parse_defects_are_streamed_and_reported() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube_parse_defects.obj"), dir.path());
-    assert_eq!(run.exit_code, 10);
+    assert_eq!(run.exit_code, 20);
     let streamed: Vec<(DefectCode, Vec<u32>)> = run
         .messages
         .iter()
@@ -146,7 +147,7 @@ fn parse_defects_are_streamed_and_reported() {
 fn multi_object_and_concave_crlf_inputs() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("two_objects.obj"), dir.path());
-    assert_eq!(run.exit_code, 0);
+    assert_eq!(run.exit_code, 20);
     let report = run.report_file.unwrap();
     let stats = report.input.stats.as_ref().unwrap();
     assert_eq!(stats.objects, vec!["left", "right"]);
@@ -164,9 +165,18 @@ fn multi_object_and_concave_crlf_inputs() {
             Stage::Diagnose,
             Stage::Select,
             Stage::Repair,
-            Stage::SurfaceGate
+            Stage::SurfaceGate,
+            Stage::VolumeMesh,
+            Stage::VolumeGate,
+            Stage::Emit
         ]
     );
+    let meshed: Vec<bool> = report
+        .parts
+        .iter()
+        .map(|p| p.mesh.is_some_and(|m| m.accepted && m.tets > 0))
+        .collect();
+    assert_eq!(meshed, vec![true, true]);
     assert!(
         report
             .parts
@@ -190,7 +200,7 @@ fn multi_object_and_concave_crlf_inputs() {
 fn diagnosis_writes_an_overlay_and_honours_selection() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube.obj"), dir.path());
-    assert_eq!(run.exit_code, 0);
+    assert_eq!(run.exit_code, 20);
     let vtp = std::fs::read_to_string(dir.path().join("defects.vtp")).unwrap();
     assert!(vtp.contains(r#"NumberOfPoints="8""#) && vtp.contains(r#"NumberOfPolys="12""#));
 
@@ -198,7 +208,7 @@ fn diagnosis_writes_an_overlay_and_honours_selection() {
     let mut job = job_for(&fixture("two_objects.obj"), dir.path());
     job.config.parts = vec!["right".into()];
     let run = run_job(&job, dir.path());
-    assert_eq!(run.exit_code, 0);
+    assert_eq!(run.exit_code, 20);
     let selected: Vec<bool> = run
         .report_file
         .unwrap()
@@ -284,7 +294,7 @@ fn repair_writes_a_gated_surface_and_no_repair_stops_after_selection() {
     .unwrap();
     let out = dir.path().join("out");
     let run = run_worker(&input.display().to_string(), &out);
-    assert_eq!(run.exit_code, 10);
+    assert_eq!(run.exit_code, 20);
     let report = run.report_file.unwrap();
     let summary = report.parts[0].repair.unwrap();
     assert!(summary.gate_passed);
@@ -312,4 +322,37 @@ fn repair_writes_a_gated_surface_and_no_repair_stops_after_selection() {
     assert!(report.parts[0].repair.is_none());
     assert!(report.records.iter().all(|r| r.stage != Stage::Repair));
     assert!(!out.join("repaired.obj").exists());
+}
+
+#[test]
+fn cube_end_to_end_writes_a_valid_exodus_mesh() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_worker(&fixture("cube.obj"), dir.path());
+    assert_eq!(run.exit_code, 20);
+    let report = run.report_file.unwrap();
+    let mesh = report.parts[0].mesh.unwrap();
+    assert!(mesh.accepted && mesh.tets > 1000);
+    assert!((mesh.volume - 1.0).abs() < 0.01, "volume {}", mesh.volume);
+    assert!(mesh.min_dihedral_degrees >= 10.7 && mesh.max_dihedral_degrees <= 164.8);
+    assert_eq!(report.attempts.len(), 1);
+    for file in ["mesh.exo", "mesh.msh", "mesh.vtu", "repaired.obj"] {
+        assert!(dir.path().join(file).exists(), "{file} missing");
+    }
+    let exo = std::fs::read(dir.path().join("mesh.exo")).unwrap();
+    assert_eq!(&exo[..4], b"CDF\x02", "64-bit-offset netCDF");
+
+    // Strict mode: no conformal kernel yet, so no mesh and an error.
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cube.obj"), dir.path());
+    job.config.strict = true;
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 30);
+    let report = run.report_file.unwrap();
+    assert!(
+        report
+            .records
+            .iter()
+            .any(|r| r.code == DefectCode::MeshStrictUnmet)
+    );
+    assert!(!dir.path().join("mesh.exo").exists());
 }

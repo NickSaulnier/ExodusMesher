@@ -17,8 +17,14 @@ pub const OVERLAY_FILE: &str = "defects.vtp";
 /// Name of the repaired surface the worker writes after repair.
 pub const REPAIRED_FILE: &str = "repaired.obj";
 
-/// Environment variable that makes the worker fail on purpose (`panic` or
-/// `hang`), so tests can exercise the front ends' failure handling.
+/// Names of the volume mesh files.
+pub const MESH_EXODUS_FILE: &str = "mesh.exo";
+pub const MESH_MSH_FILE: &str = "mesh.msh";
+pub const MESH_VTU_FILE: &str = "mesh.vtu";
+
+/// Environment variable that makes the worker fail on purpose (`panic`,
+/// `hang`, or `alloc`: allocate up to 1 GiB), so tests can exercise the
+/// front ends' failure handling, timeout and memory cap.
 pub const TEST_FAULT_ENV: &str = "MESHER_TEST_FAULT";
 
 /// One meshing job.

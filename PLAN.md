@@ -197,6 +197,7 @@ Every finding is a structured record with a stable code, a severity, a location 
 | `MESH_BUDGET_EXCEEDED` | Steiner-point or element budget hit | Error, triggers fallback |
 | `GEO_CAPACITY_EXCEEDED` | Part too large for 32-bit vertex and face indices | Fatal |
 | `REPAIR_GUARD_EXCEEDED` | A repair changed the shell count or enclosed volume beyond its limit | Error |
+| `MESH_STRICT_UNMET` | `--strict` was given but no conformal mesh could be produced | Error |
 | `MESH_WORKER_FAILED` | Worker panicked, timed out or ran out of memory | Error, triggers fallback |
 | `VOL_INVERTED_TET` | Tetrahedron with non-positive volume | Error |
 | `VOL_LOW_QUALITY` | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
@@ -414,7 +415,7 @@ Crates are created when their first milestone starts, so early builds do not pul
 - *Gate.* One `surface_gate` error per failed check per part: holes, non-manifold edges or vertices, inconsistent orientation, inverted shells, open sheets, self-intersections, shell overlaps. Slivers are not gated (remeshing is Milestone 10).
 - *Not repaired here:* self-intersections and shell overlaps (the stuffing fallback, Milestone 6), slivers (remeshing, Milestone 10), and bare T-junction slits with no collapsed face to remove (they show as zero-area holes that filling refuses).
 
-**Milestone 5: Writers.** Code and automated checks done (Nov 7, 2026); the ParaView and SEACAS spot checks are still open because neither tool is installed on the development machine. Files to check are written by `cargo test -p mesher-oracle` to `target/tmp/oracle/` (`l_prism.exo`, `.msh`, `.vtu`).
+**Milestone 5: Writers.** Code, automated checks and the ParaView spot check done (Nov 7, 2026); the SEACAS check is still open because SEACAS is not installed on the development machine (it is easiest to run under Linux or WSL). Files to check are written by `cargo test -p mesher-oracle` to `target/tmp/oracle/` (`l_prism.exo`, `.msh`, `.vtu`).
 
 - [x] Volume mesh type (`mesher-core::mesh::VolumeMesh`): points, one block of positive tets per part, side sets as (global element, Exodus side), boundary side sets, validation
 - [x] Exodus II on `netcdf3`: blocks, side sets with tet face ordinals, node sets, QA and info records, name truncation, capacity check
@@ -422,7 +423,8 @@ Crates are created when their first milestone starts, so early builds do not pul
 - [x] TetGen oracle harness in `tests/oracle/` (dev-dependency `tritet`, built with MSVC); a guard test fails if any crate under `crates/` mentions `tritet`
 - [x] Round-trip tests with independent readers (`netcdf3` for Exodus, `mshio` for MSH, `vtkio` for VTU); per-ordinal unit tests on a single tet; byte-identical reruns
 - [x] Side-set ordinals verified per face: on the TetGen L-prism, every side read back from the file lies exactly on one facet plane, points out of the solid (exact `orient3d`), and the sides cover each facet's area
-- [ ] ParaView and SEACAS (`io_info`, `exodiff`) spot checks of the oracle files
+- [x] ParaView spot check of `l_prism.exo` (Nov 7, 2026, by eye): the element block, side set and node set load; the L-prism is filled with tets under a clip; Mesh Quality shows every tet volume positive; normal glyphs on the side set point out of the solid on every face, including the notch
+- [ ] SEACAS (`io_info`, `exodiff`) check of the oracle files; deferred by decision (Nov 7, 2026) so Milestone 6 could start with ParaView verification in hand. Do it before the Thingi10k benchmark in Milestone 10, under Linux or WSL
 
 **Decisions made in Milestone 5.**
 
@@ -436,7 +438,24 @@ Crates are created when their first milestone starts, so early builds do not pul
 
 ### Phase 4: Volume meshing
 
-**Milestone 6: Stuffing kernel.** Octree-graded BCC lattice, winding-number cut, snap and warp, Hausdorff deviation, worker memory cap, first end-to-end OBJ to Exodus.
+**Milestone 6: Stuffing kernel.** Done (Nov 7, 2026): every repaired part of every closed or nearly closed synthetic case (98 part meshes across three scales and offsets) is stuffed with positive tets inside the proven dihedral bounds; accepted meshes validate and match the enclosed volume within 15% at the suite's coarse element size; the cube fixture runs end to end from OBJ to Exodus, .msh and .vtu.
+
+- [x] `mesher-tet` crate: uniform BCC lattice, level-function signs (parallel, `rayon`), cut points by bisection, warping with the paper's α (0.24999 long, 0.41189 short), stencils
+- [x] Dihedral angles (`mesher_tet::quality`); property test on random spheres, ellipsoids, boxes and tori at random cell sizes: angles within [10.7°, 164.8°], no degenerate tets, every face shared by at most two tets, closed and consistently oriented boundary (1,000 shapes run once)
+- [x] Volume stage (`mesher-core::volume`): stuffing on each repaired part's winding-number field, volume gate (`VOL_INVERTED_TET`, `VOL_LOW_QUALITY`, `VOL_BOUNDARY_DEVIATION`), `MESH_BUDGET_EXCEEDED`, attempts recorded; accepted parts assembled into one mesh, a block and a `<part>_boundary` side set each
+- [x] Worker writes `mesh.exo`, `mesh.msh`, `mesh.vtu` (`EXO_NAME_TRUNCATED`, `EXO_CAPACITY_EXCEEDED`, `OUT_WRITE_FAILED` recorded); the report's part summaries gain mesh statistics; the CLI prints them
+- [x] Worker memory cap: the CLI runs the worker under `process_control` (a job object on Windows, `setrlimit` on Linux), `--memory-limit` MiB (default 8192); allocation failure becomes `MESH_WORKER_FAILED` with reason `out_of_memory` (exit 30, not a bug); tested with a deliberate runaway allocation
+- [x] `--element-size` (relative to each part's diagonal, default 0.03); `--strict` records `MESH_STRICT_UNMET` until the conformal kernel exists
+- [ ] Octree grading (adaptive lattice): deferred to Milestone 10, where the sizing field gives it something to grade to
+
+**Decisions made in Milestone 6.**
+
+- *All-zero tets are dropped.* A lattice tet whose four vertices were all warped onto the surface is a sliver lying in it; keeping it (as an early version did when its centroid was inside) produced dihedral angles down to 2.8°. Dropping it leaves its faces, which lie on the surface, as boundary. With that, the empirical range on all tests stays inside the paper's [10.7°, 164.8°].
+- *Stencil filling by coning.* Each lattice tet's inside part is filled by a cone from its lowest-numbered inside vertex over its boundary triangles; a quadrilateral (only on faces with two inside vertices and one outside) is split from the lower-numbered inside vertex. Both rules depend only on the shared face, so neighbours conform. This replaces the paper's colour-based parity rule; the property tests above are the evidence that the angle bounds still hold.
+- *Deviation is measured against the region's boundary.* The Hausdorff distance is two-sided between the mesh boundary and the input surface, sampled at vertices and face centroids, but input samples with winding number ≥ 1 (faces buried inside the region, as with overlapping shells) are skipped.
+- *Defaults.* Element size 0.03 × part diagonal; maximum deviation 0.05 × part diagonal (raised from 0.01: stuffing rounds sharp corners, e.g. 1.0% on a lattice-aligned cube and 3.5% on a tetrahedron at the default size).
+- *Exit code 20 for every meshed run* until the Delaunay kernel lands: stuffing is by definition the fallback.
+- *Known gap:* a feature thinner than the element size is lost (the synthetic spike case is rejected at 15% deviation); the fix is a smaller element size or, later, grading.
 
 **Milestone 7: Delaunay kernel.** Flat tet array with ghost vertex, BRIO insertion, walking point location, Bowyer–Watson; property tests and TetGen comparison.
 

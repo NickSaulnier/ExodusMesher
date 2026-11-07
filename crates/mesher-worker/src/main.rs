@@ -70,6 +70,14 @@ fn inject_test_fault() {
         Ok("hang") => loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
         },
+        Ok("alloc") => {
+            // Touch 16 MiB at a time, up to 1 GiB, so a memory cap trips.
+            let mut held: Vec<Vec<u8>> = Vec::new();
+            for _ in 0..64 {
+                held.push(vec![1u8; 16 << 20]);
+            }
+            eprintln!("allocated {} MiB without hitting a cap", held.len() * 16);
+        }
         _ => {}
     }
 }

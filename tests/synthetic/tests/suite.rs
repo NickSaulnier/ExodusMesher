@@ -4,7 +4,10 @@
 //! - repair: every repairable finding has a matching repair record, the
 //!   repaired parts pass the surface gate (or fail it exactly where expected),
 //!   no guard trips, and the face and vertex counts before and after repair are
-//!   fully explained by the repair records.
+//!   fully explained by the repair records;
+//! - stuffing (Milestone 6): every repaired part of a closed or nearly closed
+//!   case is meshed with positive tets inside the proven dihedral bounds, and
+//!   accepted meshes are valid and match the enclosed volume.
 
 #![allow(
     clippy::unwrap_used,
@@ -18,9 +21,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::report::MAX_LOCATION_ITEMS;
+use mesher_core::volume::{MeshOutcome, mesh_parts};
 use mesher_core::{DefectCode, JobConfig, Outcome, Record, RecordLog, Stage};
 use mesher_io::parse_obj;
 use mesher_synthetic::{Scene, Solid};
+use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Key {
@@ -43,6 +48,8 @@ struct Case {
     gate_fails: Vec<DefectCode>,
     /// Codes whose repair should be recorded as failed.
     repair_fails: Vec<DefectCode>,
+    /// The surface is open on purpose (stuffing is not expected to apply).
+    open: bool,
 }
 
 fn case(name: &'static str, scene: Scene, expect: Vec<(DefectCode, Key)>) -> Case {
@@ -55,6 +62,7 @@ fn case(name: &'static str, scene: Scene, expect: Vec<(DefectCode, Key)>) -> Cas
         variants: true,
         gate_fails: Vec::new(),
         repair_fails: Vec::new(),
+        open: false,
     }
 }
 
@@ -263,6 +271,7 @@ fn cases() -> Vec<Case> {
         out.push(Case {
             gate_fails: vec![TopBoundaryEdge],
             repair_fails: vec![TopBoundaryEdge],
+            open: true,
             ..case(
                 "hole, open bowl (too large to fill)",
                 Scene::single(bowl),
@@ -441,7 +450,11 @@ struct Run {
     records: Vec<Record>,
     parts: usize,
     repaired: Vec<RepairedPart>,
+    meshes: MeshOutcome,
 }
+
+/// Coarser than the default, to keep the suite fast.
+const SUITE_ELEMENT_SIZE: f64 = 0.06;
 
 fn run(scene: &Scene, parts: &[&str]) -> Run {
     let obj = scene.to_obj();
@@ -458,6 +471,7 @@ fn run(scene: &Scene, parts: &[&str]) -> Run {
         ..JobConfig::default()
     };
     let mut repaired = Vec::new();
+    let mut meshes = MeshOutcome::default();
     if let Some(selected) = select_parts(&diagnosis, &config, &mut log) {
         let mut overlay = diagnosis.overlay.clone();
         check_part_pairs(&model, &diagnosis, &selected, &mut log, &mut overlay).unwrap();
@@ -469,12 +483,85 @@ fn run(scene: &Scene, parts: &[&str]) -> Run {
             &mut log,
         )
         .unwrap();
+        let mesh_config = JobConfig {
+            element_size: SUITE_ELEMENT_SIZE,
+            ..config.clone()
+        };
+        meshes = mesh_parts(&repaired, &mesh_config, &mut log).unwrap();
     }
     Run {
         records: log.records().to_vec(),
         parts: diagnosis.parts.len(),
         repaired,
+        meshes,
     }
+}
+
+/// Milestone 6: stuffing on every repaired part of a closed or nearly closed case.
+fn check_stuffing(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) -> (u32, u32) {
+    if c.open {
+        return (0, 0);
+    }
+    let mut accepted = 0;
+    for r in &run.repaired {
+        let Some((_, s)) = run.meshes.summaries.iter().find(|(i, _)| *i == r.part) else {
+            failures.push(format!("{label}: part {} was not meshed", r.name));
+            continue;
+        };
+        if s.tets == 0 {
+            failures.push(format!("{label}: part {} produced no tets", r.name));
+        }
+        if s.min_dihedral_degrees < DIHEDRAL_MIN_DEGREES
+            || s.max_dihedral_degrees > DIHEDRAL_MAX_DEGREES
+        {
+            failures.push(format!(
+                "{label}: part {} dihedral range {:.2}..{:.2}",
+                r.name, s.min_dihedral_degrees, s.max_dihedral_degrees
+            ));
+        }
+        if !s.accepted {
+            eprintln!(
+                "  not accepted: {label} part {} (hausdorff {:.3} of the diagonal)",
+                r.name, s.hausdorff_relative
+            );
+        }
+        if s.accepted {
+            accepted += 1;
+        }
+        // The enclosed volume is the region's volume only for a surface that
+        // passed the gate (overlapping shells count their overlap twice).
+        if s.accepted && c.gate_fails.is_empty() {
+            let error =
+                (s.volume - s.surface_volume).abs() / s.surface_volume.abs().max(f64::MIN_POSITIVE);
+            if error > 0.15 {
+                failures.push(format!(
+                    "{label}: part {} volume off by {:.1}%",
+                    r.name,
+                    100.0 * error
+                ));
+            }
+        }
+    }
+    for m in &run.meshes.meshed {
+        let mesh = mesher_core::volume::assemble(std::slice::from_ref(m));
+        let problems = mesh.validate(5);
+        if !problems.is_empty() {
+            failures.push(format!(
+                "{label}: part {} mesh invalid: {problems:?}",
+                m.name
+            ));
+        }
+    }
+    for code in [
+        DefectCode::VolInvertedTet,
+        DefectCode::VolLowQuality,
+        DefectCode::MeshBudgetExceeded,
+    ] {
+        if run.records.iter().any(|r| r.code == code) {
+            failures.push(format!("{label}: {}", code.as_str()));
+        }
+    }
+    (run.repaired.len() as u32, accepted)
 }
 
 /// How the suite compares locations for each repairable code.
@@ -597,6 +684,7 @@ struct Tally {
 fn synthetic_suite() {
     let mut tally: BTreeMap<DefectCode, Tally> = BTreeMap::new();
     let mut failures = Vec::new();
+    let (mut stuffed_parts, mut accepted_parts) = (0u32, 0u32);
     let variants = [(1.0, 0.0), (1e-3, 1e3), (1e4, -5e4)];
 
     for c in cases() {
@@ -614,6 +702,9 @@ fn synthetic_suite() {
                 }
             }
             check_repair(&c, &outcome, &label, &mut failures);
+            let (meshed, accepted) = check_stuffing(&c, &outcome, &label, &mut failures);
+            stuffed_parts += meshed;
+            accepted_parts += accepted;
             let mut detected: BTreeMap<DefectCode, Vec<&Record>> = BTreeMap::new();
             for r in outcome
                 .records
@@ -693,6 +784,10 @@ fn synthetic_suite() {
             r
         );
     }
+
+    eprintln!(
+        "\nstuffing: {stuffed_parts} parts meshed, {accepted_parts} accepted by the volume gate"
+    );
 
     // Every diagnosable code is exercised (capacity overflow cannot be synthesized).
     let covered: BTreeSet<DefectCode> = tally
