@@ -60,3 +60,19 @@ fn plan_taxonomy_matches_enum() {
     let in_code: BTreeSet<&str> = DefectCode::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(in_plan, in_code);
 }
+
+/// TetGen (AGPL) may only appear in test-only crates under `tests/`.
+#[test]
+fn shipped_crates_do_not_depend_on_tetgen() {
+    let crates = repo_root().join("crates");
+    for entry in std::fs::read_dir(crates).unwrap() {
+        let manifest = entry.unwrap().path().join("Cargo.toml");
+        if let Ok(text) = std::fs::read_to_string(&manifest) {
+            assert!(
+                !text.contains("tritet"),
+                "{} depends on tritet",
+                manifest.display()
+            );
+        }
+    }
+}

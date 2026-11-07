@@ -414,12 +414,25 @@ Crates are created when their first milestone starts, so early builds do not pul
 - *Gate.* One `surface_gate` error per failed check per part: holes, non-manifold edges or vertices, inconsistent orientation, inverted shells, open sheets, self-intersections, shell overlaps. Slivers are not gated (remeshing is Milestone 10).
 - *Not repaired here:* self-intersections and shell overlaps (the stuffing fallback, Milestone 6), slivers (remeshing, Milestone 10), and bare T-junction slits with no collapsed face to remove (they show as zero-area holes that filling refuses).
 
-**Milestone 5: Writers.**
+**Milestone 5: Writers.** Code and automated checks done (Nov 7, 2026); the ParaView and SEACAS spot checks are still open because neither tool is installed on the development machine. Files to check are written by `cargo test -p mesher-oracle` to `target/tmp/oracle/` (`l_prism.exo`, `.msh`, `.vtu`).
 
-- [ ] Exodus II on `netcdf3`: blocks, side sets with tet face ordinals, node sets, QA and info records, name truncation, capacity check
-- [ ] Gmsh .msh v4 and VTK .vtu writers
-- [ ] TetGen oracle harness in `tests/oracle/` (dev-dependency `tritet`)
-- [ ] Round-trip tests; per-ordinal unit tests on a single tet; ParaView and SEACAS spot checks
+- [x] Volume mesh type (`mesher-core::mesh::VolumeMesh`): points, one block of positive tets per part, side sets as (global element, Exodus side), boundary side sets, validation
+- [x] Exodus II on `netcdf3`: blocks, side sets with tet face ordinals, node sets, QA and info records, name truncation, capacity check
+- [x] Gmsh .msh v4 and VTK .vtu writers
+- [x] TetGen oracle harness in `tests/oracle/` (dev-dependency `tritet`, built with MSVC); a guard test fails if any crate under `crates/` mentions `tritet`
+- [x] Round-trip tests with independent readers (`netcdf3` for Exodus, `mshio` for MSH, `vtkio` for VTU); per-ordinal unit tests on a single tet; byte-identical reruns
+- [x] Side-set ordinals verified per face: on the TetGen L-prism, every side read back from the file lies exactly on one facet plane, points out of the solid (exact `orient3d`), and the sides cover each facet's area
+- [ ] ParaView and SEACAS (`io_info`, `exodiff`) spot checks of the oracle files
+
+**Decisions made in Milestone 5.**
+
+- *Exodus layout.* 32-bit integers (`int64_status` 0), doubles, `file_size` 1 (64-bit offset), `maximum_name_length` 32 with `len_name` 33, an unlimited `time_step` with no steps. Element numbering is global, block by block. Each side set gets a mirroring node set. Empty blocks and sets are written as null entities (status 0, no data), as the Exodus library does; a mesh with no elements at all is refused (`ExodusError::Empty`) rather than written.
+- *Side ordinals.* `mesher_core::mesh::TET_SIDES` is the single source: (1,2,4), (2,3,4), (1,4,3), (1,3,2) in Exodus's 1-based numbering, each ordered outward for a positive tet. The .msh writer reuses it for boundary triangles.
+- *Determinism.* QA date and time are left empty by default so reruns are byte-identical; callers may fill them.
+- *Capacity.* Checked before writing: any variable over 2^32 − 4 bytes, or any count over `i32::MAX`, returns `ExodusError::Capacity`, which the worker will record as `EXO_CAPACITY_EXCEEDED`.
+- *Formats.* .msh and .vtu are ASCII for now (simple and diffable); binary variants can follow if file size matters. Side sets appear in .msh as physical surfaces and are not represented in .vtu.
+- *Wiring.* Nothing produces tetrahedra yet, so the worker does not call the writers; Milestone 6 connects them (blocks per selected part, `<part>_boundary` side sets, `EXO_NAME_TRUNCATED`, `EXO_CAPACITY_EXCEEDED` and `OUT_WRITE_FAILED` records).
+- *Dev-only dependencies.* `vtkio` 0.6.3 and `mshio` pull in `nom` 3 and `quick-xml` 0.22, which trigger future-incompatibility notices; they are test-only and can be replaced if the notices become errors.
 
 ### Phase 4: Volume meshing
 

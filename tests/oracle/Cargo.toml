@@ -1,0 +1,22 @@
+[package]
+name = "mesher-oracle"
+description = "TetGen oracle comparisons for ExodusMesher (test-only; TetGen is AGPL and never shipped)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+mesher-core.workspace = true
+mesher-geom.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+mesher-io.workspace = true
+netcdf3.workspace = true
+tempfile.workspace = true
+tritet.workspace = true
