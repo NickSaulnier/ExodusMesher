@@ -1,0 +1,19 @@
+[package]
+name = "mesher-io"
+description = "OBJ reader and mesh writers for ExodusMesher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mesher-core.workspace = true
+mesher-geom.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

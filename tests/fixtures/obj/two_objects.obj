@@ -1,0 +1,20 @@
+# Two separate tetrahedra as named objects, with a group.
+o left
+g left_shell
+v 0 0 0
+v 1 0 0
+v 0 1 0
+v 0 0 1
+f 1 3 2
+f 1 2 4
+f 2 3 4
+f 3 1 4
+o right
+v 3 0 0
+v 4 0 0
+v 3 1 0
+v 3 0 1
+f -4 -2 -3
+f -4 -3 -1
+f -3 -2 -1
+f -2 -4 -1

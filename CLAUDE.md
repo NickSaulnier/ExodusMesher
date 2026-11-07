@@ -4,7 +4,9 @@ Pure-Rust automatic surface + volume mesher for .obj files, with Exodus II outpu
 
 ## How to work
 
-- Build milestone by milestone (`PLAN.md` > Milestones). Do not start the next milestone until the current one's exit criterion passes. Start with Milestone 1: Foundations.
+- Build milestone by milestone (`PLAN.md` > Milestones). Do not start the next milestone until the current one's exit criterion passes. Track progress in the task checklists under `PLAN.md` > Phases and task breakdown, ticking items as they land. Milestone 1 is done; next is Milestone 2: Geometry core.
+- Integration tests in `crates/*/tests/` allow `unwrap`/`expect`/`panic` at file level; library and binary code must not use them.
+- After changing report types, regenerate the committed schema: `UPDATE_SCHEMA=1 cargo test -p mesher-core --test schema`.
 - Follow the workspace layout in `PLAN.md` (`crates/mesher-*`, `tests/`).
 - Before calling a task done: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
 

@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.obj text eol=lf
+*.bin binary
+*.exo binary
+# Fixtures whose bytes are the point of the test.
+tests/fixtures/**/*crlf* -text

@@ -1,0 +1,641 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Report",
+  "description": "The complete `report.json`.",
+  "type": "object",
+  "properties": {
+    "attempts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Attempt"
+      }
+    },
+    "config": {
+      "$ref": "#/$defs/JobConfig"
+    },
+    "input": {
+      "$ref": "#/$defs/InputInfo"
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Record"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "stages_run": {
+      "description": "Stages that ran, in order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Stage"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/Summary"
+    },
+    "tool": {
+      "$ref": "#/$defs/ToolInfo"
+    }
+  },
+  "required": [
+    "schema_version",
+    "tool",
+    "input",
+    "config",
+    "stages_run",
+    "records",
+    "attempts",
+    "summary"
+  ],
+  "$defs": {
+    "Action": {
+      "description": "What was done about a finding.",
+      "type": "string",
+      "enum": [
+        "skip_line",
+        "drop_face",
+        "fan_triangulate",
+        "merge",
+        "remove",
+        "fill_hole",
+        "split_edge",
+        "duplicate_vertex",
+        "reorient",
+        "flip",
+        "truncate",
+        "fallback",
+        "abort"
+      ]
+    },
+    "Attempt": {
+      "description": "One meshing attempt, in the order tried.",
+      "type": "object",
+      "properties": {
+        "kernel": {
+          "$ref": "#/$defs/Kernel"
+        },
+        "outcome": {
+          "$ref": "#/$defs/AttemptOutcome"
+        },
+        "part": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "stdout": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kernel",
+        "outcome"
+      ]
+    },
+    "AttemptOutcome": {
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed"
+      ]
+    },
+    "CodeCount": {
+      "description": "Per-code totals in the summary.",
+      "type": "object",
+      "properties": {
+        "reported": {
+          "description": "Occurrences with a detailed record in `records`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total": {
+          "description": "Every occurrence found.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "total",
+        "reported"
+      ]
+    },
+    "DefectCode": {
+      "description": "Stable defect codes. Serialized as `SCREAMING_SNAKE_CASE` strings.",
+      "oneOf": [
+        {
+          "description": "Malformed or non-numeric OBJ line",
+          "type": "string",
+          "const": "PARSE_BAD_LINE"
+        },
+        {
+          "description": "Face references a missing vertex",
+          "type": "string",
+          "const": "PARSE_BAD_INDEX"
+        },
+        {
+          "description": "Input file cannot be opened or read",
+          "type": "string",
+          "const": "PARSE_READ_FAILED"
+        },
+        {
+          "description": "No faces survive parsing",
+          "type": "string",
+          "const": "PARSE_NO_GEOMETRY"
+        },
+        {
+          "description": "Lines, points, curves or surfaces in the OBJ file",
+          "type": "string",
+          "const": "PARSE_UNSUPPORTED_ELEMENT"
+        },
+        {
+          "description": "Polygon could not be ear-clipped and was fan-triangulated",
+          "type": "string",
+          "const": "PARSE_POLYGON_FALLBACK"
+        },
+        {
+          "description": "No parts selected, or a named part does not exist",
+          "type": "string",
+          "const": "PART_EMPTY_SELECTION"
+        },
+        {
+          "description": "Two selected parts intersect",
+          "type": "string",
+          "const": "PART_OVERLAP"
+        },
+        {
+          "description": "Two selected parts touch along a surface",
+          "type": "string",
+          "const": "PART_SHARED_INTERFACE"
+        },
+        {
+          "description": "Vertices closer than tolerance",
+          "type": "string",
+          "const": "GEO_DUPLICATE_VERTEX"
+        },
+        {
+          "description": "Zero-area or collinear face",
+          "type": "string",
+          "const": "GEO_DEGENERATE_FACE"
+        },
+        {
+          "description": "Same face listed twice",
+          "type": "string",
+          "const": "GEO_DUPLICATE_FACE"
+        },
+        {
+          "description": "Hole: edge with one adjacent face",
+          "type": "string",
+          "const": "TOP_BOUNDARY_EDGE"
+        },
+        {
+          "description": "Edge shared by three or more faces",
+          "type": "string",
+          "const": "TOP_NONMANIFOLD_EDGE"
+        },
+        {
+          "description": "Vertex joining separate fans",
+          "type": "string",
+          "const": "TOP_NONMANIFOLD_VERTEX"
+        },
+        {
+          "description": "Neighbouring faces disagree on winding",
+          "type": "string",
+          "const": "TOP_INCONSISTENT_ORIENTATION"
+        },
+        {
+          "description": "Shell with negative signed volume",
+          "type": "string",
+          "const": "TOP_INVERTED_SHELL"
+        },
+        {
+          "description": "Surface encloses no volume",
+          "type": "string",
+          "const": "TOP_OPEN_SHEET"
+        },
+        {
+          "description": "Faces of one shell intersect",
+          "type": "string",
+          "const": "INT_SELF_INTERSECTION"
+        },
+        {
+          "description": "Two shells of one part intersect",
+          "type": "string",
+          "const": "INT_SHELL_OVERLAP"
+        },
+        {
+          "description": "Minimum angle below threshold",
+          "type": "string",
+          "const": "QUAL_SLIVER_FACE"
+        },
+        {
+          "description": "Bounding box suggests wrong units",
+          "type": "string",
+          "const": "QUAL_SUSPECT_SCALE"
+        },
+        {
+          "description": "Constrained Delaunay could not recover a facet",
+          "type": "string",
+          "const": "MESH_RECOVERY_FAILED"
+        },
+        {
+          "description": "Steiner-point or element budget hit",
+          "type": "string",
+          "const": "MESH_BUDGET_EXCEEDED"
+        },
+        {
+          "description": "Worker panicked, timed out or ran out of memory",
+          "type": "string",
+          "const": "MESH_WORKER_FAILED"
+        },
+        {
+          "description": "Tetrahedron with non-positive volume",
+          "type": "string",
+          "const": "VOL_INVERTED_TET"
+        },
+        {
+          "description": "Non-orthogonality, skewness or volume ratio out of bounds",
+          "type": "string",
+          "const": "VOL_LOW_QUALITY"
+        },
+        {
+          "description": "Hausdorff distance to input over tolerance",
+          "type": "string",
+          "const": "VOL_BOUNDARY_DEVIATION"
+        },
+        {
+          "description": "Part or set name over the Exodus limit",
+          "type": "string",
+          "const": "EXO_NAME_TRUNCATED"
+        },
+        {
+          "description": "Mesh too large for the 64-bit-offset format",
+          "type": "string",
+          "const": "EXO_CAPACITY_EXCEEDED"
+        },
+        {
+          "description": "An output file could not be written",
+          "type": "string",
+          "const": "OUT_WRITE_FAILED"
+        }
+      ]
+    },
+    "InputInfo": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "The input path exactly as given.",
+          "type": "string"
+        },
+        "stats": {
+          "description": "Absent when the file could not be read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "InputStats": {
+      "description": "What the parser found in the input.",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "groups": {
+          "description": "`g` names in order of first appearance.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "lines": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "objects": {
+          "description": "`o` names in order of first appearance.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "polygons": {
+          "description": "Faces as written in the file (polygons of any size).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "triangles": {
+          "description": "Triangles after triangulating the polygons.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vertices": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "bytes",
+        "lines",
+        "vertices",
+        "polygons",
+        "triangles"
+      ]
+    },
+    "JobConfig": {
+      "description": "User-facing job settings (the policy flags). Recorded in the report.",
+      "type": "object",
+      "properties": {
+        "max_deviation": {
+          "description": "Largest acceptable fallback deviation, relative to the bounding-box diagonal.",
+          "type": "number",
+          "format": "double",
+          "default": 0.01
+        },
+        "no_repair": {
+          "description": "Diagnose and report only.",
+          "type": "boolean",
+          "default": false
+        },
+        "parts": {
+          "description": "Names or indices of the parts to mesh; empty means all.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "strict": {
+          "description": "Conformal paths only; never use the stuffing fallback.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "Kernel": {
+      "description": "Volume kernel used by a meshing attempt.",
+      "type": "string",
+      "enum": [
+        "delaunay",
+        "stuffing"
+      ]
+    },
+    "Location": {
+      "description": "Where a finding is. Vertex and face indices are 0-based into the parsed\narrays; `obj_lines` are 1-based line numbers in the input file.",
+      "type": "object",
+      "properties": {
+        "faces": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "obj_lines": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "point": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "vertices": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "Outcome": {
+      "description": "Result of the action.",
+      "oneOf": [
+        {
+          "description": "The action was carried out.",
+          "type": "string",
+          "const": "applied"
+        },
+        {
+          "description": "The action was attempted and did not succeed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Left for a later stage to decide.",
+          "type": "string",
+          "const": "deferred"
+        }
+      ]
+    },
+    "Record": {
+      "description": "One finding.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Action"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/DefectCode"
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "$ref": "#/$defs/Location"
+        },
+        "measured": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Outcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "part": {
+          "description": "Part the finding belongs to, once parts exist.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "stage": {
+          "$ref": "#/$defs/Stage"
+        },
+        "threshold": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "stage"
+      ]
+    },
+    "Severity": {
+      "oneOf": [
+        {
+          "description": "Noteworthy, no action needed.",
+          "type": "string",
+          "const": "info"
+        },
+        {
+          "description": "Repaired automatically; output still valid.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Blocks a stage; a fallback may still succeed.",
+          "type": "string",
+          "const": "error"
+        },
+        {
+          "description": "No usable output possible.",
+          "type": "string",
+          "const": "fatal"
+        }
+      ]
+    },
+    "Stage": {
+      "description": "Pipeline stage that produced a record.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "parse",
+            "diagnose",
+            "select",
+            "repair",
+            "surface_gate",
+            "sizing",
+            "volume_mesh",
+            "volume_gate",
+            "emit"
+          ]
+        },
+        {
+          "description": "The worker process itself (crash, timeout, protocol failure).",
+          "type": "string",
+          "const": "worker"
+        }
+      ]
+    },
+    "Summary": {
+      "description": "Counts and the resulting exit code.",
+      "type": "object",
+      "properties": {
+        "by_code": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CodeCount"
+          }
+        },
+        "errors": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "exit_code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "fatal": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "info": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "exit_code",
+        "info",
+        "warnings",
+        "errors",
+        "fatal",
+        "by_code"
+      ]
+    },
+    "ToolInfo": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ]
+    }
+  }
+}

@@ -173,6 +173,10 @@ Every finding is a structured record with a stable code, a severity, a location 
 | --- | --- | --- |
 | `PARSE_BAD_LINE` | Malformed or non-numeric OBJ line | Skip line, warning |
 | `PARSE_BAD_INDEX` | Face references a missing vertex | Drop face, warning |
+| `PARSE_READ_FAILED` | Input file cannot be opened or read | Fatal |
+| `PARSE_NO_GEOMETRY` | No faces survive parsing | Fatal |
+| `PARSE_UNSUPPORTED_ELEMENT` | Lines, points, curves or surfaces (`l`, `p`, `curv`, `surf`, ...) | Skip line, info |
+| `PARSE_POLYGON_FALLBACK` | Polygon could not be ear-clipped (degenerate, self-overlapping or over 256 vertices) | Fan-triangulate, warning |
 | `PART_EMPTY_SELECTION` | No parts selected, or a named part does not exist | Fatal |
 | `PART_OVERLAP` | Two selected parts intersect | Error |
 | `PART_SHARED_INTERFACE` | Two selected parts touch along a surface | Info; meshed independently in v1 |
@@ -197,6 +201,7 @@ Every finding is a structured record with a stable code, a severity, a location 
 | `VOL_BOUNDARY_DEVIATION` | Hausdorff distance to input over tolerance | Error |
 | `EXO_NAME_TRUNCATED` | Part or set name over the Exodus limit | Truncate, warning |
 | `EXO_CAPACITY_EXCEEDED` | Mesh too large for the 64-bit-offset format | Error |
+| `OUT_WRITE_FAILED` | An output file could not be written | Fatal |
 
 **Record shape.**
 
@@ -298,6 +303,97 @@ Build the reporting spine before any meshing, so every later feature lands with 
    - Exit: select parts of a multi-object OBJ and export an Exodus file with one block per part, reproducible from the CLI.
 10. **Sizing, benchmark and hardening.** Sizing field and surface remeshing, full Thingi10k run, profiling, CI regression subset, documentation.
     - Exit: published outcome table by path, against TetGen, with CI green.
+
+## Phases and task breakdown
+
+The milestones group into six phases. Phases run in order, except the GUI phase, which can start once Phase 2 is done. A milestone's tasks are ticked when they land; the milestone is done only when its exit criterion passes under `cargo fmt`, `cargo clippy -D warnings` and `cargo test --workspace`.
+
+| Phase | Milestones | Delivers |
+| --- | --- | --- |
+| 1. Reporting spine | 1 | Workspace, report schema, parser, worker, CLI: any file in, a valid report out |
+| 2. Geometry and diagnosis | 2, 3 | Exact geometry core, part splitting, the full defect taxonomy, synthetic suite |
+| 3. Repair and output | 4, 5 | Logged repairs and surface gate; Exodus, .msh and .vtu writers |
+| 4. Volume meshing | 6, 7, 8 | Stuffing fallback end to end, then the constrained Delaunay kernel |
+| 5. GUI | 9 | egui front end over the worker (can start after Phase 2) |
+| 6. Hardening | 10 | Sizing, Thingi10k benchmark, CI regression gate |
+
+Crates are created when their first milestone starts, so early builds do not pull in GUI or solver dependencies.
+
+### Phase 1: Reporting spine
+
+**Milestone 1: Foundations.** Done (Nov 7, 2026): the exit criterion is enforced by `crates/mesher-cli/tests/cli.rs`, which runs the real binaries on hostile and random inputs.
+
+- [x] Workspace: `mesher-geom`, `mesher-core`, `mesher-io`, `mesher-worker`, `mesher-cli`; `.gitattributes` forcing LF; `tests/fixtures/obj/`
+- [x] Report types in `mesher-core::report`: `DefectCode` (one variant per taxonomy row, with default severity), `Severity`, `Stage`, `Record`, `Location`, `Attempt`, `Report`, `Summary`
+- [x] JSON schema generated with `schemars`, committed as `schema/report.schema.json`; a test fails when it is stale (regenerate with `UPDATE_SCHEMA=1 cargo test -p mesher-core`)
+- [x] A test that the `DefectCode` enum and the taxonomy table in this file list the same codes
+- [x] Record capping: at most 100 detailed records per code; the summary keeps exact totals per code, so garbage input cannot produce an unbounded report
+- [x] Exit-code rule (below) in `mesher-core::exit`
+- [x] Polygon triangulation in `mesher-geom`: ear clipping in the plane of the Newell normal with `robust::orient2d`; fan fallback, recorded as `PARSE_POLYGON_FALLBACK`, for degenerate, self-overlapping or very large (over 256 vertices) polygons
+- [x] Tolerant OBJ parser in `mesher-io::obj`: byte-level line splitting (LF, CRLF, CR), `\` continuations, comments, invalid UTF-8, negative and forward indices, `v/vt/vn` face tokens, `o` and `g` names; vertex and face OBJ-line provenance
+- [x] Worker protocol in `mesher-core::protocol`, worker binary reading the job from stdin and writing `report.json`
+- [x] CLI skeleton: `mesher run`, `mesher schema`; worker timeout; panics and timeouts become `MESH_WORKER_FAILED`
+- [x] Tests: parser unit tests, property tests on arbitrary bytes and OBJ-like token streams, worker and CLI end-to-end tests on garbage, schema validation of every report, byte-identical reruns
+- Deferred: the worker memory cap (Windows job object, `setrlimit` elsewhere) moves to Milestone 6, when meshing can first allocate without bound; project files (`mesher run project.toml`) move to Milestone 9
+
+**Decisions made in Milestone 1.**
+
+- *Exit codes.* Computed from the records: any `error` or `fatal` gives `30`; otherwise any attempt that used the stuffing fallback gives `20`; otherwise any `warning` gives `10`; otherwise `0`. A worker panic gives `70`; a timeout is a `MESH_WORKER_FAILED` error and gives `30`. Command-line usage errors exit with clap's `2`.
+- *Index conventions.* Record `vertices` and `faces` are 0-based indices into the parsed arrays; `obj_lines` are 1-based line numbers in the input file.
+- *Determinism.* Reports carry no timestamps or absolute paths beyond what the user passed; maps are `BTreeMap`.
+- *Worker protocol (version 1).* The job is one JSON document on the worker's stdin. Stdout is JSON lines tagged by `type`: `started` (protocol and worker version), `progress` (stage, fraction), `record` (a report record), `result` (exit code, report path). The worker writes `report.json` itself; if the worker dies, the CLI writes it from the records already streamed plus a `MESH_WORKER_FAILED` record carrying the tail of the worker's stderr. The environment variable `MESHER_TEST_FAULT=panic|hang` makes the worker fail on purpose, for testing that path.
+- *Pipeline extent.* The report lists `stages_run`; in Milestone 1 the pipeline stops after `parse`.
+
+### Phase 2: Geometry and diagnosis
+
+**Milestone 2: Geometry core.**
+
+- [ ] Predicate wrappers (`orient2d`, `orient3d`, `insphere`) returning a sign enum
+- [ ] Half-edge mesh built from triangle soup, tolerating non-manifold input (edge-to-faces map alongside)
+- [ ] BVH over triangles: ray cast, nearest point, triangle-pair overlap candidates
+- [ ] Exact triangle-triangle intersection test on the predicates
+- [ ] Generalized winding number, with a hierarchical fast path checked against the brute-force sum
+- [ ] Property tests against brute-force references, including degenerate inputs
+
+**Milestone 3: Diagnosis and parts.**
+
+- [ ] Part splitting: `o`/`g` names, else connected components
+- [ ] Detectors for every `GEO_`, `TOP_`, `INT_`, `PART_` and `QUAL_` code
+- [ ] Relative tolerances from the bounding-box diagonal; `QUAL_SUSPECT_SCALE`
+- [ ] Defect overlay writer (.vtp)
+- [ ] Synthetic suite in `tests/synthetic/`: clean shapes plus one-defect injectors, asserting exact codes and locations; precision and recall per code
+
+### Phase 3: Repair and output
+
+**Milestone 4: Repair.**
+
+- [ ] Ordered repairs: merge, remove degenerates and duplicates, reorient, flip inverted shells, split non-manifold edges and vertices, fill small holes
+- [ ] Provenance maps updated by every repair; before-and-after logged per record
+- [ ] Shell-count and enclosed-volume guards
+- [ ] Surface gate; `--no-repair` stops after diagnosis
+
+**Milestone 5: Writers.**
+
+- [ ] Exodus II on `netcdf3`: blocks, side sets with tet face ordinals, node sets, QA and info records, name truncation, capacity check
+- [ ] Gmsh .msh v4 and VTK .vtu writers
+- [ ] TetGen oracle harness in `tests/oracle/` (dev-dependency `tritet`)
+- [ ] Round-trip tests; per-ordinal unit tests on a single tet; ParaView and SEACAS spot checks
+
+### Phase 4: Volume meshing
+
+**Milestone 6: Stuffing kernel.** Octree-graded BCC lattice, winding-number cut, snap and warp, Hausdorff deviation, worker memory cap, first end-to-end OBJ to Exodus.
+
+**Milestone 7: Delaunay kernel.** Flat tet array with ghost vertex, BRIO insertion, walking point location, Bowyer–Watson; property tests and TetGen comparison.
+
+**Milestone 8: Recovery and refinement.** Edge and facet recovery with a Steiner budget, region marking, Delaunay refinement, sliver removal, finite-volume quality metrics, `mesher-fvm` Poisson check.
+
+### Phase 5: GUI
+
+**Milestone 9: GUI.** `mesher-gui` with wgpu viewport, part tree, picking, overlay, run panel, export, project files shared with the CLI.
+
+### Phase 6: Hardening
+
+**Milestone 10: Sizing, benchmark and hardening.** Sizing field and isotropic remeshing, full Thingi10k run, profiling, CI regression subset with golden reports, documentation.
 
 **After v1.** Conformal interfaces between touching parts (shared side sets in Exodus), a polyhedral dual mesh for the finite-volume solver, TETRA10 elements, boundary-layer prisms, a model that predicts failure from surface features before meshing, and an agent loop that reads the report and chooses repairs.
 

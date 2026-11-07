@@ -1,0 +1,19 @@
+[package]
+name = "mesher-core"
+description = "Report types, worker protocol and pipeline logic for ExodusMesher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true
+
+[lints]
+workspace = true
