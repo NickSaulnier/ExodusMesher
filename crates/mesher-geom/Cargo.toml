@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 robust.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

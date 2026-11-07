@@ -39,9 +39,9 @@ Everything ships as pure Rust in one Cargo workspace; the only C++ in the projec
 | --- | --- | --- |
 | Structure | Cargo workspace: core libraries, a worker binary, CLI, GUI | One engine, two front ends |
 | Exact predicates | `robust` crate (orient3d, insphere) | Adaptive-precision Shewchuk predicates; every topological decision rests on them |
-| Linear algebra | `nalgebra` | Mature, well-typed small vectors and matrices |
-| Spatial queries | Own BVH, or `parry3d` | Intersection, nearest-point and ray queries |
-| Inside/outside | Generalized winding number, own implementation | Stays meaningful on surfaces with holes and self-intersections |
+| Linear algebra | `[f64; 3]` helpers now; `nalgebra` once matrices are needed | Points need nothing more; avoids a dependency until smoothing and sizing |
+| Spatial queries | Own BVH | Intersection, nearest-point and ray queries; exact boxes, so overlap candidates are never missed |
+| Inside/outside | Generalized winding number, own implementation, with an exact boundary-cap fast path | Stays meaningful on surfaces with holes and self-intersections |
 | Parallelism | `rayon` | Diagnosis and quality checks run per face or per tet |
 | Volume meshing | Own kernels: isosurface stuffing and constrained Delaunay | The experiment; see Volume mesher |
 | Test oracle | TetGen via [`tritet`](https://docs.rs/crate/tritet/latest), dev-dependency only | Benchmark against a mature mesher without shipping AGPL code |
@@ -346,17 +346,28 @@ Crates are created when their first milestone starts, so early builds do not pul
 
 ### Phase 2: Geometry and diagnosis
 
-**Milestone 2: Geometry core.**
+**Milestone 2: Geometry core.** Done (Nov 7, 2026): every property test agrees with its brute-force reference, and the oracle tests were also run at 100,000 cases each.
 
-- [ ] Predicate wrappers (`orient2d`, `orient3d`, `insphere`) returning a sign enum
-- [ ] Half-edge mesh built from triangle soup, tolerating non-manifold input (edge-to-faces map alongside)
-- [ ] BVH over triangles: ray cast, nearest point, triangle-pair overlap candidates
-- [ ] Exact triangle-triangle intersection test on the predicates
-- [ ] Generalized winding number, with a hierarchical fast path checked against the brute-force sum
-- [ ] Property tests against brute-force references, including degenerate inputs
+- [x] Predicate wrappers (`orient2d`, `orient3d`, `insphere`) returning a sign enum, plus exact helpers (`collinear`, `plane_axis`, cyclic `project`)
+- [x] `TriangleSoup`: validated borrowed input (finite coordinates, indices in range, `3 × triangles` fits `u32`), failing with `GeomError`
+- [x] Half-edge mesh built from triangle soup, tolerating non-manifold input (edge-to-faces map alongside): edge kinds `Boundary`, `Manifold`, `Inconsistent`, `NonManifold`, `Degenerate`; vertex fan counts
+- [x] BVH over triangles: ray cast, nearest point, triangle-pair overlap candidates (within one soup and between two)
+- [x] Exact triangle-triangle intersection test on the predicates, plus `faces_intersect`, which ignores contact along the vertices or edge two mesh faces share
+- [x] Generalized winding number, with a hierarchical fast path checked against the brute-force sum
+- [x] Property tests against brute-force references, including degenerate inputs (`crates/mesher-geom/tests/`)
+
+**Decisions made in Milestone 2.**
+
+- *Orientation convention.* `orient3d(a, b, c, d)` is positive for a positive-volume tetrahedron (the opposite of Shewchuk's raw sign, which the wrapper flips); `insphere` is positive inside for a positively oriented tetrahedron. Unit tests pin both.
+- *Exact intersection.* Two closed convex sets that meet have an extreme point of their intersection on one set's boundary, so triangles meet exactly when an edge of one meets the other. Coplanar work happens in a coordinate projection chosen by an exact nonzero normal component, so no coordinates are ever computed. The reference is an exact rational linear program (enumerating basic feasible solutions of the barycentric system) on integer grids, sharing no code with the implementation.
+- *Winding-number fast path.* Not the dipole approximation of Barill et al. (2018) but an exact identity: outside a node's box, a patch has the same winding number as the cone over its boundary loop (Jacobson et al., 2013), so a node costs one solid angle per boundary edge. Caps are stored only where shorter than the node's triangle list; closed regions cost nothing.
+- *Vectors.* Points are plain `[f64; 3]` with small helpers in `mesher-geom::vec3`; `nalgebra` waits until a milestone needs matrices (smoothing, sizing).
+- *Floating-point queries.* Ray casts and nearest points are measurements, not topology. Their BVH culling is padded so it never drops a triangle a linear scan would accept; tests compare results within `1e-9` relative.
 
 **Milestone 3: Diagnosis and parts.**
 
+- [ ] Map `GeomError` to records: non-finite coordinates and out-of-range indices cannot reach diagnosis from the parser (assert in tests); `TooLarge` needs a new code (add it to the taxonomy then)
+- [ ] Exclude degenerate faces from intersection tests (they get `GEO_DEGENERATE_FACE`; `faces_intersect` falls back to plain contact for them)
 - [ ] Part splitting: `o`/`g` names, else connected components
 - [ ] Detectors for every `GEO_`, `TOP_`, `INT_`, `PART_` and `QUAL_` code
 - [ ] Relative tolerances from the bounding-box diagonal; `QUAL_SUSPECT_SCALE`
