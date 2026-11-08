@@ -5,9 +5,13 @@
 pub mod conforming;
 pub mod delaunay;
 pub mod quality;
+pub mod remesh;
+pub mod sizing;
 pub mod stuffing;
 
 pub use conforming::{ConformingError, ConformingMesh, ConformingParams, conforming_mesh};
 pub use delaunay::{Delaunay, DelaunayError, Inserted, Tetrahedralization, delaunay};
 pub use quality::{FvQuality, dihedral_angles, dihedral_range, fv_quality};
+pub use remesh::{RemeshError, RemeshParams, Remeshed, remesh};
+pub use sizing::{SizeField, SizingParams};
 pub use stuffing::{Stuffed, StuffingError, StuffingParams, stuff};

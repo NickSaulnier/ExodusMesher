@@ -40,6 +40,7 @@
 //! boundary, is an error the caller turns into a fallback.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use mesher_geom::predicates::{incircle, insphere, orient2d, orient3d};
 use mesher_geom::vec3::{add, cross, distance_squared, dot, norm, scale, sub};
@@ -47,11 +48,17 @@ use mesher_geom::{FastWindingNumber, Point3, Sign, TriangleSoup};
 
 use crate::delaunay::{Delaunay, DelaunayError, Inserted, Walk};
 use crate::quality::dihedral_angles;
+use crate::sizing::SizeField;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConformingParams {
-    /// Tets with a larger circumradius are refined.
+    /// Tets with a larger circumradius are refined. With a size field, the
+    /// largest size anywhere (the field is capped at it).
     pub max_circumradius: f64,
+    /// Target size by position: a tet whose circumradius exceeds the size at
+    /// its centroid is refined, and the point budget follows the field.
+    /// `None`: `max_circumradius` everywhere.
+    pub size: Option<Arc<SizeField>>,
     /// Tets with a larger circumradius-to-shortest-edge ratio are refined.
     pub radius_edge_bound: f64,
     /// Refuse to grow beyond this many points; `0` sizes the budget from the
@@ -83,6 +90,7 @@ impl ConformingParams {
     pub fn with_size(max_circumradius: f64) -> ConformingParams {
         ConformingParams {
             max_circumradius,
+            size: None,
             radius_edge_bound: 2.0,
             max_points: 0,
             max_work: 0,
@@ -1387,6 +1395,12 @@ impl Builder<'_> {
         }
     }
 
+    /// The target size at `p`: the size field's, capped at the maximum.
+    fn size_at(&self, p: Point3) -> f64 {
+        let h = self.params.max_circumradius;
+        self.params.size.as_ref().map_or(h, |f| f.at(p).min(h))
+    }
+
     /// Count one kernel step; an error once the work budget is spent.
     fn step(&mut self) -> Result<(), ConformingError> {
         self.work += 1;
@@ -1555,7 +1569,7 @@ impl Builder<'_> {
                 .sqrt();
             // A tet with an edge below the floor owes its shape to a small
             // input feature; refining it would chase the feature forever.
-            let bad = r > self.params.max_circumradius
+            let bad = r > self.size_at(centroid)
                 || (r > self.params.radius_edge_bound * shortest
                     && shortest >= self.params.min_boundary_size);
             if !bad || !self.attempt(v) {
@@ -1678,16 +1692,29 @@ pub fn conforming_mesh(
     let budget = if params.max_points > 0 {
         params.max_points
     } else {
+        // Elements fill the volume at the maximum size, plus the surface at
+        // its local size; where the size is smaller, its graded layer (about
+        // h / gradation thick) adds ∫ 1/(h + g d)³ dd = 1/(2 g h²) per unit
+        // area over what the maximum size would put there.
         let h = params.max_circumradius;
-        let (mut area, mut volume) = (0.0f64, 0.0f64);
+        let field = params.size.as_deref();
+        let g = field.map_or(0.0, SizeField::gradation);
+        let (mut surface, mut volume) = (0.0f64, 0.0f64);
         for t in triangles {
             let [a, b, c] = t.map(|v| points[v as usize]);
-            area += norm(cross(sub(b, a), sub(c, a))) / 2.0;
+            let area = norm(cross(sub(b, a), sub(c, a))) / 2.0;
+            let local = field.map_or(h, |f| {
+                f.at(scale(add(add(a, b), c), 1.0 / 3.0)).clamp(f.min(), h)
+            });
+            surface += area / (local * local);
+            if g > 0.0 && local < h {
+                surface += area * (1.0 / (local * local) - 1.0 / (h * h)) / (2.0 * g);
+            }
             // Relative to a vertex: far from the origin the products cancel.
             let o = points[0];
             volume += dot(sub(a, o), cross(sub(b, o), sub(c, o))) / 6.0;
         }
-        let estimate = volume.abs() / h.powi(3) + area / (h * h) + points.len() as f64;
+        let estimate = volume.abs() / h.powi(3) + surface + points.len() as f64;
         ((20.0 * estimate) as usize).clamp(10_000, 4_000_000)
     };
     let work = if params.max_work > 0 {

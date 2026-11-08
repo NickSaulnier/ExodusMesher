@@ -320,6 +320,22 @@ fn repair_part(
     })
 }
 
+/// Whether a surface passes every surface-gate check, without recording
+/// anything: for a surface built after repair, such as a remeshed one.
+pub(crate) fn passes_gate(points: &[Point3], faces: &[[u32; 3]], tol: &Tolerances) -> bool {
+    let Ok(a) = analyze_surface(points, faces, faces, tol) else {
+        return false;
+    };
+    a.loops.iter().all(|l| a.sheet[l.shell])
+        && a.nonmanifold_edges.is_empty()
+        && a.nonmanifold_vertices.is_empty()
+        && a.disagreements.is_empty()
+        && !a.sheet.iter().any(|&s| s)
+        && !a.inverted.iter().any(|&i| i)
+        && a.self_pairs.is_empty()
+        && a.shell_overlaps.is_empty()
+}
+
 /// Connected pieces of a surface by its vertex ids.
 fn components(faces: &[[u32; 3]]) -> usize {
     let mut dense: BTreeMap<u32, u32> = BTreeMap::new();

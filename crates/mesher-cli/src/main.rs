@@ -58,6 +58,14 @@ struct RunArgs {
     /// [default: 0.03].
     #[arg(long, value_parser = positive)]
     element_size: Option<f64>,
+    /// Mesh at the element size everywhere, without grading it down where
+    /// the surface curves or the part is thin.
+    #[arg(long)]
+    uniform_size: bool,
+    /// When a part's conformal mesh fails, go straight to the stuffing
+    /// fallback instead of remeshing its surface and retrying.
+    #[arg(long)]
+    no_remesh: bool,
     /// Kill the worker after this many seconds.
     #[arg(long, default_value_t = 3600.0, value_parser = positive)]
     timeout: f64,
@@ -108,6 +116,8 @@ fn run(args: RunArgs) -> i32 {
     }
     c.no_repair |= args.no_repair;
     c.strict |= args.strict;
+    c.uniform_size |= args.uniform_size;
+    c.no_remesh |= args.no_remesh;
     if let Some(d) = args.max_deviation {
         c.max_deviation = d;
     }

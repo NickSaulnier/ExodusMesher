@@ -4,7 +4,7 @@ A pure-Rust automatic mesher that turns OBJ files, as they occur in the wild, in
 
 - **Inputs:** OBJ with triangles, quads and n-gons, several objects and groups, and the usual defects (duplicate vertices, degenerate faces, holes, non-manifold edges, flipped or inconsistent orientation, self-intersections, touching or nested shells, unknown units).
 - **Outputs:** Exodus II (`mesh.exo`, one `TETRA4` block per part, side sets per part boundary and OBJ group), Gmsh `.msh` v4, VTK `.vtu`, the repaired surface (`repaired.obj`), a defect overlay for ParaView (`defects.vtp`) and `report.json`.
-- **Meshing:** a constrained Delaunay kernel that conforms exactly to the surface, with isosurface stuffing as the recorded fallback when it cannot. Both are written here; TetGen is used only as a test oracle.
+- **Meshing:** a constrained Delaunay kernel that conforms exactly to the surface, with a size field graded for curvature and thin walls. When it cannot mesh a part, the part's surface is remeshed and the kernel retried; isosurface stuffing is the last, recorded fallback. Both are written here; TetGen is used only as a test oracle.
 - **Front ends:** a CLI and a desktop GUI (egui with a wgpu viewport). Both run the meshing in a separate `mesher-worker` process under a timeout and memory cap, so a crash or a runaway refinement becomes a report, not a hang.
 
 The design, decisions and benchmark results are in [PLAN.md](PLAN.md).
@@ -43,6 +43,8 @@ mesher: model.obj
 | `--element-size F` | Target element size, relative to each part's bounding-box diagonal (default 0.03) |
 | `--max-deviation F` | Largest acceptable fallback deviation, relative to the diagonal (default 0.05) |
 | `--strict` | Conformal meshes only; never use the stuffing fallback |
+| `--uniform-size` | Mesh at the element size everywhere (by default the size is graded down to a quarter of it where the surface curves or the part is thin) |
+| `--no-remesh` | When a part's conformal mesh fails, skip remeshing its surface and retrying before the stuffing fallback |
 | `--no-repair` | Diagnose and report only (a linter) |
 | `--timeout S`, `--memory-limit MiB` | Limits for the worker (defaults 3600 s, 8192 MiB) |
 

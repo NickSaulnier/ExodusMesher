@@ -387,6 +387,14 @@ impl App {
                     theme::switch(ui, &mut s.no_repair);
                     ui.label(theme::dim("diagnose and report only").small());
                     ui.end_row();
+                    ui.label("Uniform size");
+                    theme::switch(ui, &mut s.uniform_size);
+                    ui.label(theme::dim("no grading for curvature or thin walls").small());
+                    ui.end_row();
+                    ui.label("No remesh");
+                    theme::switch(ui, &mut s.no_remesh);
+                    ui.label(theme::dim("no remesh-and-retry before the fallback").small());
+                    ui.end_row();
                 });
             ui.add_space(4.0);
             ui.horizontal(|ui| {

@@ -10,7 +10,9 @@ use std::time::Instant;
 use mesher_geom::predicates::orient3d;
 use mesher_geom::vec3::{cross, dot, sub};
 use mesher_geom::{Point3, Sign};
-use mesher_tet::{ConformingError, ConformingParams, conforming_mesh, dihedral_range};
+use mesher_tet::{
+    ConformingError, ConformingParams, RemeshParams, conforming_mesh, dihedral_range, remesh,
+};
 
 type Surface = (Vec<Point3>, Vec<[u32; 3]>);
 
@@ -337,7 +339,7 @@ fn shapes_mesh_conformally() {
 #[ignore = "known gap: facets coplanar only to rounding noise (PLAN.md improvement 3)"]
 fn rounded_uv_sphere_meshes_conformally() {
     let (p, f) = uv_sphere(16, 10, 0.8);
-    let p = p
+    let p: Vec<Point3> = p
         .into_iter()
         .map(|q| {
             let c = [1.0, 1.0, 1.5];
@@ -345,6 +347,33 @@ fn rounded_uv_sphere_meshes_conformally() {
         })
         .collect();
     check("UV sphere 6dp", &(p, f), 0.083);
+}
+
+/// The rounded UV sphere that fails as given meshes conformally once it is
+/// remeshed (the pipeline's retry before the stuffing fallback).
+#[test]
+fn rounded_uv_sphere_meshes_after_remeshing() {
+    let (p, f) = uv_sphere(16, 10, 0.8);
+    let p: Vec<Point3> = p
+        .into_iter()
+        .map(|q| {
+            let c = [1.0, 1.0, 1.5];
+            [0, 1, 2].map(|k| ((q[k] + c[k]) * 1e6).round() / 1e6)
+        })
+        .collect();
+    let r = remesh(&p, &f, &[], &|_| 0.083, &RemeshParams::default()).unwrap();
+    // Each remeshed triangle is its own facet: they are Delaunay already, and
+    // merging those that lie on one input facet makes recovery cascade.
+    let params = ConformingParams {
+        groups: (0..r.triangles.len() as u32).collect(),
+        ..ConformingParams::with_size(0.083)
+    };
+    let m = conforming_mesh(&r.points, &r.triangles, &params)
+        .unwrap_or_else(|e| panic!("remeshed sphere: {e}"));
+    assert!(m.tets.len() > 1000);
+    assert_eq!(m.slivers_left, 0);
+    let (lo, _) = dihedral_range(&m.points, &m.tets).unwrap();
+    assert!(lo >= 10.0, "{lo}");
 }
 
 /// A cube whose first triangle is split around a point 0.2% off one edge: the

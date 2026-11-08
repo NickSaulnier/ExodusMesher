@@ -95,6 +95,10 @@
             "null"
           ]
         },
+        "remeshed": {
+          "description": "The attempt meshed the remeshed surface, not the repaired one.",
+          "type": "boolean"
+        },
         "stderr": {
           "type": "string"
         },
@@ -409,6 +413,10 @@
           "format": "double",
           "default": 0.05
         },
+        "no_remesh": {
+          "description": "When the conformal mesh of a part fails, do not remesh its surface\nand retry before the stuffing fallback.",
+          "type": "boolean"
+        },
         "no_repair": {
           "description": "Diagnose and report only.",
           "type": "boolean",
@@ -429,6 +437,10 @@
         },
         "stuffing_only": {
           "description": "Skip the conformal kernel and mesh with stuffing only. Set by the\nclient when a worker running the conformal kernel timed out or ran out\nof memory, for its one retry (`MESH_WORKER_FAILED`, fallback).",
+          "type": "boolean"
+        },
+        "uniform_size": {
+          "description": "Mesh at `element_size` everywhere, without the sizing field (which\ngrades the size down to an eighth of it where the surface is curved\nor the part is thin).",
           "type": "boolean"
         }
       },
@@ -503,7 +515,7 @@
           }
         },
         "element_size": {
-          "description": "Element size used (absolute).",
+          "description": "Element size used (absolute): the largest target size.",
           "type": "number",
           "format": "double"
         },
@@ -548,10 +560,22 @@
           "type": "number",
           "format": "double"
         },
+        "min_element_size": {
+          "description": "Smallest target size of the sizing field (absolute), when the size\nwas graded (conformal meshes without `uniform_size`).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "nodes": {
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "remeshed": {
+          "description": "The mesh conforms to the remeshed surface, not the repaired one (the\nconformal mesh of the repaired surface failed); its deviation from\nthe repaired surface is `hausdorff`.",
+          "type": "boolean"
         },
         "steiner_points": {
           "description": "Points the kernel added (Delaunay: boundary and interior Steiner points).",

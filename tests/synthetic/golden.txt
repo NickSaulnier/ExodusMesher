@@ -10,9 +10,9 @@ clean grid cube [x10000 +-50000]		0 delaunay accepted 4645 10.1 20.1
 clean icosphere [x1 +0]		0 delaunay accepted 2208 10.7 20.9
 clean icosphere [x0.001 +1000]		0 delaunay accepted 2185 10.2 20.8
 clean icosphere [x10000 +-50000]		0 delaunay accepted 2213 10.1 21.0
-clean torus [x1 +0]		0 delaunay accepted 1044 10.9 22.2
-clean torus [x0.001 +1000]		0 delaunay accepted 1087 10.4 21.9
-clean torus [x10000 +-50000]		0 delaunay accepted 1082 10.2 22.0
+clean torus [x1 +0]		0 delaunay accepted 1810 11.2 20.9
+clean torus [x0.001 +1000]		0 delaunay accepted 1733 10.4 21.0
+clean torus [x10000 +-50000]		0 delaunay accepted 1812 10.9 20.6
 clean hollow cube (cavity joins its component) [x1 +0]		0 delaunay accepted 4473 10.4 19.3
 clean hollow cube (cavity joins its component) [x0.001 +1000]		0 delaunay accepted 4445 10.3 20.2
 clean hollow cube (cavity joins its component) [x10000 +-50000]		0 delaunay accepted 4362 10.5 19.6
@@ -67,9 +67,9 @@ inconsistent orientation, five faces [x10000 +-50000]	TOP_INCONSISTENT_ORIENTATI
 inverted cube [x1 +0]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4268 10.0 20.3
 inverted cube [x0.001 +1000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4375 10.0 20.4
 inverted cube [x10000 +-50000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4394 10.2 20.2
-inverted torus [x1 +0]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 1044 10.9 22.2
-inverted torus [x0.001 +1000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 1087 10.4 21.9
-inverted torus [x10000 +-50000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 1082 10.2 22.0
+inverted torus [x1 +0]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 1810 11.2 20.9
+inverted torus [x0.001 +1000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 1733 10.4 21.0
+inverted torus [x10000 +-50000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 1812 10.9 20.6
 inverted cavity (inner shell facing outward) [x1 +0]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4473 10.4 19.3
 inverted cavity (inner shell facing outward) [x0.001 +1000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4445 10.3 20.2
 inverted cavity (inner shell facing outward) [x10000 +-50000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4362 10.5 19.6

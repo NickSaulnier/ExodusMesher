@@ -429,6 +429,15 @@ pub struct JobConfig {
     /// of memory, for its one retry (`MESH_WORKER_FAILED`, fallback).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stuffing_only: bool,
+    /// Mesh at `element_size` everywhere, without the sizing field (which
+    /// grades the size down to an eighth of it where the surface is curved
+    /// or the part is thin).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub uniform_size: bool,
+    /// When the conformal mesh of a part fails, do not remesh its surface
+    /// and retry before the stuffing fallback.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_remesh: bool,
 }
 
 impl Default for JobConfig {
@@ -440,6 +449,8 @@ impl Default for JobConfig {
             max_deviation: 0.05,
             element_size: 0.03,
             stuffing_only: false,
+            uniform_size: false,
+            no_remesh: false,
         }
     }
 }
@@ -466,6 +477,9 @@ pub struct Attempt {
     pub part: Option<String>,
     pub kernel: Kernel,
     pub outcome: AttemptOutcome,
+    /// The attempt meshed the remeshed surface, not the repaired one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remeshed: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -546,8 +560,17 @@ pub struct MeshSummary {
     /// Points the kernel added (Delaunay: boundary and interior Steiner points).
     #[serde(default)]
     pub steiner_points: u64,
-    /// Element size used (absolute).
+    /// Element size used (absolute): the largest target size.
     pub element_size: f64,
+    /// Smallest target size of the sizing field (absolute), when the size
+    /// was graded (conformal meshes without `uniform_size`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_element_size: Option<f64>,
+    /// The mesh conforms to the remeshed surface, not the repaired one (the
+    /// conformal mesh of the repaired surface failed); its deviation from
+    /// the repaired surface is `hausdorff`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remeshed: bool,
     pub volume: f64,
     /// Signed volume enclosed by the repaired surface (for a surface that
     /// failed the gate, overlapping shells count their overlap twice).

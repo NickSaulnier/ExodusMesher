@@ -112,6 +112,7 @@ pub fn run_job(
                     part: None,
                     kernel: Kernel::Delaunay,
                     outcome: AttemptOutcome::Failed,
+                    remeshed: false,
                     stdout: String::new(),
                     stderr: stderr.clone(),
                 },
