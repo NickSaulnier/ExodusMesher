@@ -45,7 +45,7 @@ fn main() -> ExitCode {
         protocol: PROTOCOL_VERSION,
         worker_version: env!("CARGO_PKG_VERSION").to_owned(),
     });
-    inject_test_fault();
+    inject_test_fault(job.config.stuffing_only);
     exit(mesher_worker::run(&job, &mut emit))
 }
 
@@ -63,9 +63,14 @@ fn read_job(source: &str) -> Result<Job, String> {
 }
 
 /// Deliberate failures for testing the front ends' crash and timeout handling.
+/// `hang_conformal` hangs only when the conformal kernel may run, so the
+/// client's stuffing-only retry gets through.
 #[allow(clippy::panic)]
-fn inject_test_fault() {
+fn inject_test_fault(stuffing_only: bool) {
     match std::env::var(TEST_FAULT_ENV).as_deref() {
+        Ok("hang_conformal") if !stuffing_only => loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        },
         Ok("panic") => panic!("{TEST_FAULT_ENV}=panic: deliberate worker panic"),
         Ok("hang") => loop {
             std::thread::sleep(std::time::Duration::from_secs(1));

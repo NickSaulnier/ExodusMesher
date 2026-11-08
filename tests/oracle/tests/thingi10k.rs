@@ -370,8 +370,7 @@ fn tetgen_one() {
         return;
     };
     let h: f64 = size.parse().unwrap();
-    let stl = data_dir().join("raw").join(format!("{id}.stl"));
-    let surface = read_stl(&std::fs::read(stl).unwrap()).unwrap();
+    let (surface, _) = load_surface(&data_dir(), id.parse().unwrap()).unwrap();
     let max_volume = 8.0 / (9.0 * 3f64.sqrt()) * h.powi(3);
     match tetgen(&surface, max_volume) {
         Ok((p, t)) => {
@@ -388,4 +387,386 @@ fn tetgen_one() {
         }
         Err(e) => println!("TETGEN error {e}"),
     }
+}
+
+/// A downloaded model as a welded triangle surface: `raw/<id>.stl`, or for
+/// the few models the dataset has only as OBJ, `raw/<id>.obj` (also returned,
+/// so the CLI can read the original).
+fn load_surface(dir: &Path, id: u64) -> Result<(Surface, Option<PathBuf>), String> {
+    let raw = dir.join("raw");
+    let stl = raw.join(format!("{id}.stl"));
+    if stl.exists() {
+        let bytes = std::fs::read(&stl).map_err(|e| e.to_string())?;
+        return read_stl(&bytes).map(|s| (s, None));
+    }
+    let obj = raw.join(format!("{id}.obj"));
+    let mut log = mesher_core::RecordLog::new();
+    let model = mesher_io::read_obj(&obj, &mut log, &mut |_| {})
+        .ok_or_else(|| format!("{}: unreadable", obj.display()))?;
+    let surface = Surface {
+        points: model.vertices.clone(),
+        triangles: model.triangles.iter().map(|t| t.vertices).collect(),
+    };
+    Ok((surface, Some(obj)))
+}
+
+/// One model of the stratified sample: what each mesher did with it.
+struct SampleRow {
+    id: u64,
+    class: String,
+    faces: usize,
+    exit: i32,
+    path: &'static str,
+    kernels: String,
+    tets: u64,
+    min_dihedral: f64,
+    non_orthogonality: f64,
+    seconds: f64,
+    tetgen: Result<Reference, String>,
+    tetgen_seconds: f64,
+    histogram: Vec<u64>,
+    records: String,
+}
+
+/// The pipeline path a run took, from its exit code and kernels.
+fn path_of(exit: i32, kernels: &[Kernel]) -> &'static str {
+    let conformal = !kernels.is_empty() && kernels.iter().all(|k| *k == Kernel::Delaunay);
+    match exit {
+        0 if conformal => "direct",
+        10 if conformal => "repaired",
+        0 | 10 | 20 => "fallback",
+        30 => "failed",
+        70 => "bug",
+        _ => "no report",
+    }
+}
+
+fn sample_ids() -> Vec<(u64, String, usize)> {
+    let name = std::env::var("THINGI10K_SAMPLE").unwrap_or_else(|_| "sample1000.txt".into());
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../thingi10k")
+        .join(name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    text.lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (
+                f[0].parse().unwrap(),
+                f.get(1).copied().unwrap_or("unknown").to_owned(),
+                f.get(2).and_then(|n| n.parse().ok()).unwrap_or(0),
+            )
+        })
+        .collect()
+}
+
+fn env_number(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Mesh one model of the sample with the CLI, then TetGen at the same size.
+fn sample_one(
+    cli: &Path,
+    worker: &Path,
+    dir: &Path,
+    (id, class, faces): &(u64, String, usize),
+    timeout: u64,
+) -> SampleRow {
+    let mut row = SampleRow {
+        id: *id,
+        class: class.clone(),
+        faces: *faces,
+        exit: -1,
+        path: "no report",
+        kernels: String::new(),
+        tets: 0,
+        min_dihedral: f64::NAN,
+        non_orthogonality: f64::NAN,
+        seconds: 0.0,
+        tetgen: Err("not run".into()),
+        tetgen_seconds: 0.0,
+        histogram: Vec::new(),
+        records: String::new(),
+    };
+    let (surface, native) = match load_surface(dir, *id) {
+        Ok(s) => s,
+        Err(e) => {
+            row.path = "unreadable";
+            row.records = e;
+            return row;
+        }
+    };
+    row.faces = surface.triangles.len();
+    // A model that exists only as OBJ is meshed from that file as it is.
+    let obj = native.unwrap_or_else(|| {
+        let obj = dir.join("obj").join(format!("{id}.obj"));
+        std::fs::write(&obj, to_obj(&surface, &format!("thing_{id}"))).unwrap();
+        obj
+    });
+    let out = dir.join("sample").join(id.to_string());
+    let _ = std::fs::remove_dir_all(&out);
+    let started = Instant::now();
+    let status = Command::new(cli)
+        .arg("run")
+        .arg(&obj)
+        .arg("--out")
+        .arg(&out)
+        .arg("--worker")
+        .arg(worker)
+        .args(["--timeout", &timeout.to_string(), "--memory-limit", "3072"])
+        .output()
+        .unwrap();
+    row.seconds = started.elapsed().as_secs_f64();
+    row.exit = status.status.code().unwrap_or(-1);
+    let report: Option<Report> = std::fs::read(out.join("report.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let mut size = None;
+    if let Some(report) = &report {
+        let meshes: Vec<_> = report
+            .parts
+            .iter()
+            .filter_map(|p| p.mesh.clone())
+            .filter(|m| m.accepted)
+            .collect();
+        let kernels: Vec<Kernel> = meshes.iter().map(|m| m.kernel).collect();
+        row.path = path_of(row.exit, &kernels);
+        row.kernels = kernels
+            .iter()
+            .map(|k| format!("{k:?}").to_lowercase())
+            .collect::<Vec<_>>()
+            .join("+");
+        let mut codes: Vec<&str> = report
+            .records
+            .iter()
+            .filter(|r| r.severity != Severity::Info)
+            .map(|r| r.code.as_str())
+            .collect();
+        codes.sort_unstable();
+        codes.dedup();
+        row.records = codes.join(" ");
+        if !meshes.is_empty() {
+            row.tets = meshes.iter().map(|m| m.tets).sum();
+            row.min_dihedral = meshes
+                .iter()
+                .map(|m| m.min_dihedral_degrees)
+                .fold(f64::INFINITY, f64::min);
+            let weight: f64 = meshes.iter().map(|m| m.tets as f64).sum();
+            row.non_orthogonality = meshes
+                .iter()
+                .map(|m| m.mean_non_orthogonality_degrees * m.tets as f64)
+                .sum::<f64>()
+                / weight.max(1.0);
+            for m in &meshes {
+                row.histogram
+                    .resize(m.dihedral_histogram.len().max(row.histogram.len()), 0);
+                for (a, b) in row.histogram.iter_mut().zip(&m.dihedral_histogram) {
+                    *a += b;
+                }
+            }
+            size = meshes.first().map(|m| m.element_size);
+        }
+    }
+    // TetGen at the same size: ours, else 0.03 of the model's diagonal.
+    let h = size.unwrap_or_else(|| {
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for p in &surface.points {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        0.03 * (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f64>().sqrt()
+    });
+    if h.is_finite() && h > 0.0 {
+        let started = Instant::now();
+        row.tetgen = tetgen_in_child(*id, h);
+        row.tetgen_seconds = started.elapsed().as_secs_f64();
+    }
+    row
+}
+
+/// Milestone 10 benchmark: the stratified sample (`sample1000.txt`, or
+/// `$THINGI10K_SAMPLE`), meshed in parallel (`$THINGI10K_JOBS`, default 12)
+/// by the CLI and by TetGen. Writes `thingi10k_sample.txt` (outcomes by path
+/// and class, quality against TetGen) and `thingi10k_sample.csv` (one row a
+/// model) to `target/tmp/oracle/`. Download the meshes first with
+/// `python tests/thingi10k/fetch.py tests/thingi10k/sample1000.txt`.
+#[test]
+#[ignore = "needs the downloaded Thingi10k sample and built binaries; takes hours"]
+fn stratified_sample_benchmark() {
+    let (cli, worker) = binaries();
+    let dir = data_dir();
+    std::fs::create_dir_all(dir.join("obj")).unwrap();
+    let ids = sample_ids();
+    let jobs = env_number("THINGI10K_JOBS", 12).max(1) as usize;
+    let timeout = env_number("THINGI10K_TIMEOUT", 600);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let rows = std::sync::Mutex::new(Vec::new());
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(model) = ids.get(i) else {
+                        return;
+                    };
+                    let row = sample_one(&cli, &worker, &dir, model, timeout);
+                    eprintln!(
+                        "[{:>4}/{}] {:>8} {:<17} {:>6} faces: {:<9} {:>6.1}s | TetGen {}",
+                        i + 1,
+                        ids.len(),
+                        row.id,
+                        row.class,
+                        row.faces,
+                        row.path,
+                        row.seconds,
+                        match &row.tetgen {
+                            Ok(q) => format!("{} cells", q.cells),
+                            Err(e) => e.clone(),
+                        }
+                    );
+                    rows.lock().unwrap().push(row);
+                }
+            });
+        }
+    });
+    let mut rows = rows.into_inner().unwrap();
+    rows.sort_by_key(|r| r.id);
+    let wall = started.elapsed().as_secs_f64();
+
+    // Outcomes by path, per class.
+    let paths = [
+        "direct",
+        "repaired",
+        "fallback",
+        "failed",
+        "bug",
+        "no report",
+        "unreadable",
+    ];
+    let mut classes: Vec<String> = rows.iter().map(|r| r.class.clone()).collect();
+    classes.sort();
+    classes.dedup();
+    let mut text = format!(
+        "Thingi10k stratified sample: {} models, {jobs} at a time, {wall:.0} s wall.\n\
+         Paths: direct = conformal Delaunay, no warnings; repaired = conformal after recorded repairs;\n\
+         fallback = isosurface stuffing (recorded); failed = report with errors, no usable mesh.\n\
+         TetGen: pzAfq on the same welded surface, -a the regular-tet volume of the same size, 120 s limit.\n\n",
+        rows.len()
+    );
+    write!(text, "{:<18}", "class").unwrap();
+    for p in paths {
+        write!(text, "{p:>11}").unwrap();
+    }
+    writeln!(text, "{:>8} {:>13}", "total", "TetGen meshed").unwrap();
+    let mut by_class = |name: &str, sel: &dyn Fn(&SampleRow) -> bool| {
+        let chosen: Vec<&SampleRow> = rows.iter().filter(|r| sel(r)).collect();
+        write!(text, "{name:<18}").unwrap();
+        for p in paths {
+            write!(
+                text,
+                "{:>11}",
+                chosen.iter().filter(|r| r.path == p).count()
+            )
+            .unwrap();
+        }
+        writeln!(
+            text,
+            "{:>8} {:>13}",
+            chosen.len(),
+            chosen.iter().filter(|r| r.tetgen.is_ok()).count()
+        )
+        .unwrap();
+    };
+    for c in &classes {
+        by_class(c, &|r: &SampleRow| &r.class == c);
+    }
+    by_class("all", &|_| true);
+
+    // Quality on the models both meshed.
+    let (mut ours, mut theirs) = (Totals::default(), Totals::default());
+    let mut ours_conformal = Totals::default();
+    for r in &rows {
+        if let (Ok(q), true) = (&r.tetgen, r.tets > 0) {
+            ours.add(&r.histogram, r.min_dihedral, r.non_orthogonality, r.seconds);
+            theirs.add(&q.histogram, q.min, q.non_orthogonality, r.tetgen_seconds);
+            if r.path == "direct" || r.path == "repaired" {
+                ours_conformal.add(&r.histogram, r.min_dihedral, r.non_orthogonality, r.seconds);
+            }
+        }
+    }
+    writeln!(
+        text,
+        "\nQuality on the {} models both meshed:",
+        ours.min_dihedral.len()
+    )
+    .unwrap();
+    ours.describe("ours  ", &mut text);
+    ours_conformal.describe("ours (conformal only)", &mut text);
+    theirs.describe("TetGen", &mut text);
+    let seconds: Vec<f64> = rows.iter().map(|r| r.seconds).collect();
+    writeln!(
+        text,
+        "\nOur time per model: median {:.1} s, 90th percentile {:.1} s, max {:.1} s",
+        percentile(&seconds, 0.5),
+        percentile(&seconds, 0.9),
+        percentile(&seconds, 1.0)
+    )
+    .unwrap();
+
+    let mut csv = String::from(
+        "id,class,faces,exit,path,kernels,tets,min_dihedral,mean_non_orthogonality,seconds,tetgen,tetgen_cells,tetgen_min_dihedral,tetgen_non_orthogonality,tetgen_seconds,records\n",
+    );
+    for r in &rows {
+        let (tg, cells, min, non) = match &r.tetgen {
+            Ok(q) => (
+                "meshed".to_owned(),
+                q.cells.to_string(),
+                format!("{:.3}", q.min),
+                format!("{:.3}", q.non_orthogonality),
+            ),
+            Err(e) => (
+                e.replace(',', ";"),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+        };
+        writeln!(
+            csv,
+            "{},{},{},{},{},{},{},{:.3},{:.3},{:.2},{tg},{cells},{min},{non},{:.2},{}",
+            r.id,
+            r.class,
+            r.faces,
+            r.exit,
+            r.path,
+            r.kernels,
+            r.tets,
+            r.min_dihedral,
+            r.non_orthogonality,
+            r.seconds,
+            r.tetgen_seconds,
+            r.records
+        )
+        .unwrap();
+    }
+    eprintln!("\n{text}");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("oracle");
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("thingi10k_sample.txt"), &text).unwrap();
+    std::fs::write(tmp.join("thingi10k_sample.csv"), csv).unwrap();
+    let bugs: Vec<u64> = rows
+        .iter()
+        .filter(|r| r.path == "bug" || r.path == "no report")
+        .map(|r| r.id)
+        .collect();
+    assert!(
+        bugs.is_empty(),
+        "internal bugs or missing reports: {bugs:?}"
+    );
 }

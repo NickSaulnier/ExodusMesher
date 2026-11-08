@@ -424,6 +424,11 @@ pub struct JobConfig {
     /// Target element size (the stuffing lattice spacing), relative to the
     /// part's bounding-box diagonal.
     pub element_size: f64,
+    /// Skip the conformal kernel and mesh with stuffing only. Set by the
+    /// client when a worker running the conformal kernel timed out or ran out
+    /// of memory, for its one retry (`MESH_WORKER_FAILED`, fallback).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stuffing_only: bool,
 }
 
 impl Default for JobConfig {
@@ -434,6 +439,7 @@ impl Default for JobConfig {
             strict: false,
             max_deviation: 0.05,
             element_size: 0.03,
+            stuffing_only: false,
         }
     }
 }
@@ -647,6 +653,30 @@ impl Report {
             by_code: log.by_code,
         };
         self.records = log.records;
+    }
+
+    /// Put a record that does not come from this report's own run (the
+    /// client's account of an earlier, failed worker run) at the front, and
+    /// update the summary and exit code to match.
+    pub fn prepend(&mut self, record: Record) {
+        let s = &mut self.summary;
+        match record.severity {
+            Severity::Info => s.info += 1,
+            Severity::Warning => s.warnings += 1,
+            Severity::Error => s.errors += 1,
+            Severity::Fatal => s.fatal += 1,
+        }
+        let count = s.by_code.entry(record.code).or_default();
+        count.total += 1;
+        count.reported += 1;
+        self.records.insert(0, record);
+        let used_fallback = self
+            .attempts
+            .iter()
+            .any(|a| a.kernel == Kernel::Stuffing && a.outcome == AttemptOutcome::Succeeded);
+        let s = &self.summary;
+        self.summary.exit_code =
+            ExitStatus::from_counts(s.warnings, s.errors, s.fatal, used_fallback).code();
     }
 
     /// Serialize as pretty JSON with a trailing newline. Deterministic: same

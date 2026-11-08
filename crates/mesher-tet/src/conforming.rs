@@ -57,6 +57,12 @@ pub struct ConformingParams {
     /// Refuse to grow beyond this many points; `0` sizes the budget from the
     /// surface (20 × (volume / size³ + area / size²), at least 10,000).
     pub max_points: usize,
+    /// Refuse to take more than this many kernel steps (point insertions,
+    /// including refused ones, refinement and repair iterations, recovery
+    /// passes); `0` sizes it from the point budget (64 steps a point). A
+    /// deterministic bound on work, so a cascade or a loop ends as a
+    /// recorded failure instead of a worker timeout.
+    pub max_work: u64,
     /// Refinement and sliver removal never split a subsegment or subfacet
     /// smaller than this (recovery always may). Without a floor, input
     /// segments meeting at small angles encroach on each other forever.
@@ -79,6 +85,7 @@ impl ConformingParams {
             max_circumradius,
             radius_edge_bound: 2.0,
             max_points: 0,
+            max_work: 0,
             min_boundary_size: max_circumradius / 16.0,
             sliver_degrees: 10.0,
             sliver_rounds: 2,
@@ -99,6 +106,11 @@ pub enum ConformingError {
         points: usize,
         limit: usize,
     },
+    /// The work budget was exceeded.
+    Work {
+        steps: u64,
+        limit: u64,
+    },
     /// Some boundary triangles are missing from the result.
     Recovery {
         missing_faces: usize,
@@ -112,6 +124,9 @@ impl std::fmt::Display for ConformingError {
             ConformingError::Delaunay(e) => write!(f, "{e}"),
             ConformingError::Budget { points, limit } => {
                 write!(f, "{points} points exceed the budget of {limit}")
+            }
+            ConformingError::Work { steps, limit } => {
+                write!(f, "{steps} kernel steps exceed the work budget of {limit}")
             }
             ConformingError::Recovery { missing_faces } => {
                 write!(
@@ -266,8 +281,13 @@ struct Builder<'a> {
     /// Whether subfacets in the tetrahedralization are constrained (off
     /// while recovering).
     face_constraints: bool,
+    /// Kernel steps taken, against `params.max_work`.
+    work: u64,
 }
 
+/// Missing subfacets past which a growing repair cascade is left to a full
+/// recovery pass.
+const CASCADE: usize = 256;
 /// Attempts allowed per tet before it is left alone.
 const MAX_ATTEMPTS: u8 = 8;
 /// Flips one legalization may make before giving up (a few per insertion are typical).
@@ -472,6 +492,7 @@ impl Builder<'_> {
         keep: &[u32],
         force: bool,
     ) -> Result<Placed, ConformingError> {
+        self.step()?;
         let limit = self.params.max_points;
         if self.dt.points().len() >= limit {
             return Err(ConformingError::Budget {
@@ -1191,6 +1212,7 @@ impl Builder<'_> {
         // Passes since the number missing last went down.
         let (mut best, mut stalled) = (usize::MAX, 0usize);
         loop {
+            self.step()?;
             let tets = self.dt.tets();
             let mut edges: HashSet<(u32, u32)> = HashSet::with_capacity(tets.len() * 2);
             let mut faces: HashSet<[u32; 3]> = HashSet::with_capacity(tets.len() * 3);
@@ -1365,6 +1387,18 @@ impl Builder<'_> {
         }
     }
 
+    /// Count one kernel step; an error once the work budget is spent.
+    fn step(&mut self) -> Result<(), ConformingError> {
+        self.work += 1;
+        if self.work > self.params.max_work {
+            return Err(ConformingError::Work {
+                steps: self.work,
+                limit: self.params.max_work,
+            });
+        }
+        Ok(())
+    }
+
     /// Count an attempt on a tet; `false` once it has had its share.
     fn attempt(&mut self, v: [u32; 4]) -> bool {
         let mut k = v;
@@ -1426,14 +1460,28 @@ impl Builder<'_> {
         let floored = self.floored;
         self.floored = false;
         let mut queue = std::mem::take(&mut self.missing);
+        queue.sort_unstable();
+        queue.dedup();
+        // A cascade: local splits that delete more subfacets than they
+        // recover, each round slower than the last. Local repair cannot win
+        // it, but a full recovery pass settles it quickly (Thingi10k), so hand
+        // over once the queue has grown three rounds running past `CASCADE`.
+        let mut last = queue.len();
+        let mut growing = 0usize;
         for _ in 0..16 {
             if queue.is_empty() {
                 break;
             }
             queue.sort_unstable();
             queue.dedup();
+            growing = if queue.len() > last { growing + 1 } else { 0 };
+            last = queue.len();
+            if growing >= 3 && queue.len() > CASCADE {
+                break;
+            }
             let mut next = Vec::new();
             for s in queue {
+                self.step()?;
                 if !self.subs[s as usize].alive {
                     continue;
                 }
@@ -1480,6 +1528,7 @@ impl Builder<'_> {
     /// Delaunay refinement on radius-edge ratio and size, inside the region.
     fn refine(&mut self) -> Result<(), ConformingError> {
         loop {
+            self.step()?;
             if !self.missing.is_empty() {
                 self.repair()?;
             }
@@ -1641,8 +1690,14 @@ pub fn conforming_mesh(
         let estimate = volume.abs() / h.powi(3) + area / (h * h) + points.len() as f64;
         ((20.0 * estimate) as usize).clamp(10_000, 4_000_000)
     };
+    let work = if params.max_work > 0 {
+        params.max_work
+    } else {
+        64 * budget as u64
+    };
     let local_params = ConformingParams {
         max_points: budget,
+        max_work: work,
         ..params.clone()
     };
     let params = &local_params;
@@ -1691,6 +1746,7 @@ pub fn conforming_mesh(
         missing: Vec::new(),
         face_constraints: false,
         facet,
+        work: 0,
     };
     for (t, tri) in triangles.iter().enumerate() {
         b.add_sub(*tri, t as u32);

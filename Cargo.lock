@@ -2009,6 +2009,7 @@ dependencies = [
  "mesher-core",
  "mesher-io",
  "mesher-tet",
+ "serde",
  "serde_json",
 ]
 

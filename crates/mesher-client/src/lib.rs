@@ -3,7 +3,9 @@
 //! caller as they arrive, enforces the timeout and memory cap
 //! (`process_control`: a job object on Windows, `setrlimit` on Linux), honours
 //! cancellation, and builds a `MESH_WORKER_FAILED` report when the worker
-//! does not deliver one. No meshing logic lives here.
+//! does not deliver one. A worker that timed out or ran out of memory gets
+//! one retry with the stuffing fallback only (unless the job is strict), so
+//! a slow conformal kernel still ends in a mesh. No meshing logic lives here.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,7 +17,10 @@ use std::time::{Duration, Instant};
 use process_control::{ChildExt, Control};
 
 use mesher_core::protocol::{Job, REPORT_FILE, WorkerMessage};
-use mesher_core::{Action, DefectCode, ExitStatus, Outcome, Record, RecordLog, Report, Stage};
+use mesher_core::{
+    Action, Attempt, AttemptOutcome, DefectCode, ExitStatus, Kernel, Outcome, Record, RecordLog,
+    Report, Severity, Stage,
+};
 use serde_json::Value;
 
 /// Keep at most this much of the worker's stderr for the report.
@@ -69,6 +74,11 @@ pub fn default_worker_path() -> PathBuf {
 /// Run the job in a worker process. `on_message` sees every protocol message
 /// as it arrives; setting `cancel` kills the worker. Always returns a report,
 /// plus the path it was written to (`None` if it could not be written).
+///
+/// If the worker times out or runs out of memory while the conformal kernel
+/// may run, it is run once more with `stuffing_only` (same limits). The
+/// retry's report then leads with the `MESH_WORKER_FAILED` record of the
+/// first run: a warning when the fallback produced a mesh, an error when not.
 pub fn run_job(
     worker: &Path,
     job: &Job,
@@ -77,9 +87,49 @@ pub fn run_job(
     cancel: &AtomicBool,
 ) -> (Report, Option<String>) {
     let mut streamed = Vec::new();
-    match spawn_and_read(worker, job, limits, on_message, cancel, &mut streamed) {
-        Ok(result) => result,
-        Err((failure, stderr)) => failure_report(job, streamed, failure, &stderr, limits),
+    let (failure, stderr) =
+        match spawn_and_read(worker, job, limits, on_message, cancel, &mut streamed) {
+            Ok(result) => return result,
+            Err(e) => e,
+        };
+    let retry = matches!(failure, Failure::Timeout | Failure::OutOfMemory)
+        && !job.config.strict
+        && !job.config.no_repair
+        && !job.config.stuffing_only;
+    if !retry {
+        return failure_report(job, streamed, failure, &stderr, limits);
+    }
+    let mut fallback = job.clone();
+    fallback.config.stuffing_only = true;
+    let mut again = Vec::new();
+    match spawn_and_read(worker, &fallback, limits, on_message, cancel, &mut again) {
+        Ok((mut report, path)) => {
+            let (record, _) = failure_record(&failure, &stderr, limits);
+            let meshed = report.summary.exit_code <= ExitStatus::Fallback.code();
+            report.attempts.insert(
+                0,
+                Attempt {
+                    part: None,
+                    kernel: Kernel::Delaunay,
+                    outcome: AttemptOutcome::Failed,
+                    stdout: String::new(),
+                    stderr: stderr.clone(),
+                },
+            );
+            report.prepend(if meshed {
+                record
+                    .severity(Severity::Warning)
+                    .action(Action::Fallback, Outcome::Applied)
+            } else {
+                record.action(Action::Fallback, Outcome::Failed)
+            });
+            let written = path
+                .as_ref()
+                .is_some_and(|p| std::fs::write(p, report.to_json()).is_ok());
+            (report, path.filter(|_| written))
+        }
+        // The retry failed too: report the first failure, as without a retry.
+        Err(_) => failure_report(job, streamed, failure, &stderr, limits),
     }
 }
 
@@ -249,8 +299,27 @@ fn failure_report(
     for record in streamed {
         log.push(record);
     }
+    let (record, internal_bug) = failure_record(&failure, stderr, limits);
+    log.push(record.action(Action::Abort, Outcome::Applied));
+
+    let mut report = Report::new(&job.input, job.config.clone());
+    report.finish(log);
+    if internal_bug {
+        report.summary.exit_code = ExitStatus::InternalBug.code();
+    }
+
+    let path = report_file(job);
+    let written = std::fs::create_dir_all(&job.output_dir)
+        .and_then(|()| std::fs::write(&path, report.to_json()))
+        .is_ok();
+    (report, written.then(|| path.display().to_string()))
+}
+
+/// The `MESH_WORKER_FAILED` record for a failed run, and whether the failure
+/// is a bug (the worker could not start, or died without a result).
+fn failure_record(failure: &Failure, stderr: &str, limits: Limits) -> (Record, bool) {
     let mut record = Record::new(DefectCode::MeshWorkerFailed, Stage::Worker);
-    let internal_bug = match &failure {
+    let internal_bug = match failure {
         Failure::Spawn(err) => {
             record = record
                 .measured("reason", "spawn_failed")
@@ -291,19 +360,7 @@ fn failure_report(
     if !stderr.is_empty() {
         record = record.measured("stderr_tail", stderr);
     }
-    log.push(record.action(Action::Abort, Outcome::Applied));
-
-    let mut report = Report::new(&job.input, job.config.clone());
-    report.finish(log);
-    if internal_bug {
-        report.summary.exit_code = ExitStatus::InternalBug.code();
-    }
-
-    let path = report_file(job);
-    let written = std::fs::create_dir_all(&job.output_dir)
-        .and_then(|()| std::fs::write(&path, report.to_json()))
-        .is_ok();
-    (report, written.then(|| path.display().to_string()))
+    (record, internal_bug)
 }
 
 #[cfg(test)]

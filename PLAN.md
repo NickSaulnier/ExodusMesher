@@ -542,7 +542,32 @@ On the first 48 models the constrained kernel newly meshes 3 conformally (34785,
 
 ### Phase 6: Hardening
 
-**Milestone 10: Sizing, benchmark and hardening.** Sizing field and isotropic remeshing, full Thingi10k run, profiling, CI regression subset with golden reports, documentation.
+**Milestone 10: Sizing, benchmark and hardening.** Sizing field and isotropic remeshing, Thingi10k run, profiling, CI regression subset with golden reports, documentation. Started Nov 8, 2026.
+
+Scope decisions (Nov 8, 2026, by the user):
+
+- *Benchmark set.* A stratified sample of 1,000 Thingi10k models rather than all 9,997 (438 M faces, tens of GB): sampled across face counts and defect classes (clean, holes, non-manifold, self-intersecting, several components), capped at 100,000 faces, so every pipeline path is exercised in a few hours on one machine.
+- *CI.* GitHub Actions runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace` and golden reports for the synthetic suite. The Thingi10k regression subset stays a local, ignored test: the meshes cannot be committed (Thingiverse licences).
+- *SEACAS.* Installed in WSL Ubuntu from conda-forge; the deferred Milestone 5 check runs first.
+
+- [ ] SEACAS `io_info` and `exodiff` on the oracle and pipeline Exodus files (closes the Milestone 5 item). Deferred by the user (Nov 8, 2026). SEACAS is not on conda-forge or apt, so it has to be built from Sandia's source in WSL (`fmt` from conda-forge, system netCDF and HDF5)
+- [x] Work budget: a deterministic step count in the constrained kernel (insertion attempts, refinement and repair iterations, recovery passes), 64 steps per budgeted point, `ConformingError::Work` → `MESH_BUDGET_EXCEEDED`. A local repair cascade that has grown three rounds running past 256 missing subfacets is handed to a full recovery pass at once (91607 now falls back in about 100 s instead of timing out)
+- [x] Worker failure triggers the fallback, as the taxonomy says: a worker that times out or runs out of memory is rerun once by `mesher-client` with `stuffing_only` (not under `--strict` or `--no-repair`); the report leads with the first run's `MESH_WORKER_FAILED` record, a warning with `fallback/applied` when the retry meshed (677341: no mesh before, stuffing mesh now)
+- [ ] Sizing field from curvature and local feature size, graded; isotropic surface remeshing to it before the Delaunay kernel, with the surface gate re-run; refinement and the point budget follow the field
+- [ ] Octree grading of the stuffing lattice to the same field
+- [ ] Stratified 1,000-model sample (`tests/thingi10k/sample1000.txt`), download script, parallel harness with per-model timeouts, outcome table by path against TetGen
+- [ ] Profiling of the constrained kernel; fixes for the hot spots
+- [x] Golden reports for the synthetic suite (`tests/synthetic/golden.txt`, 98 runs): records by code, severity and action with counts, and each part's kernel and acceptance, must match exactly; tet count within 10%, minimum dihedral and mean non-orthogonality within 2°. `UPDATE_GOLDEN=1` regenerates it
+- [ ] GitHub Actions workflow (`.github/workflows/ci.yml`: fmt and clippy on Linux; `cargo test --workspace --release` on Linux and Windows); green on GitHub still to be confirmed
+- [ ] Documentation: README (install, CLI, GUI, project files, exit codes, report) drafted; the benchmark table and the report reference still to add
+- [ ] Exit criterion: published outcome table by path, against TetGen, with CI green. Long benchmark runs (the 1,000-model sample, the 100-model subset) are deferred by the user (Nov 8, 2026)
+
+**Findings and decisions in Milestone 10.**
+
+- *The two "hangs" were not loops.* 91607 was a repair cascade: a forced boundary split deleted 3 subfacets, and each round of local repair deleted more than it recovered (3, 9, 16, 21, 60, 100, 216, 327, 478, 658, ...), each round slower. 677341 refines normally but slowly (about 150 points a second against a budget of 88,720 points; boundary splits and constrained insertions dominate), so it ran into the worker timeout. Cascades are common and usually harmless: on the converging models local repair grows its queue every round for all 16 rounds (to 300–1,300 subfacets), and the full recovery pass that follows settles it. 91607 never got there because its rounds became too slow (refused insertions). Failing a cascade cost conformal models (13 with a tight threshold, 8 at 400), so a growing cascade is instead handed to full recovery early. The handover point is a trade-off and not monotonic: at 64, 91607 falls back in 2 s but 34785 and 148292 lose their conformal meshes; at 256, only 34785 does. 256 was kept; the 100-model subset has not been rerun with it.
+- *Determinism versus timeouts.* The kernel's own limits count steps, not seconds, so a given input and config always end the same way. The worker timeout is the only wall-clock limit, and the stuffing retry after it is recorded, so a slower machine can change the path but never silently.
+- *A small reproducer for improvement 3.* A 16 × 10 UV sphere meshes conformally, but the same sphere off-centre with coordinates rounded to six decimals (as an OBJ file stores it) loses 47 subfacets in recovery. It is the ignored test `rounded_uv_sphere_meshes_conformally` in `crates/mesher-tet/tests/conforming_shapes.rs`.
+- *Benchmark tooling.* `tests/thingi10k/sample.py` writes `sample1000.txt` (350 clean, 300 self-intersecting, 150 multi-component, 120 non-manifold, 80 open; 12.4 M faces); `fetch.py` downloads any id list (two models exist only as OBJ and are meshed from the original file); `run_subset.py` runs the CLI alone in parallel for quick checks; the ignored test `stratified_sample_benchmark` in `tests/oracle/tests/thingi10k.rs` runs the CLI and TetGen in parallel and writes the outcome table and a CSV.
 
 **After v1.** Conformal interfaces between touching parts (shared side sets in Exodus), a polyhedral dual mesh for the finite-volume solver, TETRA10 elements, boundary-layer prisms, a model that predicts failure from surface features before meshing, and an agent loop that reads the report and chooses repairs.
 

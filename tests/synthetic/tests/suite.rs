@@ -729,9 +729,204 @@ struct Tally {
     fn_: u32,
 }
 
+/// Golden reports (Milestone 10): for each case and variant, every record by
+/// code, severity, action and outcome with its count, and each part's mesh
+/// (kernel, acceptance, size and quality). Codes, counts, kernels and
+/// acceptance must match exactly; mesh metrics within `GOLDEN_BANDS`.
+/// `UPDATE_GOLDEN=1` rewrites the file.
+const GOLDEN_FILE: &str = "golden.txt";
+
+/// Tolerances for mesh metrics: relative tet count, and degrees for the
+/// minimum dihedral and mean non-orthogonality.
+const GOLDEN_BANDS: (f64, f64, f64) = (0.10, 2.0, 2.0);
+
+#[derive(Debug, Clone, PartialEq)]
+struct GoldenPart {
+    part: usize,
+    kernel: String,
+    accepted: bool,
+    tets: u64,
+    min_dihedral: f64,
+    mean_non_orthogonality: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Golden {
+    records: BTreeMap<String, u64>,
+    parts: Vec<GoldenPart>,
+}
+
+fn serde_name<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "?".to_owned())
+}
+
+fn golden_of(run: &Run) -> Golden {
+    let mut g = Golden::default();
+    for r in &run.records {
+        let action = match (&r.action, &r.outcome) {
+            (Some(a), Some(o)) => format!(" {}/{}", serde_name(a), serde_name(o)),
+            _ => String::new(),
+        };
+        let key = format!("{} {}{action}", r.code.as_str(), serde_name(&r.severity));
+        *g.records.entry(key).or_default() += 1;
+    }
+    for (part, m) in &run.meshes.summaries {
+        g.parts.push(GoldenPart {
+            part: *part,
+            kernel: serde_name(&m.kernel),
+            accepted: m.accepted,
+            tets: m.tets,
+            min_dihedral: (m.min_dihedral_degrees * 10.0).round() / 10.0,
+            mean_non_orthogonality: (m.mean_non_orthogonality_degrees * 10.0).round() / 10.0,
+        });
+    }
+    g.parts.sort_by_key(|p| p.part);
+    g
+}
+
+/// One line per case: `label <TAB> records <TAB> parts`.
+fn golden_line(label: &str, g: &Golden) -> String {
+    let records: Vec<String> = g.records.iter().map(|(k, n)| format!("{k} x{n}")).collect();
+    let parts: Vec<String> = g
+        .parts
+        .iter()
+        .map(|p| {
+            format!(
+                "{} {} {} {} {:.1} {:.1}",
+                p.part,
+                p.kernel,
+                if p.accepted { "accepted" } else { "rejected" },
+                p.tets,
+                p.min_dihedral,
+                p.mean_non_orthogonality
+            )
+        })
+        .collect();
+    format!("{label}\t{}\t{}", records.join("; "), parts.join("; "))
+}
+
+fn parse_golden(text: &str) -> BTreeMap<String, Golden> {
+    let mut out = BTreeMap::new();
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+    {
+        let f: Vec<&str> = line.split('\t').collect();
+        let mut g = Golden::default();
+        for r in f
+            .get(1)
+            .unwrap_or(&"")
+            .split("; ")
+            .filter(|s| !s.is_empty())
+        {
+            let (k, n) = r.rsplit_once(" x").unwrap();
+            g.records.insert(k.to_owned(), n.parse().unwrap());
+        }
+        for p in f
+            .get(2)
+            .unwrap_or(&"")
+            .split("; ")
+            .filter(|s| !s.is_empty())
+        {
+            let w: Vec<&str> = p.split(' ').collect();
+            g.parts.push(GoldenPart {
+                part: w[0].parse().unwrap(),
+                kernel: w[1].to_owned(),
+                accepted: w[2] == "accepted",
+                tets: w[3].parse().unwrap(),
+                min_dihedral: w[4].parse().unwrap(),
+                mean_non_orthogonality: w[5].parse().unwrap(),
+            });
+        }
+        out.insert(f[0].to_owned(), g);
+    }
+    out
+}
+
+/// Differences between a run and its golden entry, beyond the bands.
+fn golden_diff(label: &str, want: &Golden, got: &Golden) -> Vec<String> {
+    let mut out = Vec::new();
+    if want.records != got.records {
+        out.push(format!(
+            "{label}: records changed\n    golden: {:?}\n    now:    {:?}",
+            want.records, got.records
+        ));
+    }
+    if want.parts.len() != got.parts.len() {
+        out.push(format!(
+            "{label}: {} meshed parts, golden {}",
+            got.parts.len(),
+            want.parts.len()
+        ));
+        return out;
+    }
+    let (tets, dihedral, non_orth) = GOLDEN_BANDS;
+    for (w, g) in want.parts.iter().zip(&got.parts) {
+        if (w.part, &w.kernel, w.accepted) != (g.part, &g.kernel, g.accepted) {
+            out.push(format!(
+                "{label}: part {} path changed: {w:?} -> {g:?}",
+                w.part
+            ));
+            continue;
+        }
+        let rel = (g.tets as f64 - w.tets as f64).abs() / (w.tets as f64).max(1.0);
+        if rel > tets
+            || (g.min_dihedral - w.min_dihedral).abs() > dihedral
+            || (g.mean_non_orthogonality - w.mean_non_orthogonality).abs() > non_orth
+        {
+            out.push(format!(
+                "{label}: part {} metrics out of band: {w:?} -> {g:?}",
+                w.part
+            ));
+        }
+    }
+    out
+}
+
+/// Compare every run with the golden file, or rewrite it.
+fn check_golden(runs: &[(String, Golden)], failures: &mut Vec<String>) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN_FILE);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        let mut text = String::from(
+            "# Golden reports for the synthetic suite (tests/synthetic/tests/suite.rs).\n\
+             # label <TAB> code severity [action/outcome] xcount; ... <TAB> part kernel accepted tets min_dihedral mean_non_orthogonality; ...\n\
+             # Regenerate with UPDATE_GOLDEN=1 cargo test -p mesher-synthetic\n",
+        );
+        for (label, g) in runs {
+            text.push_str(&golden_line(label, g));
+            text.push('\n');
+        }
+        std::fs::write(&path, text).unwrap();
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        failures.push(format!(
+            "{} missing; run UPDATE_GOLDEN=1 cargo test -p mesher-synthetic",
+            path.display()
+        ));
+        return;
+    };
+    let golden = parse_golden(&text);
+    for (label, got) in runs {
+        match golden.get(label) {
+            Some(want) => failures.extend(golden_diff(label, want, got)),
+            None => failures.push(format!("{label}: not in the golden file")),
+        }
+    }
+    for label in golden.keys() {
+        if !runs.iter().any(|(l, _)| l == label) {
+            failures.push(format!("{label}: in the golden file but no longer run"));
+        }
+    }
+}
+
 #[test]
 fn synthetic_suite() {
     let mut tally: BTreeMap<DefectCode, Tally> = BTreeMap::new();
+    let mut goldens: Vec<(String, Golden)> = Vec::new();
     let mut failures = Vec::new();
     let (mut meshed_parts, mut accepted_parts, mut delaunay_parts) = (0u32, 0u32, 0u32);
     let variants = [(1.0, 0.0), (1e-3, 1e3), (1e4, -5e4)];
@@ -754,6 +949,7 @@ fn synthetic_suite() {
                     failures.push(format!("{label}: {} parts, expected {n}", outcome.parts));
                 }
             }
+            goldens.push((label.clone(), golden_of(&outcome)));
             check_repair(&c, &outcome, &label, &mut failures);
             let t = check_meshes(&c, &outcome, &label, &mut failures);
             meshed_parts += t.meshed;
@@ -842,6 +1038,8 @@ fn synthetic_suite() {
     eprintln!(
         "\nvolume: {meshed_parts} parts meshed ({delaunay_parts} conformal Delaunay, the rest stuffing), {accepted_parts} accepted by the volume gate"
     );
+
+    check_golden(&goldens, &mut failures);
 
     // Every diagnosable code is exercised (capacity overflow cannot be synthesized).
     let covered: BTreeSet<DefectCode> = tally

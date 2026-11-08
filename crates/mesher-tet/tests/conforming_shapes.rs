@@ -10,7 +10,7 @@ use std::time::Instant;
 use mesher_geom::predicates::orient3d;
 use mesher_geom::vec3::{cross, dot, sub};
 use mesher_geom::{Point3, Sign};
-use mesher_tet::{ConformingParams, conforming_mesh, dihedral_range};
+use mesher_tet::{ConformingError, ConformingParams, conforming_mesh, dihedral_range};
 
 type Surface = (Vec<Point3>, Vec<[u32; 3]>);
 
@@ -92,6 +92,43 @@ fn torus(nu: u32, nv: u32) -> Surface {
             f.push([id(i, j), id(i + 1, j), id(i + 1, j + 1)]);
             f.push([id(i, j), id(i + 1, j + 1), id(i, j + 1)]);
         }
+    }
+    (p, f)
+}
+
+/// A UV sphere: `rings` latitude bands of `segments` quads (split into two
+/// triangles), with triangle fans at the poles. Its quads are not planar
+/// and its pole triangles are thin.
+fn uv_sphere(segments: u32, rings: u32, radius: f64) -> Surface {
+    let mut p = vec![[0.0, 0.0, radius]];
+    for i in 1..rings {
+        let t = f64::from(i) / f64::from(rings) * std::f64::consts::PI;
+        for j in 0..segments {
+            let a = f64::from(j) / f64::from(segments) * std::f64::consts::TAU;
+            p.push([
+                radius * t.sin() * a.cos(),
+                radius * t.sin() * a.sin(),
+                radius * t.cos(),
+            ]);
+        }
+    }
+    let south = p.len() as u32;
+    p.push([0.0, 0.0, -radius]);
+    let ring = |i: u32, j: u32| 1 + i * segments + j % segments;
+    let mut f = Vec::new();
+    for j in 0..segments {
+        f.push([0, ring(0, j), ring(0, j + 1)]);
+    }
+    for i in 0..rings - 2 {
+        for j in 0..segments {
+            let (a, b) = (ring(i, j), ring(i, j + 1));
+            let (c, d) = (ring(i + 1, j), ring(i + 1, j + 1));
+            f.push([a, c, d]);
+            f.push([a, d, b]);
+        }
+    }
+    for j in 0..segments {
+        f.push([south, ring(rings - 2, j + 1), ring(rings - 2, j)]);
     }
     (p, f)
 }
@@ -283,12 +320,31 @@ fn shapes_mesh_conformally() {
     check("grid cube", &grid_cube(3), 0.6);
     check("icosphere", &icosphere(2), 0.25);
     check("torus", &torus(24, 12), 0.3);
+    check("UV sphere", &uv_sphere(16, 10, 0.8), 0.083);
     check("L-prism", &l_prism(), 0.25);
     let (mut p, mut f) = boxed([0.0; 3], [3.0; 3], 0, false);
     let (q, g) = boxed([1.0; 3], [2.0; 3], 8, true);
     p.extend(q);
     f.extend(g);
     check("hollow cube", &(p, f), 0.5);
+}
+
+/// The UV sphere as an OBJ file stores it: off-centre, coordinates rounded
+/// to six decimals. Rounding leaves neighbouring triangles coplanar only to
+/// about 1e-7, and recovery fails on the thin wedges between them (PLAN.md,
+/// "Things to consider improving", item 3).
+#[test]
+#[ignore = "known gap: facets coplanar only to rounding noise (PLAN.md improvement 3)"]
+fn rounded_uv_sphere_meshes_conformally() {
+    let (p, f) = uv_sphere(16, 10, 0.8);
+    let p = p
+        .into_iter()
+        .map(|q| {
+            let c = [1.0, 1.0, 1.5];
+            [0, 1, 2].map(|k| ((q[k] + c[k]) * 1e6).round() / 1e6)
+        })
+        .collect();
+    check("UV sphere 6dp", &(p, f), 0.083);
 }
 
 /// A cube whose first triangle is split around a point 0.2% off one edge: the
@@ -348,4 +404,24 @@ fn cube_quality_does_not_depend_on_scale() {
             assert_eq!(Some(m.tets.len()), reference);
         }
     }
+}
+
+/// The work budget ends a run deterministically, as an error the pipeline
+/// records (`MESH_BUDGET_EXCEEDED`), however far the kernel got.
+#[test]
+fn work_budget_stops_the_kernel() {
+    let (p, f) = torus(24, 12);
+    let params = ConformingParams {
+        max_work: 200,
+        ..ConformingParams::with_size(0.3)
+    };
+    match conforming_mesh(&p, &f, &params) {
+        Err(ConformingError::Work { steps, limit }) => {
+            assert_eq!(limit, 200);
+            assert_eq!(steps, 201);
+        }
+        other => panic!("expected the work budget to stop it: {other:?}"),
+    }
+    // The default budget is generous enough for the shape to finish.
+    assert!(conforming_mesh(&p, &f, &ConformingParams::with_size(0.3)).is_ok());
 }

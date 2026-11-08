@@ -111,7 +111,7 @@ fn mesh_part(
 
     // 1. Direct: conforming Delaunay, for a surface that passed the gate.
     let mut conformal_failure: Option<Record> = None;
-    if r.summary.gate_passed {
+    if r.summary.gate_passed && !config.stuffing_only {
         match conformal(model, r, h) {
             Ok(c) => {
                 let (accepted, summary) =
@@ -243,6 +243,11 @@ fn conformal(model: &SurfaceModel, r: &RepairedPart, h: f64) -> Result<Candidate
                 Record::new(DefectCode::MeshBudgetExceeded, Stage::VolumeMesh)
                     .measured("points", *points as u64)
                     .threshold("max_points", *limit as u64)
+            }
+            ConformingError::Work { steps, limit } => {
+                Record::new(DefectCode::MeshBudgetExceeded, Stage::VolumeMesh)
+                    .measured("work_steps", *steps)
+                    .threshold("max_work_steps", *limit)
             }
             ConformingError::Recovery { missing_faces } => {
                 Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)

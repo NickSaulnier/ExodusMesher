@@ -426,6 +426,10 @@
           "description": "Conformal paths only; never use the stuffing fallback.",
           "type": "boolean",
           "default": false
+        },
+        "stuffing_only": {
+          "description": "Skip the conformal kernel and mesh with stuffing only. Set by the\nclient when a worker running the conformal kernel timed out or ran out\nof memory, for its one retry (`MESH_WORKER_FAILED`, fallback).",
+          "type": "boolean"
         }
       },
       "additionalProperties": false

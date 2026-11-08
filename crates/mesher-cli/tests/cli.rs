@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use mesher_core::protocol::TEST_FAULT_ENV;
-use mesher_core::{DefectCode, Report};
+use mesher_core::{DefectCode, Kernel, Outcome, Report, Severity};
 use proptest::prelude::*;
 
 fn worker_path() -> PathBuf {
@@ -199,6 +199,50 @@ fn worker_hang_times_out_with_report() {
     assert_eq!(output.status.code(), Some(30));
     let r = report(&out);
     assert_eq!(r.records.last().unwrap().measured["reason"], "timeout");
+}
+
+/// A worker that times out on the conformal path is retried once with the
+/// stuffing fallback only; the report keeps the first failure as a warning.
+#[test]
+fn worker_timeout_falls_back_to_stuffing() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    let output = mesher(
+        &fixture("cube.obj"),
+        &out,
+        &["--timeout", "2"],
+        Some("hang_conformal"),
+    );
+    assert_eq!(output.status.code(), Some(20), "{output:?}");
+    let r = report(&out);
+    let first = &r.records[0];
+    assert_eq!(first.code, DefectCode::MeshWorkerFailed);
+    assert_eq!(first.measured["reason"], "timeout");
+    assert_eq!(first.severity, Severity::Warning);
+    assert_eq!(first.outcome, Some(Outcome::Applied));
+    assert!(r.config.stuffing_only);
+    assert_eq!(r.attempts[0].kernel, Kernel::Delaunay);
+    assert!(
+        r.parts[0]
+            .mesh
+            .as_ref()
+            .is_some_and(|m| m.accepted && m.kernel == Kernel::Stuffing)
+    );
+    assert!(out.join("mesh.exo").exists());
+
+    // --strict forbids the fallback: the timeout is the result.
+    let strict = dir.path().join("strict");
+    let output = mesher(
+        &fixture("cube.obj"),
+        &strict,
+        &["--timeout", "2", "--strict"],
+        Some("hang_conformal"),
+    );
+    assert_eq!(output.status.code(), Some(30));
+    assert_eq!(
+        report(&strict).records.last().unwrap().measured["reason"],
+        "timeout"
+    );
 }
 
 #[test]
