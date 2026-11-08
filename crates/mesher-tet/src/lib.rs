@@ -5,6 +5,7 @@
 pub mod conforming;
 pub mod delaunay;
 mod fxhash;
+mod graded;
 pub mod prof;
 pub mod quality;
 pub mod remesh;
@@ -18,4 +19,4 @@ pub use quality::{FvQuality, dihedral_angles, dihedral_range, fv_quality};
 pub use remesh::{RemeshError, RemeshParams, Remeshed, remesh};
 pub use sizing::{SizeField, SizingParams};
 pub use smooth::{SmoothParams, SmoothStats, smooth_slivers};
-pub use stuffing::{Stuffed, StuffingError, StuffingParams, stuff};
+pub use stuffing::{Stuffed, StuffingError, StuffingParams, stuff, stuff_graded};

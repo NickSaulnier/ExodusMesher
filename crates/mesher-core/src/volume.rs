@@ -22,7 +22,7 @@ use mesher_geom::{Aabb, Bvh, FastWindingNumber, Point3, Sign, TriangleSoup};
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
 use mesher_tet::{
     ConformingError, ConformingParams, RemeshParams, SizeField, SizingParams, StuffingError,
-    StuffingParams, conforming_mesh, fv_quality, remesh, stuff,
+    StuffingParams, conforming_mesh, fv_quality, remesh, stuff, stuff_graded,
 };
 
 use crate::diagnose::{InternalError, Tolerances};
@@ -211,12 +211,45 @@ fn mesh_part(
         return Ok(());
     }
 
-    // 2. Fallback: isosurface stuffing.
-    let stuffed = match stuff(
-        |p| 0.5 - winding.winding_number(p),
-        &bounds,
-        &StuffingParams::with_cell_size(h),
-    ) {
+    // 2. Fallback: isosurface stuffing. Where the size field asks for less
+    // than the element size, the lattice is graded: uniformly fine at the
+    // surface (h halved until it reaches the field's smallest size, at most
+    // twice), coarsening to h inside, which keeps the proven angle bounds.
+    let levels = if config.uniform_size {
+        0
+    } else {
+        let field = SizeField::from_surface(&r.points, &r.faces, &SizingParams::for_size(h));
+        if field.is_uniform() {
+            0
+        } else {
+            (h / field.min()).log2().ceil().clamp(0.0, 2.0) as u32
+        }
+    };
+    let leaf = h / f64::from(1u32 << levels);
+    let level_fn = |p: Point3| 0.5 - winding.winding_number(p);
+    let stuffed = if levels == 0 {
+        stuff(level_fn, &bounds, &StuffingParams::with_cell_size(h))
+    } else {
+        // Every surface vertex and face centroid seeds the search for the
+        // cubes the surface passes through.
+        let seeds: Vec<Point3> = r
+            .points
+            .iter()
+            .copied()
+            .chain(r.faces.iter().map(|t| {
+                let [a, b, c] = t.map(|v| r.points[v as usize]);
+                [0, 1, 2].map(|k| (a[k] + b[k] + c[k]) / 3.0)
+            }))
+            .collect();
+        stuff_graded(
+            level_fn,
+            &bounds,
+            &seeds,
+            &StuffingParams::with_cell_size(leaf),
+            levels,
+        )
+    };
+    let stuffed = match stuffed {
         Ok(s) => Some(s),
         Err(StuffingError::Budget {
             lattice_vertices,
@@ -243,7 +276,7 @@ fn mesh_part(
             dropped: s.dropped,
             steiner: 0,
             face_groups: Vec::new(),
-            min_size: None,
+            min_size: (levels > 0).then_some(leaf),
             remeshed: false,
         };
         let (accepted, summary) = volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;

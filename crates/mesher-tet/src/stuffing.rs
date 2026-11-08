@@ -145,7 +145,7 @@ impl Lattice {
 
     /// Every BCC tet: the two centres of face-adjacent cubes plus one edge of
     /// their shared face.
-    fn for_each_tet(&self, mut f: impl FnMut([u32; 4])) {
+    fn for_each_tet(&self, f: &mut dyn FnMut([u32; 4])) {
         for a in 0..3 {
             let (b, c) = ((a + 1) % 3, (a + 2) % 3);
             for k in 0..self.n[2] {
@@ -172,6 +172,42 @@ impl Lattice {
                     }
                 }
             }
+        }
+    }
+}
+
+/// A background tetrahedralization to stuff: the uniform BCC lattice, or a
+/// graded grid (`crate::graded`).
+pub(crate) trait Background: Sync {
+    fn vertex_count(&self) -> usize;
+    fn point(&self, id: u32) -> Point3;
+    fn for_each_tet(&self, f: &mut dyn FnMut([u32; 4]));
+    /// Whether edge `uv` is long (axis-aligned) for warping, and its length.
+    fn edge(&self, u: u32, v: u32) -> (bool, f64);
+    /// Signs of the level function at the vertices, if already known.
+    fn known_signs(&self) -> Option<Vec<i8>> {
+        None
+    }
+}
+
+impl Background for Lattice {
+    fn vertex_count(&self) -> usize {
+        self.black_count() + self.red_count()
+    }
+
+    fn point(&self, id: u32) -> Point3 {
+        Lattice::point(self, id)
+    }
+
+    fn for_each_tet(&self, f: &mut dyn FnMut([u32; 4])) {
+        Lattice::for_each_tet(self, f);
+    }
+
+    fn edge(&self, u: u32, v: u32) -> (bool, f64) {
+        if self.is_red(u) == self.is_red(v) {
+            (true, self.h)
+        } else {
+            (false, self.h * 3f64.sqrt() / 2.0)
         }
     }
 }
@@ -216,26 +252,70 @@ where
         });
     }
     let lat = Lattice { origin, h, n };
-    let total = lat.black_count() + lat.red_count();
+    Ok(stuff_on(&level, &lat, params, lattice_vertices))
+}
+
+/// Stuff the region where `level < 0` inside `bounds` on a graded
+/// background (Labelle and Shewchuk's Section 5): BCC tetrahedra of
+/// `params.cell_size` wherever the surface passes, grading up to
+/// `params.cell_size · 2^levels` in the interior. `seeds` are points on or
+/// near the surface; the search for the cubes it passes through starts
+/// from them, so every component of the surface needs one. The proven
+/// dihedral-angle bounds hold as for the uniform lattice: only BCC
+/// tetrahedra of the finest size are ever cut.
+///
+/// # Errors
+/// As `stuff`.
+pub fn stuff_graded<F>(
+    level: F,
+    bounds: &Aabb,
+    seeds: &[Point3],
+    params: &StuffingParams,
+    levels: u32,
+) -> Result<Stuffed, StuffingError>
+where
+    F: Fn(Point3) -> f64 + Sync,
+{
+    let bg = crate::graded::graded_background(&level, bounds, seeds, params, levels)?;
+    let vertices = bg.vertex_count() as u64;
+    Ok(stuff_on(&level, &bg, params, vertices))
+}
+
+/// The sign of a level value: −1 inside, 0 on, 1 outside.
+pub(crate) fn sign_of(l: f64) -> i8 {
+    if l < 0.0 {
+        -1
+    } else if l > 0.0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Cut, warp and stencil a background tetrahedralization.
+pub(crate) fn stuff_on<B, F>(
+    level: &F,
+    lat: &B,
+    params: &StuffingParams,
+    lattice_vertices: u64,
+) -> Stuffed
+where
+    B: Background,
+    F: Fn(Point3) -> f64 + Sync,
+{
+    let total = lat.vertex_count();
 
     // Signs at every lattice vertex.
-    let mut sign: Vec<i8> = (0..total as u32)
-        .into_par_iter()
-        .map(|id| {
-            let l = level(lat.point(id));
-            if l < 0.0 {
-                -1
-            } else if l > 0.0 {
-                1
-            } else {
-                0
-            }
-        })
-        .collect();
+    let mut sign: Vec<i8> = lat.known_signs().unwrap_or_else(|| {
+        (0..total as u32)
+            .into_par_iter()
+            .map(|id| sign_of(level(lat.point(id))))
+            .collect()
+    });
 
     // Cut edges: lattice edges whose ends have strictly opposite signs.
     let mut cut_edges: Vec<(u32, u32)> = Vec::new();
-    lat.for_each_tet(|t| {
+    lat.for_each_tet(&mut |t| {
         for (i, j) in TET_EDGES {
             let (u, v) = (t[i], t[j]);
             if sign[u as usize] * sign[v as usize] < 0 {
@@ -291,11 +371,11 @@ where
                 continue;
             }
             let (a, b) = cut_edges[e as usize];
-            let long = lat.is_red(a) == lat.is_red(b);
-            let (length, alpha) = if long {
-                (h, params.alpha_long)
+            let (long, length) = lat.edge(a, b);
+            let alpha = if long {
+                params.alpha_long
             } else {
-                (h * 3f64.sqrt() / 2.0, params.alpha_short)
+                params.alpha_short
             };
             let d2 = distance_squared(cut_point[e as usize], pv);
             let limit = alpha * length;
@@ -345,7 +425,7 @@ where
         out.tets.push(ids);
     };
     let s = |v: u32| sign[v as usize];
-    lat.for_each_tet(|t| {
+    lat.for_each_tet(&mut |t| {
         let neg = t.iter().filter(|&&v| s(v) < 0).count();
         let pos = t.iter().filter(|&&v| s(v) > 0).count();
         if pos == 0 {
@@ -472,7 +552,7 @@ where
             emit([Node::Lattice(apex), tri[0], tri[1], tri[2]], &mut out);
         }
     });
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -491,7 +571,7 @@ mod tests {
             n: [3, 3, 3],
         };
         let mut count = 0;
-        lat.for_each_tet(|_| count += 1);
+        Lattice::for_each_tet(&lat, &mut |_| count += 1);
         // 3 axes × (2 × 3 × 3 cube pairs) × 4 edges.
         assert_eq!(count, 3 * 18 * 4);
         assert_eq!(lat.point(lat.red([1, 1, 1])), [1.5, 1.5, 1.5]);

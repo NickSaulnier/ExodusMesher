@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use mesher_geom::predicates::orient3d;
 use mesher_geom::{Aabb, Point3, Sign};
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
-use mesher_tet::{StuffingParams, dihedral_range, stuff};
+use mesher_tet::{Stuffed, StuffingParams, dihedral_range, stuff, stuff_graded};
 use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -70,6 +70,50 @@ fn shape() -> impl Strategy<Value = Shape> {
     ]
 }
 
+/// Points on the shape's surface: sign changes along grid lines through its
+/// bounds, bisected.
+fn surface_seeds(shape: &Shape) -> Vec<Point3> {
+    let b = shape.bounds();
+    let n = 24;
+    let mut seeds = Vec::new();
+    for a in 0..3 {
+        let (u, v) = ((a + 1) % 3, (a + 2) % 3);
+        for i in 0..=n {
+            for j in 0..=n {
+                let mut p = [0.0; 3];
+                p[u] = b.min[u] + (b.max[u] - b.min[u]) * f64::from(i) / f64::from(n);
+                p[v] = b.min[v] + (b.max[v] - b.min[v]) * f64::from(j) / f64::from(n);
+                let at = |t: f64| {
+                    let mut q = p;
+                    q[a] = b.min[a] - 0.1 + (b.max[a] - b.min[a] + 0.2) * t;
+                    q
+                };
+                let steps = 4 * n;
+                for k in 0..steps {
+                    let (t0, t1) = (
+                        f64::from(k) / f64::from(steps),
+                        f64::from(k + 1) / f64::from(steps),
+                    );
+                    let (l0, l1) = (shape.level(at(t0)), shape.level(at(t1)));
+                    if (l0 < 0.0) != (l1 < 0.0) {
+                        let (mut lo, mut hi) = (t0, t1);
+                        for _ in 0..40 {
+                            let mid = 0.5 * (lo + hi);
+                            if (shape.level(at(mid)) < 0.0) == (l0 < 0.0) {
+                                lo = mid;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        seeds.push(at(lo));
+                    }
+                }
+            }
+        }
+    }
+    seeds
+}
+
 fn check(shape: &Shape, h: f64) -> Result<(), TestCaseError> {
     let out = stuff(
         |p| shape.level(p),
@@ -77,6 +121,10 @@ fn check(shape: &Shape, h: f64) -> Result<(), TestCaseError> {
         &StuffingParams::with_cell_size(h),
     )
     .unwrap();
+    check_mesh(shape, h, &out)
+}
+
+fn check_mesh(shape: &Shape, h: f64, out: &Stuffed) -> Result<(), TestCaseError> {
     prop_assert_eq!(out.dropped, 0);
     prop_assert!(!out.tets.is_empty());
     for t in &out.tets {
@@ -140,4 +188,80 @@ proptest! {
         let extent = (0..3).map(|k| b.max[k] - b.min[k]).fold(0.0, f64::max);
         check(&s, extent / cells)?;
     }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// The graded background (fine at the surface, up to two levels coarser
+    /// inside) keeps the same bounds and conformity.
+    #[test]
+    fn graded_bounds_hold_and_meshes_conform(
+        s in shape(),
+        cells in 8.0f64..20.0,
+        levels in 1u32..=2,
+    ) {
+        let b = s.bounds();
+        let extent = (0..3).map(|k| b.max[k] - b.min[k]).fold(0.0, f64::max);
+        let h = extent / cells;
+        let out = stuff_graded(
+            |p| s.level(p),
+            &b,
+            &surface_seeds(&s),
+            &StuffingParams::with_cell_size(h),
+            levels,
+        )
+        .unwrap();
+        check_mesh(&s, h, &out)?;
+    }
+}
+
+/// Grading keeps the surface as fine as the uniform lattice of the same
+/// leaf size (the same volume, to the lattice's accuracy) with fewer tets.
+#[test]
+fn graded_sphere_is_coarser_inside() {
+    let s = Shape::Sphere {
+        c: [0.1, -0.2, 0.3],
+        r: 1.0,
+    };
+    let h = 0.05;
+    let uniform = stuff(
+        |p| s.level(p),
+        &s.bounds(),
+        &StuffingParams::with_cell_size(h),
+    )
+    .unwrap();
+    let graded = stuff_graded(
+        |p| s.level(p),
+        &s.bounds(),
+        &surface_seeds(&s),
+        &StuffingParams::with_cell_size(h),
+        2,
+    )
+    .unwrap();
+    check_mesh(&s, h, &graded).unwrap();
+    let volume = |m: &Stuffed| -> f64 {
+        m.tets
+            .iter()
+            .map(|t| {
+                let [a, b, c, d] = t.map(|v| m.points[v as usize]);
+                let (u, v, w) = (
+                    [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                    [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                    [d[0] - a[0], d[1] - a[1], d[2] - a[2]],
+                );
+                (u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+                    + u[2] * (v[0] * w[1] - v[1] * w[0]))
+                    / 6.0
+            })
+            .sum()
+    };
+    let (vu, vg) = (volume(&uniform), volume(&graded));
+    assert!((vu - vg).abs() / vu < 1e-9, "{vu} vs {vg}");
+    assert!(
+        graded.tets.len() * 2 < uniform.tets.len(),
+        "graded {} vs uniform {}",
+        graded.tets.len(),
+        uniform.tets.len()
+    );
 }
