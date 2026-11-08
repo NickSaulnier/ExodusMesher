@@ -1,24 +1,41 @@
 //! Volume meshing and the volume gate.
 //!
-//! Each repaired part is meshed by isosurface stuffing on its winding-number
-//! field (`0.5 − w`), the robust fallback; the conformal Delaunay kernel
-//! arrives in Milestones 7–8. The volume gate then checks orientation, the
-//! dihedral-angle bounds, and the Hausdorff deviation from the input surface.
-//! Parts that pass are assembled into one volume mesh: one element block and
-//! one `<part>_boundary` side set per part.
+//! The fallback strategy of `PLAN.md`: a part whose repaired surface passed
+//! the surface gate is meshed first by the conforming Delaunay kernel
+//! (boundary-exact). If that fails (budget, recovery) or the surface did not
+//! pass the gate, isosurface stuffing on the winding-number field (`0.5 − w`)
+//! takes over, unless `--strict` forbids it. A failed conformal attempt is a
+//! warning when the fallback then succeeds, an error otherwise.
+//!
+//! The volume gate checks orientation, quality (the proven bounds for
+//! stuffing; the sliver threshold for Delaunay) and the Hausdorff deviation
+//! from the input surface, and records finite-volume quality metrics. Accepted
+//! parts are assembled into one mesh: an element block and a `<part>_boundary`
+//! side set per part, plus a side set per OBJ group on the boundary of a
+//! conformal mesh.
+
+use std::collections::{BTreeMap, HashMap};
 
 use mesher_geom::predicates::orient3d;
 use mesher_geom::vec3::{cross, dot, sub};
 use mesher_geom::{Aabb, Bvh, FastWindingNumber, Point3, Sign, TriangleSoup};
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
-use mesher_tet::{StuffingError, StuffingParams, dihedral_range, stuff};
+use mesher_tet::{
+    ConformingError, ConformingParams, StuffingError, StuffingParams, conforming_mesh, fv_quality,
+    stuff,
+};
 
 use crate::diagnose::InternalError;
-use crate::mesh::{Block, VolumeMesh, tet_side_nodes};
+use crate::mesh::{Block, SideSet, VolumeMesh, tet_side_nodes};
+use crate::model::SurfaceModel;
 use crate::repair::RepairedPart;
 use crate::report::{
-    Attempt, AttemptOutcome, DefectCode, JobConfig, Kernel, MeshSummary, Record, RecordLog, Stage,
+    Action, Attempt, AttemptOutcome, DefectCode, JobConfig, Kernel, MeshSummary, Outcome, Record,
+    RecordLog, Severity, Stage,
 };
+
+/// Slivers below this dihedral angle in a conformal mesh earn a quality warning.
+pub const SLIVER_DEGREES: f64 = 10.0;
 
 /// A part's accepted volume mesh.
 #[derive(Debug, Clone)]
@@ -26,67 +43,128 @@ pub struct MeshedPart {
     /// Position of the part in `Diagnosis::parts`.
     pub part: usize,
     pub name: String,
+    pub kernel: Kernel,
     pub points: Vec<Point3>,
     pub tets: Vec<[u32; 4]>,
+    /// Boundary faces per OBJ group (conformal meshes only), by group name.
+    pub face_groups: Vec<(String, Vec<[u32; 3]>)>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct MeshOutcome {
     /// Parts whose mesh passed the volume gate.
     pub meshed: Vec<MeshedPart>,
-    /// Every attempted part's summary, by part position.
+    /// The summary of each part's final attempt, by part position.
     pub summaries: Vec<(usize, MeshSummary)>,
     pub attempts: Vec<Attempt>,
 }
 
 /// Mesh every repaired part.
 pub fn mesh_parts(
+    model: &SurfaceModel,
     repaired: &[RepairedPart],
     config: &JobConfig,
     log: &mut RecordLog,
 ) -> Result<MeshOutcome, InternalError> {
     let mut outcome = MeshOutcome::default();
     for r in repaired {
-        mesh_part(r, config, log, &mut outcome)?;
+        mesh_part(model, r, config, log, &mut outcome)?;
     }
     Ok(outcome)
 }
 
+struct Candidate {
+    kernel: Kernel,
+    points: Vec<Point3>,
+    tets: Vec<[u32; 4]>,
+    /// Zero-volume tets the kernel dropped.
+    dropped: u64,
+    steiner: u64,
+    face_groups: Vec<(String, Vec<[u32; 3]>)>,
+}
+
 fn mesh_part(
+    model: &SurfaceModel,
     r: &RepairedPart,
     config: &JobConfig,
     log: &mut RecordLog,
     outcome: &mut MeshOutcome,
 ) -> Result<(), InternalError> {
     let name = r.name.as_str();
-    if config.strict {
-        log.push(
-            Record::new(DefectCode::MeshStrictUnmet, Stage::VolumeMesh)
-                .part(name)
-                .hint("the conformal Delaunay kernel arrives in Milestone 8; without --strict the stuffing fallback is used"),
-        );
-        return Ok(());
-    }
     let internal = |e: String| InternalError(format!("part {name}: {e}"));
     let soup = TriangleSoup::new(&r.points, &r.faces).map_err(|e| internal(e.to_string()))?;
     let bounds = Aabb::of_points(&r.points);
     let diagonal = bounds.diagonal();
     let h = config.element_size * diagonal;
     let winding = FastWindingNumber::new(soup);
-    let attempt = |outcome: AttemptOutcome| Attempt {
+    let attempt = |kernel: Kernel, ok: bool| Attempt {
         part: Some(name.to_owned()),
-        kernel: Kernel::Stuffing,
-        outcome,
+        kernel,
+        outcome: if ok {
+            AttemptOutcome::Succeeded
+        } else {
+            AttemptOutcome::Failed
+        },
         stdout: String::new(),
         stderr: String::new(),
     };
 
+    // 1. Direct: conforming Delaunay, for a surface that passed the gate.
+    let mut conformal_failure: Option<Record> = None;
+    if r.summary.gate_passed {
+        match conformal(model, r, h) {
+            Ok(c) => {
+                let (accepted, summary) =
+                    volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;
+                outcome.attempts.push(attempt(Kernel::Delaunay, accepted));
+                outcome.summaries.push((r.part, summary));
+                if accepted {
+                    outcome.meshed.push(MeshedPart {
+                        part: r.part,
+                        name: name.to_owned(),
+                        kernel: Kernel::Delaunay,
+                        points: c.points,
+                        tets: c.tets,
+                        face_groups: c.face_groups,
+                    });
+                    return Ok(());
+                }
+                conformal_failure = Some(
+                    Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
+                        .part(name)
+                        .hint("the conformal mesh failed the volume gate"),
+                );
+            }
+            Err(record) => {
+                outcome.attempts.push(attempt(Kernel::Delaunay, false));
+                conformal_failure = Some((*record).part(name));
+            }
+        }
+    }
+
+    if config.strict {
+        if let Some(rec) = conformal_failure {
+            log.push(rec.severity(Severity::Error));
+        }
+        log.push(
+            Record::new(DefectCode::MeshStrictUnmet, Stage::VolumeMesh)
+                .part(name)
+                .hint(if r.summary.gate_passed {
+                    "the conformal kernel failed and --strict forbids the stuffing fallback"
+                } else {
+                    "the repaired surface failed the surface gate, so only the stuffing fallback could mesh it"
+                }),
+        );
+        return Ok(());
+    }
+
+    // 2. Fallback: isosurface stuffing.
     let stuffed = match stuff(
         |p| 0.5 - winding.winding_number(p),
         &bounds,
         &StuffingParams::with_cell_size(h),
     ) {
-        Ok(s) => s,
+        Ok(s) => Some(s),
         Err(StuffingError::Budget {
             lattice_vertices,
             limit,
@@ -98,41 +176,146 @@ fn mesh_part(
                     .threshold("max_lattice_vertices", limit)
                     .hint("raise --element-size"),
             );
-            outcome.attempts.push(attempt(AttemptOutcome::Failed));
-            return Ok(());
+            outcome.attempts.push(attempt(Kernel::Stuffing, false));
+            None
         }
         Err(e) => return Err(internal(e.to_string())),
     };
+    let mut fallback_ok = false;
+    if let Some(s) = stuffed {
+        let c = Candidate {
+            kernel: Kernel::Stuffing,
+            points: s.points,
+            tets: s.tets,
+            dropped: s.dropped,
+            steiner: 0,
+            face_groups: Vec::new(),
+        };
+        let (accepted, summary) = volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;
+        outcome.attempts.push(attempt(Kernel::Stuffing, accepted));
+        outcome.summaries.retain(|(i, _)| *i != r.part);
+        outcome.summaries.push((r.part, summary));
+        if accepted {
+            fallback_ok = true;
+            outcome.meshed.push(MeshedPart {
+                part: r.part,
+                name: name.to_owned(),
+                kernel: Kernel::Stuffing,
+                points: c.points,
+                tets: c.tets,
+                face_groups: Vec::new(),
+            });
+        }
+    }
+    if let Some(rec) = conformal_failure {
+        log.push(if fallback_ok {
+            rec.severity(Severity::Warning)
+                .action(Action::Fallback, Outcome::Applied)
+        } else {
+            rec.severity(Severity::Error)
+                .action(Action::Fallback, Outcome::Failed)
+        });
+    }
+    Ok(())
+}
 
-    // Volume gate.
-    let mut accepted = true;
+/// The conforming Delaunay mesh of a repaired part, or the record explaining
+/// why not.
+fn conformal(model: &SurfaceModel, r: &RepairedPart, h: f64) -> Result<Candidate, Box<Record>> {
+    // OBJ group of each input face (fill faces have none).
+    let group_of = |f: usize| -> Option<u32> {
+        r.face_origin
+            .get(f)
+            .copied()
+            .flatten()
+            .and_then(|t| model.polygon_of(t))
+            .and_then(|p| p.group)
+    };
+    let params = ConformingParams {
+        groups: (0..r.faces.len())
+            .map(|f| group_of(f).unwrap_or(u32::MAX))
+            .collect(),
+        ..ConformingParams::with_size(h)
+    };
+    let m = conforming_mesh(&r.points, &r.faces, &params).map_err(|e| {
+        let rec = match &e {
+            ConformingError::Budget { points, limit } => {
+                Record::new(DefectCode::MeshBudgetExceeded, Stage::VolumeMesh)
+                    .measured("points", *points as u64)
+                    .threshold("max_points", *limit as u64)
+            }
+            ConformingError::Recovery { missing_faces } => {
+                Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
+                    .measured("missing_faces", *missing_faces as u64)
+            }
+            ConformingError::Surface(_) | ConformingError::Delaunay(_) => {
+                Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
+            }
+        };
+        Box::new(rec.hint(format!("conformal meshing failed: {e}")))
+    })?;
+    let mut groups: BTreeMap<String, Vec<[u32; 3]>> = BTreeMap::new();
+    for &(face, o) in &m.boundary {
+        if let Some(name) = group_of(o as usize).and_then(|g| model.groups.get(g as usize)) {
+            groups.entry(name.clone()).or_default().push(face);
+        }
+    }
+    Ok(Candidate {
+        kernel: Kernel::Delaunay,
+        points: m.points,
+        tets: m.tets,
+        dropped: 0,
+        steiner: (m.boundary_steiner + m.interior_steiner) as u64,
+        face_groups: groups.into_iter().collect(),
+    })
+}
+
+/// Check a candidate mesh; returns whether it is accepted and its summary.
+#[allow(clippy::too_many_arguments)]
+fn volume_gate(
+    name: &str,
+    c: &Candidate,
+    r: &RepairedPart,
+    winding: &FastWindingNumber<'_>,
+    diagonal: f64,
+    h: f64,
+    config: &JobConfig,
+    log: &mut RecordLog,
+) -> Result<(bool, MeshSummary), InternalError> {
     let gate = |code| Record::new(code, Stage::VolumeGate).part(name);
-    let points = stuffed.points;
-    let tets = stuffed.tets;
+    let mut accepted = true;
+    let (points, tets) = (&c.points, &c.tets);
     let not_positive = tets
         .iter()
         .filter(|t| {
-            let [a, b, c, d] = t.map(|v| points[v as usize]);
-            orient3d(a, b, c, d) != Sign::Positive
+            let [a, b, d, e] = t.map(|v| points[v as usize]);
+            orient3d(a, b, d, e) != Sign::Positive
         })
         .count() as u64
-        + stuffed.dropped;
+        + c.dropped;
     if not_positive > 0 {
         accepted = false;
         log.push(
             gate(DefectCode::VolInvertedTet)
                 .measured("tets", not_positive)
-                .hint("isosurface stuffing should never do this; please report it"),
+                .measured("kernel", format!("{:?}", c.kernel))
+                .hint("the volume kernels should never do this; please report it"),
         );
     }
-    let (min_angle, max_angle) = dihedral_range(&points, &tets).unwrap_or((0.0, 0.0));
-    if !tets.is_empty() && (min_angle < DIHEDRAL_MIN_DEGREES || max_angle > DIHEDRAL_MAX_DEGREES) {
+    let q = fv_quality(points, tets);
+    let (lo, hi) = match c.kernel {
+        Kernel::Stuffing => (DIHEDRAL_MIN_DEGREES, DIHEDRAL_MAX_DEGREES),
+        Kernel::Delaunay => (SLIVER_DEGREES, 180.0 - SLIVER_DEGREES),
+    };
+    if !tets.is_empty() && (q.min_dihedral_degrees < lo || q.max_dihedral_degrees > hi) {
         log.push(
             gate(DefectCode::VolLowQuality)
-                .measured("min_dihedral_degrees", min_angle)
-                .measured("max_dihedral_degrees", max_angle)
-                .threshold("min_dihedral_degrees", DIHEDRAL_MIN_DEGREES)
-                .threshold("max_dihedral_degrees", DIHEDRAL_MAX_DEGREES),
+                .measured("min_dihedral_degrees", q.min_dihedral_degrees)
+                .measured("max_dihedral_degrees", q.max_dihedral_degrees)
+                .measured("max_non_orthogonality_degrees", q.max_non_orthogonality_degrees)
+                .threshold("min_dihedral_degrees", lo)
+                .threshold("max_dihedral_degrees", hi)
+                .hint("a few low-quality cells remain; a finite-volume solver will lose some accuracy there"),
         );
     }
     let single = VolumeMesh {
@@ -148,71 +331,61 @@ fn mesh_part(
         .into_iter()
         .filter_map(|(e, s)| tets.get(e as usize).and_then(|&t| tet_side_nodes(t, s)))
         .collect();
-    let hausdorff = if tets.is_empty() {
+    let distance = if tets.is_empty() {
         f64::INFINITY
     } else {
-        hausdorff(&r.points, &r.faces, &winding, &points, &boundary).map_err(internal)?
+        hausdorff(&r.points, &r.faces, winding, points, &boundary)
+            .map_err(|e| InternalError(format!("part {name}: {e}")))?
     };
     let relative = if diagonal > 0.0 {
-        hausdorff / diagonal
+        distance / diagonal
     } else {
         0.0
     };
     if tets.is_empty() || relative > config.max_deviation {
         accepted = false;
-        let mut rec = gate(DefectCode::VolBoundaryDeviation)
+        let rec = gate(DefectCode::VolBoundaryDeviation)
             .measured("tets", tets.len() as u64)
             .threshold("max_deviation_relative", config.max_deviation);
-        rec = if tets.is_empty() {
+        log.push(if tets.is_empty() {
             rec.hint("nothing was meshed: the part is thinner than the element size; lower --element-size")
         } else {
-            rec.measured("hausdorff", hausdorff)
+            rec.measured("hausdorff", distance)
                 .measured("hausdorff_relative", relative)
                 .hint("lower --element-size for a closer fit, or raise --max-deviation")
-        };
-        log.push(rec);
+        });
     }
-
     let summary = MeshSummary {
-        kernel: Kernel::Stuffing,
+        kernel: c.kernel,
         accepted,
         tets: tets.len() as u64,
         nodes: points.len() as u64,
+        steiner_points: c.steiner,
         element_size: h,
         volume: single.volume(),
         surface_volume: enclosed_volume(&r.points, &r.faces),
-        min_dihedral_degrees: min_angle,
-        max_dihedral_degrees: max_angle,
-        hausdorff: if hausdorff.is_finite() {
-            hausdorff
-        } else {
-            -1.0
-        },
+        min_dihedral_degrees: q.min_dihedral_degrees,
+        max_dihedral_degrees: q.max_dihedral_degrees,
+        dihedral_histogram: q.dihedral_histogram.clone(),
+        max_non_orthogonality_degrees: q.max_non_orthogonality_degrees,
+        mean_non_orthogonality_degrees: q.mean_non_orthogonality_degrees,
+        max_skewness: q.max_skewness,
+        max_volume_ratio: q.max_volume_ratio,
+        hausdorff: if distance.is_finite() { distance } else { -1.0 },
         hausdorff_relative: if relative.is_finite() { relative } else { -1.0 },
     };
-    outcome.summaries.push((r.part, summary));
-    outcome.attempts.push(attempt(if accepted {
-        AttemptOutcome::Succeeded
-    } else {
-        AttemptOutcome::Failed
-    }));
-    if accepted {
-        outcome.meshed.push(MeshedPart {
-            part: r.part,
-            name: name.to_owned(),
-            points,
-            tets,
-        });
-    }
-    Ok(())
+    Ok((accepted, summary))
 }
 
-/// One volume mesh from the accepted parts: a block and a boundary side set each.
+/// One volume mesh from the accepted parts: an element block and a
+/// `<part>_boundary` side set each, plus a side set per OBJ group.
 #[must_use]
 pub fn assemble(parts: &[MeshedPart]) -> VolumeMesh {
     let mut mesh = VolumeMesh::default();
+    let mut point_offsets = Vec::with_capacity(parts.len());
     for p in parts {
         let offset = mesh.points.len() as u32;
+        point_offsets.push(offset);
         mesh.points.extend(&p.points);
         mesh.blocks.push(Block {
             name: p.name.clone(),
@@ -220,6 +393,39 @@ pub fn assemble(parts: &[MeshedPart]) -> VolumeMesh {
         });
     }
     mesh.add_boundary_side_sets();
+    let offsets = mesh.block_offsets();
+    for (b, p) in parts.iter().enumerate() {
+        if p.face_groups.is_empty() {
+            continue;
+        }
+        let elements = &mesh.blocks[b].tets;
+        let mut by_face: HashMap<[u32; 3], (u32, u8)> = HashMap::new();
+        for (e, side) in mesh.boundary_sides(b) {
+            let local = (e - offsets[b]) as usize;
+            if let Some(mut f) = elements.get(local).and_then(|&t| tet_side_nodes(t, side)) {
+                f.sort_unstable();
+                by_face.insert(f, (e, side));
+            }
+        }
+        let offset = point_offsets[b];
+        for (group, faces) in &p.face_groups {
+            let mut sides: Vec<(u32, u8)> = faces
+                .iter()
+                .filter_map(|f| {
+                    let mut k = f.map(|v| v + offset);
+                    k.sort_unstable();
+                    by_face.get(&k).copied()
+                })
+                .collect();
+            sides.sort_unstable();
+            if !sides.is_empty() {
+                mesh.side_sets.push(SideSet {
+                    name: group.clone(),
+                    sides,
+                });
+            }
+        }
+    }
     mesh
 }
 

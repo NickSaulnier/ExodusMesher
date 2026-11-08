@@ -529,13 +529,16 @@ pub struct PartSummary {
 }
 
 /// The volume mesh of one part and its quality.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MeshSummary {
     pub kernel: Kernel,
     /// Whether the mesh passed the volume gate and was written.
     pub accepted: bool,
     pub tets: u64,
     pub nodes: u64,
+    /// Points the kernel added (Delaunay: boundary and interior Steiner points).
+    #[serde(default)]
+    pub steiner_points: u64,
     /// Element size used (absolute).
     pub element_size: f64,
     pub volume: f64,
@@ -544,6 +547,19 @@ pub struct MeshSummary {
     pub surface_volume: f64,
     pub min_dihedral_degrees: f64,
     pub max_dihedral_degrees: f64,
+    /// Every dihedral angle (six per tet) in 10° bins from [0°, 10°) to [170°, 180°].
+    #[serde(default)]
+    pub dihedral_histogram: Vec<u64>,
+    /// Finite-volume quality on interior faces: angle between face normal and
+    /// centroid line, its mean, skewness, and neighbour volume ratio.
+    #[serde(default)]
+    pub max_non_orthogonality_degrees: f64,
+    #[serde(default)]
+    pub mean_non_orthogonality_degrees: f64,
+    #[serde(default)]
+    pub max_skewness: f64,
+    #[serde(default)]
+    pub max_volume_ratio: f64,
     /// Two-sided Hausdorff distance between the input surface and the mesh
     /// boundary (sampled at vertices and face centroids), absolute and
     /// relative to the part's bounding-box diagonal.

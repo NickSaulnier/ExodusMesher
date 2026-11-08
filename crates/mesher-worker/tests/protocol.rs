@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use mesher_core::protocol::{Job, PROTOCOL_VERSION, WorkerMessage};
-use mesher_core::{DefectCode, JobConfig, Report, Stage};
+use mesher_core::{Action, DefectCode, JobConfig, Kernel, Outcome, Report, Severity, Stage};
 
 fn fixture(name: &str) -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -94,11 +94,10 @@ fn result_of(run: &Run) -> (&Report, &Option<String>) {
 }
 
 #[test]
-fn clean_cube_is_meshed_via_the_fallback() {
+fn clean_cube_is_meshed_conformally() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube.obj"), dir.path());
-    // Stuffing is the only volume kernel until Milestone 8: exit 20.
-    assert_eq!(run.exit_code, 20);
+    assert_eq!(run.exit_code, 0);
     assert!(matches!(
         run.messages.first(),
         Some(WorkerMessage::Started { protocol, .. }) if *protocol == PROTOCOL_VERSION
@@ -117,7 +116,7 @@ fn clean_cube_is_meshed_via_the_fallback() {
 fn parse_defects_are_streamed_and_reported() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube_parse_defects.obj"), dir.path());
-    assert_eq!(run.exit_code, 20);
+    assert_eq!(run.exit_code, 10);
     let streamed: Vec<(DefectCode, Vec<u32>)> = run
         .messages
         .iter()
@@ -147,7 +146,7 @@ fn parse_defects_are_streamed_and_reported() {
 fn multi_object_and_concave_crlf_inputs() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("two_objects.obj"), dir.path());
-    assert_eq!(run.exit_code, 20);
+    assert_eq!(run.exit_code, 0);
     let report = run.report_file.unwrap();
     let stats = report.input.stats.as_ref().unwrap();
     assert_eq!(stats.objects, vec!["left", "right"]);
@@ -174,7 +173,7 @@ fn multi_object_and_concave_crlf_inputs() {
     let meshed: Vec<bool> = report
         .parts
         .iter()
-        .map(|p| p.mesh.is_some_and(|m| m.accepted && m.tets > 0))
+        .map(|p| p.mesh.as_ref().is_some_and(|m| m.accepted && m.tets > 0))
         .collect();
     assert_eq!(meshed, vec![true, true]);
     assert!(
@@ -200,7 +199,7 @@ fn multi_object_and_concave_crlf_inputs() {
 fn diagnosis_writes_an_overlay_and_honours_selection() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube.obj"), dir.path());
-    assert_eq!(run.exit_code, 20);
+    assert_eq!(run.exit_code, 0);
     let vtp = std::fs::read_to_string(dir.path().join("defects.vtp")).unwrap();
     assert!(vtp.contains(r#"NumberOfPoints="8""#) && vtp.contains(r#"NumberOfPolys="12""#));
 
@@ -208,7 +207,7 @@ fn diagnosis_writes_an_overlay_and_honours_selection() {
     let mut job = job_for(&fixture("two_objects.obj"), dir.path());
     job.config.parts = vec!["right".into()];
     let run = run_job(&job, dir.path());
-    assert_eq!(run.exit_code, 20);
+    assert_eq!(run.exit_code, 0);
     let selected: Vec<bool> = run
         .report_file
         .unwrap()
@@ -294,7 +293,7 @@ fn repair_writes_a_gated_surface_and_no_repair_stops_after_selection() {
     .unwrap();
     let out = dir.path().join("out");
     let run = run_worker(&input.display().to_string(), &out);
-    assert_eq!(run.exit_code, 20);
+    assert_eq!(run.exit_code, 10);
     let report = run.report_file.unwrap();
     let summary = report.parts[0].repair.unwrap();
     assert!(summary.gate_passed);
@@ -328,12 +327,15 @@ fn repair_writes_a_gated_surface_and_no_repair_stops_after_selection() {
 fn cube_end_to_end_writes_a_valid_exodus_mesh() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube.obj"), dir.path());
-    assert_eq!(run.exit_code, 20);
+    assert_eq!(run.exit_code, 0);
     let report = run.report_file.unwrap();
-    let mesh = report.parts[0].mesh.unwrap();
+    let mesh = report.parts[0].mesh.clone().unwrap();
     assert!(mesh.accepted && mesh.tets > 1000);
-    assert!((mesh.volume - 1.0).abs() < 0.01, "volume {}", mesh.volume);
-    assert!(mesh.min_dihedral_degrees >= 10.7 && mesh.max_dihedral_degrees <= 164.8);
+    assert_eq!(mesh.kernel, Kernel::Delaunay);
+    assert!((mesh.volume - 1.0).abs() < 1e-12, "volume {}", mesh.volume);
+    assert!(mesh.hausdorff_relative < 1e-12);
+    assert!(mesh.min_dihedral_degrees >= 10.0 && mesh.max_dihedral_degrees <= 170.0);
+    assert_eq!(mesh.dihedral_histogram.iter().sum::<u64>(), 6 * mesh.tets);
     assert_eq!(report.attempts.len(), 1);
     for file in ["mesh.exo", "mesh.msh", "mesh.vtu", "repaired.obj"] {
         assert!(dir.path().join(file).exists(), "{file} missing");
@@ -341,9 +343,35 @@ fn cube_end_to_end_writes_a_valid_exodus_mesh() {
     let exo = std::fs::read(dir.path().join("mesh.exo")).unwrap();
     assert_eq!(&exo[..4], b"CDF\x02", "64-bit-offset netCDF");
 
-    // Strict mode: no conformal kernel yet, so no mesh and an error.
+    // Strict mode on a clean cube: the conformal mesh is all it needs.
     let dir = tempfile::tempdir().unwrap();
     let mut job = job_for(&fixture("cube.obj"), dir.path());
+    job.config.strict = true;
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 0);
+    assert!(dir.path().join("mesh.exo").exists());
+
+    // Without strict, cubes sharing an edge (split apart by repair, so they
+    // touch at duplicated vertices) fall back to stuffing ...
+    let dir = tempfile::tempdir().unwrap();
+    let run = run_worker(&fixture("cubes_sharing_edge.obj"), dir.path());
+    assert_eq!(run.exit_code, 20);
+    let report = run.report_file.unwrap();
+    let mesh = report.parts[0].mesh.clone().unwrap();
+    assert!(mesh.accepted);
+    assert_eq!(mesh.kernel, Kernel::Stuffing);
+    let failed = report
+        .records
+        .iter()
+        .find(|r| r.code == DefectCode::MeshRecoveryFailed)
+        .unwrap();
+    assert_eq!(failed.severity, Severity::Warning);
+    assert_eq!(failed.action, Some(Action::Fallback));
+    assert_eq!(failed.outcome, Some(Outcome::Applied));
+
+    // ... and strict mode refuses them.
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cubes_sharing_edge.obj"), dir.path());
     job.config.strict = true;
     let run = run_job(&job, dir.path());
     assert_eq!(run.exit_code, 30);

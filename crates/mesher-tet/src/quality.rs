@@ -51,6 +51,103 @@ pub fn dihedral_range(points: &[Point3], tets: &[[u32; 4]]) -> Option<(f64, f64)
         .reduce(|x, y| (x.0.min(y.0), x.1.max(y.1)))
 }
 
+/// Finite-volume quality of a tetrahedral mesh: what a cell-centred solver
+/// sees. Non-orthogonality and skewness are measured on interior faces.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FvQuality {
+    pub cells: usize,
+    pub min_dihedral_degrees: f64,
+    pub max_dihedral_degrees: f64,
+    /// Every dihedral angle (six per tet) in 10° bins, [0°, 10°) to [170°, 180°].
+    pub dihedral_histogram: Vec<u64>,
+    /// Angle between a face normal and the line joining the two cell centroids.
+    pub max_non_orthogonality_degrees: f64,
+    pub mean_non_orthogonality_degrees: f64,
+    /// Distance from the face centroid to where the centroid line crosses the
+    /// face, over the centroid distance.
+    pub max_skewness: f64,
+    /// Largest volume ratio between face neighbours.
+    pub max_volume_ratio: f64,
+}
+
+/// Faces of a positive tet, outward.
+const OUTWARD: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
+
+#[must_use]
+pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
+    let corners = |t: &[u32; 4]| t.map(|v| points.get(v as usize).copied().unwrap_or([0.0; 3]));
+    let centroid =
+        |p: [Point3; 4]| [0, 1, 2].map(|k| (p[0][k] + p[1][k] + p[2][k] + p[3][k]) / 4.0);
+    let volume =
+        |p: [Point3; 4]| dot(sub(p[1], p[0]), cross(sub(p[2], p[0]), sub(p[3], p[0]))) / 6.0;
+
+    let mut q = FvQuality {
+        cells: tets.len(),
+        min_dihedral_degrees: f64::INFINITY,
+        max_dihedral_degrees: f64::NEG_INFINITY,
+        dihedral_histogram: vec![0; 18],
+        ..FvQuality::default()
+    };
+    for t in tets {
+        for a in dihedral_angles(corners(t)) {
+            q.min_dihedral_degrees = q.min_dihedral_degrees.min(a);
+            q.max_dihedral_degrees = q.max_dihedral_degrees.max(a);
+            let bin = ((a / 10.0).floor().max(0.0) as usize).min(17);
+            q.dihedral_histogram[bin] += 1;
+        }
+    }
+    if tets.is_empty() {
+        q.min_dihedral_degrees = 0.0;
+        q.max_dihedral_degrees = 0.0;
+        return q;
+    }
+
+    let mut faces: std::collections::HashMap<[u32; 3], (usize, usize)> =
+        std::collections::HashMap::with_capacity(tets.len() * 2);
+    let (mut sum, mut count) = (0.0f64, 0usize);
+    for (i, t) in tets.iter().enumerate() {
+        for (k, f) in OUTWARD.iter().enumerate() {
+            let mut key = f.map(|j| t[j]);
+            key.sort_unstable();
+            let Some((j, kj)) = faces.remove(&key) else {
+                faces.insert(key, (i, k));
+                continue;
+            };
+            // Interior face between cell j (first seen) and cell i.
+            let (pj, pi) = (corners(&tets[j]), corners(t));
+            let (cj, ci) = (centroid(pj), centroid(pi));
+            let face = OUTWARD[kj].map(|m| pj[m]);
+            let fc = [0, 1, 2].map(|m| (face[0][m] + face[1][m] + face[2][m]) / 3.0);
+            let n = cross(sub(face[1], face[0]), sub(face[2], face[0]));
+            let nn = norm(n);
+            let d = sub(ci, cj);
+            let dd = norm(d);
+            if nn <= 0.0 || dd <= 0.0 {
+                continue;
+            }
+            let n = scale(n, 1.0 / nn);
+            let cos = (dot(d, n) / dd).clamp(-1.0, 1.0);
+            let angle = cos.acos().to_degrees();
+            q.max_non_orthogonality_degrees = q.max_non_orthogonality_degrees.max(angle);
+            sum += angle;
+            count += 1;
+            let skew = if dot(d, n) > 0.0 {
+                let t = dot(sub(fc, cj), n) / dot(d, n);
+                let x = [0, 1, 2].map(|m| cj[m] + t * d[m]);
+                norm(sub(fc, x)) / dd
+            } else {
+                norm(sub(fc, cj)) / dd
+            };
+            q.max_skewness = q.max_skewness.max(skew);
+            let (vj, vi) = (volume(pj).abs(), volume(pi).abs());
+            let ratio = vj.max(vi) / vj.min(vi).max(f64::MIN_POSITIVE);
+            q.max_volume_ratio = q.max_volume_ratio.max(ratio);
+        }
+    }
+    q.mean_non_orthogonality_degrees = if count > 0 { sum / count as f64 } else { 0.0 };
+    q
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +179,29 @@ mod tests {
         assert!((a[0] - 90.0).abs() < 1e-12);
         assert!((a[1] - 90.0).abs() < 1e-12);
         assert!((a[2] - 90.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fv_quality_of_two_mirror_tets() {
+        // Two tets mirrored through the face x + y + z = 1 opposite the
+        // corner: the centroid line is perpendicular to the shared face.
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0],
+        ];
+        let tets = [[0, 1, 2, 3], [4, 1, 3, 2]];
+        let q = fv_quality(&p, &tets);
+        assert_eq!(q.cells, 2);
+        assert!(
+            q.max_non_orthogonality_degrees < 1e-6,
+            "{}",
+            q.max_non_orthogonality_degrees
+        );
+        assert!(q.max_skewness < 1e-9);
+        assert!((q.max_volume_ratio - 1.0).abs() < 1e-12);
+        assert_eq!(q.dihedral_histogram.iter().sum::<u64>(), 12);
     }
 }

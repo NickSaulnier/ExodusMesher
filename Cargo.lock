@@ -736,6 +736,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesher-fvm"
+version = "0.1.0"
+dependencies = [
+ "mesher-geom",
+ "mesher-tet",
+]
+
+[[package]]
 name = "mesher-geom"
 version = "0.1.0"
 dependencies = [
@@ -767,6 +775,7 @@ dependencies = [
  "mesher-io",
  "mesher-tet",
  "netcdf3",
+ "serde_json",
  "tempfile",
  "tritet",
 ]

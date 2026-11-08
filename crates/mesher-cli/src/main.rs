@@ -164,7 +164,7 @@ fn print_summary(report: &Report, report_path: Option<&str>) {
                 p.shells,
                 if p.shells == 1 { "" } else { "s" }
             );
-            if let Some(m) = p.mesh {
+            if let Some(m) = &p.mesh {
                 println!(
                     "       {} {} tets, dihedral {:.1}°–{:.1}°, deviation {:.2}% of diagonal ({:?})",
                     if m.accepted { "meshed:" } else { "rejected:" },

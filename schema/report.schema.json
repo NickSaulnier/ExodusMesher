@@ -483,6 +483,16 @@
           "description": "Whether the mesh passed the volume gate and was written.",
           "type": "boolean"
         },
+        "dihedral_histogram": {
+          "description": "Every dihedral angle (six per tet) in 10° bins from [0°, 10°) to [170°, 180°].",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
         "element_size": {
           "description": "Element size used (absolute).",
           "type": "number",
@@ -504,6 +514,27 @@
           "type": "number",
           "format": "double"
         },
+        "max_non_orthogonality_degrees": {
+          "description": "Finite-volume quality on interior faces: angle between face normal and\ncentroid line, its mean, skewness, and neighbour volume ratio.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "max_skewness": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "max_volume_ratio": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "mean_non_orthogonality_degrees": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
         "min_dihedral_degrees": {
           "type": "number",
           "format": "double"
@@ -511,6 +542,13 @@
         "nodes": {
           "type": "integer",
           "format": "uint64",
+          "minimum": 0
+        },
+        "steiner_points": {
+          "description": "Points the kernel added (Delaunay: boundary and interior Steiner points).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
           "minimum": 0
         },
         "surface_volume": {

@@ -19,5 +19,6 @@ workspace = true
 mesher-tet.workspace = true
 mesher-io.workspace = true
 netcdf3.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 tritet.workspace = true

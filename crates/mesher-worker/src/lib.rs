@@ -3,8 +3,8 @@
 //! tests drive it in-process too.
 //!
 //! Pipeline: parse, diagnose, select, then (unless `no_repair`) repair, the
-//! surface gate, volume meshing (isosurface stuffing until the Delaunay kernel
-//! lands), the volume gate, and the mesh files. Diagnosis runs if parsing
+//! surface gate, volume meshing (conforming Delaunay, with isosurface stuffing
+//! as the fallback), the volume gate, and the mesh files. Diagnosis runs if parsing
 //! produced geometry; repair and meshing run on every selected part without a
 //! fatal defect of its own.
 
@@ -149,13 +149,13 @@ fn process(
         stage: Stage::VolumeMesh,
         fraction: 0.0,
     });
-    let meshes = mesh_parts(&repaired, &job.config, log).map_err(|e| e.0)?;
+    let meshes = mesh_parts(model, &repaired, &job.config, log).map_err(|e| e.0)?;
     report.stages_run.push(Stage::VolumeMesh);
     report.stages_run.push(Stage::VolumeGate);
     report.attempts.extend(meshes.attempts.iter().cloned());
     for (i, summary) in &meshes.summaries {
         if let Some(p) = report.parts.get_mut(*i) {
-            p.mesh = Some(*summary);
+            p.mesh = Some(summary.clone());
         }
     }
     if meshes.meshed.is_empty() {
@@ -198,11 +198,11 @@ fn write_mesh_exodus(
         ),
     ];
     info.extend(parts.iter().map(|p| {
-        format!(
-            "block {}: {} tets (isosurface stuffing)",
-            p.name,
-            p.tets.len()
-        )
+        let kernel = match p.kernel {
+            mesher_core::Kernel::Delaunay => "conforming Delaunay",
+            mesher_core::Kernel::Stuffing => "isosurface stuffing",
+        };
+        format!("block {}: {} tets ({kernel})", p.name, p.tets.len())
     }));
     let options = ExodusOptions {
         title: format!("ExodusMesher mesh of {}", job.input),

@@ -1,0 +1,17 @@
+[package]
+name = "mesher-fvm"
+description = "Cell-centred finite-volume Poisson solver for downstream checks of ExodusMesher meshes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mesher-geom.workspace = true
+
+[dev-dependencies]
+mesher-tet.workspace = true
+
+[lints]
+workspace = true

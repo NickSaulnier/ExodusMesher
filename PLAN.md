@@ -112,9 +112,9 @@ Two pure-Rust kernels: an isosurface-stuffing mesher that almost always succeeds
 **Kernel B: constrained Delaunay with refinement (primary).**
 
 1. **Delaunay tetrahedralization.** Incremental Bowyer–Watson over the surface vertices, with exact orient3d and insphere predicates, randomized insertion order with spatial locality (BRIO), and point location by walking.
-2. **Boundary recovery.** Recover missing surface edges, then facets, inserting Steiner points where flips cannot, in the spirit of Si's work behind TetGen. A Steiner-point budget bounds it; an unrecoverable facet becomes `MESH_RECOVERY_FAILED` with its location, and the job falls back to Kernel A.
-3. **Region marking.** Remove exterior tets and cavities using the winding number.
-4. **Quality refinement.** Delaunay refinement on radius-edge ratio and the size field, then sliver removal with flips and vertex smoothing, with refinement capped by an element budget.
+2. **Boundary recovery.** Recover missing subsegments by Steiner points, then missing facet triangles by adopting the mesh's own facet triangulation, swapping facet diagonals, flipping away crossing edges, and Steiner points as a last resort. Whatever is recovered is constrained, so no later insertion deletes it (a constrained Delaunay tetrahedralization; see the Milestone 8 decisions). Lawson flips then restore the constrained Delaunay property. A point budget bounds it; an unrecoverable facet becomes `MESH_RECOVERY_FAILED`, and the job falls back to Kernel A.
+3. **Region marking.** Remove exterior tets and cavities by a parity flood fill from the hull across the recovered surface triangles.
+4. **Quality refinement.** Constrained Delaunay refinement on radius-edge ratio and size, then sliver removal by flips (edge removal and 2–3 flips that improve the worst tet) and two rounds of circumcentre insertion, with refinement capped by the point budget. Vertex smoothing is deferred.
 
 **Data structure.** A flat array of tetrahedra with four vertex and four neighbour indices, a ghost vertex at infinity to simplify hull handling, and free-list reuse of deleted slots. Use `u32` newtype indices rather than reference-counted graphs, which keeps it cache-friendly and borrow-checker friendly.
 
@@ -454,7 +454,7 @@ Crates are created when their first milestone starts, so early builds do not pul
 - *Stencil filling by coning.* Each lattice tet's inside part is filled by a cone from its lowest-numbered inside vertex over its boundary triangles; a quadrilateral (only on faces with two inside vertices and one outside) is split from the lower-numbered inside vertex. Both rules depend only on the shared face, so neighbours conform. This replaces the paper's colour-based parity rule; the property tests above are the evidence that the angle bounds still hold.
 - *Deviation is measured against the region's boundary.* The Hausdorff distance is two-sided between the mesh boundary and the input surface, sampled at vertices and face centroids, but input samples with winding number ≥ 1 (faces buried inside the region, as with overlapping shells) are skipped.
 - *Defaults.* Element size 0.03 × part diagonal; maximum deviation 0.05 × part diagonal (raised from 0.01: stuffing rounds sharp corners, e.g. 1.0% on a lattice-aligned cube and 3.5% on a tetrahedron at the default size).
-- *Exit code 20 for every meshed run* until the Delaunay kernel lands: stuffing is by definition the fallback.
+- *Exit code 20 for every meshed run* until the Delaunay kernel lands: stuffing is by definition the fallback. (Superseded in Milestone 8: a conformal mesh exits 0 or 10.)
 - *Known gap:* a feature thinner than the element size is lost (the synthetic spike case is rejected at 15% deviation); the fix is a smaller element size or, later, grading.
 
 **Milestone 7: Delaunay kernel.** Done (Nov 7, 2026): on random point sets of 5 to 20,000 points, and on clustered point sets spanning three orders of magnitude in scale, the tetrahedralization matches TetGen's exactly (same count, same tets).
@@ -473,7 +473,54 @@ Crates are created when their first milestone starts, so early builds do not pul
 - *Cavity growth for degeneracies.* If a cavity boundary face cannot see the new point (only possible with cospherical or coplanar points), the cavity grows across it; the result stays a valid triangulation, and on the degenerate test sets it stays Delaunay.
 - *Performance.* About 2.3× TetGen's time in release builds (146 ms against 63 ms for 20,000 points). Profiling is deferred to Milestone 10, as the risk table says.
 
-**Milestone 8: Recovery and refinement.** Edge and facet recovery with a Steiner budget, region marking, Delaunay refinement, sliver removal, finite-volume quality metrics, `mesher-fvm` Poisson check.
+**Milestone 8: Recovery and refinement.** Landed (Nov 7, 2026) with its exit criterion open by decision: the pipeline meshes the clean Thingi10k models conformally or by the recorded stuffing fallback, and Milestone 9 starts. The gaps are listed under "Things to consider improving" at the end of this plan. On synthetic shapes every mesh is conformal, with dihedral angles in [10°, 165°] on the shape tests and a minimum of 9.8° on the oracle's finer torus, well above TetGen's 5.5°. On the Thingi10k subset 54 of 100 clean models mesh conformally (67 with the earlier conforming kernel), with much better quality than before (see the benchmark).
+
+- [x] `mesher_tet::conforming`: constrained Delaunay mesh of a closed surface (the module keeps its name). Recovered subsegments and subfacets are constraints. Boundary Steiner points go in by 2D Bowyer–Watson on the facet, with the tets on both sides of the replaced subfacets seeding the 3D cavity, so the new subfacets appear with the point. Subsegments touching an input vertex split on concentric shells
+- [x] Kernel constraints (`mesher_tet::delaunay`): constrained faces and edges. Cavities grow by conflict without crossing a constraint, then shrink (the tet holding the point goes last) until every boundary face sees the point and no constrained face, constrained edge or vertex would be deleted; otherwise the insertion is refused and nothing changes (`DelaunayError::Blocked`). A forced insertion ignores face constraints and reports the faces it deleted, which are recovered at once
+- [x] Plane labels: every vertex records the facets it lies on, and points sharing a facet are coplanar by construction. No tet is ever made flat within a facet, and a point never "sees" a face on its own facet. The initial Delaunay tetrahedralization is built with them
+- [x] Flips: edge removal (3 to 7 tets around an edge, every fan tried, validated by face orientations before anything changes), the 2–3 flip, and Lawson flips back to constrained Delaunay after recovery. Unit tests check validity and volume
+- [x] Facet recovery by flips first: adopt the mesh's own triangulation of a facet when it is complete, swap a facet diagonal to the mesh's, flip away edges crossing a missing subfacet, and use Steiner points only where these fail. A recovery that stops making progress is `MESH_RECOVERY_FAILED`
+- [x] Constrained refinement on radius-edge ratio 2 and circumradius ≤ size. A point encroaches a subfacet only inside its diametral sphere and projecting into it; a subfacet between a tet and its circumcentre is split; tets whose shortest edge is below the size floor are not refined for shape. Sliver removal: improving flips, two rounds of circumcentre insertion, flips again
+- [x] Region marking by parity flood fill from the hull; a conflict is `MESH_RECOVERY_FAILED`. Tets flat to rounding between two subfacets of one OBJ group are flattened into the boundary when both pairs of faces cover the same area
+- [x] Point budget sized from the surface (20 × (volume/size³ + area/size²), at least 10,000) as `MESH_BUDGET_EXCEEDED`; `ConformingParams::min_boundary_size` (size/16) floors refinement-driven boundary splits
+- [x] Pipeline: conformal first for every part that passed the surface gate, stuffing as the recorded fallback (`MESH_RECOVERY_FAILED` or `MESH_BUDGET_EXCEEDED` as a warning with `fallback/applied`, or an error with `fallback/failed`); `--strict` meshes conformally or fails with `MESH_STRICT_UNMET`; OBJ groups become side sets
+- [x] Finite-volume quality (`mesher_tet::fv_quality`): non-orthogonality, skewness, neighbour volume ratio, minimum dihedral, 18-bin dihedral histogram; all in the report's mesh summary and schema; Delaunay meshes gate at [10°, 170°] (`VOL_LOW_QUALITY`, a warning)
+- [x] `mesher-fvm`: cell-centred Poisson solver (over-relaxed non-orthogonal correction, least-squares gradients, Jacobi-preconditioned CG) on a manufactured solution; L2 error on conformal cube meshes 1.7e-2, 3.2e-3, 7.9e-4 at sizes 0.25, 0.125, 0.0625
+- [x] Synthetic suite: 86 of 98 part meshes conformal, every one exact in volume; touching shells fall back to stuffing as expected. The synthetic shapes (`crates/mesher-tet/tests/conforming_shapes.rs`) include a tilted cube and a torus whose quads are planar only to rounding
+- [x] TetGen oracle (`tests/oracle/tests/tetgen_quality.rs`): cube, L-prism, icosphere and torus at the same size targets. Ours keeps every dihedral in [9.8°, 165.6°] (10.0° except one boundary sliver on the torus), against TetGen's minimum of about 5.5°, with lower mean non-orthogonality and a similar cell count (`target/tmp/oracle/quality_vs_tetgen.txt`)
+- [x] Facets: edge-connected, same-group triangles facing the same way that are coplanar, exactly or to rounding (their four points make a tet flat to rounding), form one facet. Any triangulation of a facet is allowed; only edges between facets are subsegments
+- [x] Thingi10k subset: 100 clean models (closed, manifold, oriented, one component, no self-intersections, solid, at most 20,000 faces; evenly spaced by id from 3,701), ids in `tests/thingi10k/subset.txt`; meshes downloaded to `target/thingi10k/` (not committed: Thingiverse licences). Harness `tests/oracle/tests/thingi10k.rs` (ignored; STL welded to OBJ, the `mesher` CLI end to end, TetGen per model in a child process with a 120 s limit)
+- [ ] Exit criterion: conformal meshes on the clean part of a Thingi10k subset, with quality histograms against TetGen. Deferred by decision (Nov 7, 2026); see "Things to consider improving"
+
+**Thingi10k benchmark (Nov 7, 2026, default settings, release build).**
+
+| Measure | Constrained kernel (now) | Conforming kernel (earlier the same day) | TetGen (`pzAfq`, same size) |
+| --- | --- | --- | --- |
+| Meshed | 98 (54 conformal, 44 stuffing fallback; 2 worker timeouts with no mesh) | 100 (67 conformal, 33 stuffing fallback) | 93 (2 timed out at 120 s, 3 crashed) |
+| Exit codes | 0: 6, 10: 48, 20: 31, 30: 13 | 0: 9, 10: 58, 20: 25, 30: 8 | |
+| Per-model minimum dihedral, median | 10.1° | 5.6° | 3.4° |
+| Dihedral histogram (% per 10° bin) | 0.5 2.6 5.1 7.3 9.4 15.1 14.8 9.6 10.7 10.5 5.0 3.6 2.4 1.6 1.0 0.6 0.1 0.1 | 0.6 2.2 5.3 8.2 10.6 13.7 13.4 10.7 10.4 9.4 5.5 3.9 2.6 1.6 1.0 0.6 0.1 0.1 | 0.6 2.4 6.1 8.2 10.5 12.2 12.3 11.6 10.9 9.0 6.0 4.1 2.6 1.6 1.0 0.7 0.2 0.0 |
+| Median mean non-orthogonality | 20.7° | 25.0° | 26.6° |
+| Total time | 2,680 s | 3,214 s | 140 s |
+
+On the first 48 models the constrained kernel newly meshes 3 conformally (34785, 45009, 112922; 45009 at 277k tets against TetGen's 285k) and loses 10 that the conforming kernel meshed (40179, 42936, 43853, 57657, 64992, 69403, 73154, 87721, 108330, 118032). Most are recovery stalls on facets whose neighbours are coplanar only to float32 noise; two are point-budget overruns. 91607 and 677341 (about 420 faces each) loop until the worker timeout.
+
+**Decisions made in Milestone 8.**
+
+- *Constrained, not conforming (revised the same day).* The first kernel recovered the boundary by Steiner points alone and kept subfacets Delaunay (Lawson flips, and splitting every subfacet a vertex encroached). On Thingi10k every fallback was a point-budget overrun: recovery cascades, where a split destroyed what an earlier one had recovered, and refinement splitting thin subfacets with huge diametral spheres. Constraints fix both: what is recovered stays, and subfacets no longer have to stay Delaunay.
+- *Symbolic coplanarity.* Steiner points on a facet are off its plane by rounding, and facets coplanar only to rounding are common in synthetic f64 data. Exact orientation then decides visibility at random, and flat tets block every split near them. Plane labels make "on the same facet" a topological fact, so orientation stays exact everywhere else (no epsilon).
+- *Facets coplanar to rounding merge.* Like TetGen's coplanarity tolerance, but with the rounding-relative test that flattening already used (64 ulps of the coordinates, or 1e-12 of the size), so only rounding is absorbed. Float32 noise on CAD tessellations is far larger, and those stay separate facets.
+- *Flips before points.* Facet recovery adopts the mesh's own facet triangulation, swaps diagonals and removes crossing edges before any Steiner point. Lawson flips restore constrained Delaunay afterwards; without them, refinement's cavities had to grow and shrink unpredictably.
+- *Cavity growth across unseen faces.* Plain Bowyer–Watson grows across a face the point cannot see (cospherical points). In a constrained mesh such faces are common, and unbounded growth ran away (cavities of 8,000 tets). Growth is now allowed only without constraints, for forced insertions, into conflicting tets, or locally (up to 4× the initial cavity) for interior points; a cavity beyond 4,096 tets is refused.
+- *Encroachment by projection.* A subfacet is encroached only by a point inside its diametral sphere that projects into it. With the full sphere, almost every circumcentre near a thin input triangle was rejected and no interior point was ever inserted.
+- *Parity region marking.* Winding-number classification of tet centroids misclassified rounding-thin tets on the icosphere. The flood fill is exact and topological.
+- *Unreliable circumcentres.* A near-flat tet's float circumcentre can be far off, so a centre counts only if the exact `insphere` agrees; otherwise the tet's longest subsegment is split. Each tet gets at most eight attempts.
+- *Small input angles.* Segments meeting at small angles encroach each other forever (classic Ruppert). Concentric-shell splitting fixes moderate angles (the L-prism's 18° fan); the size floor bounds the rest.
+- *Flatness is relative to coordinates.* Tets flat to rounding are judged against 64 ulps of their coordinates as well as their size, since far from the origin rounding is much larger than the tet.
+- *TetGen runs in a child process.* It looped on two benchmark models and crashed on three; in-process, that stalled the harness.
+- *Touching shells fall back.* Repair separates shells that share an edge or a vertex by duplicating it; the conformal kernel refuses coincident vertices, so these parts use stuffing (recorded). Merging them is deferred.
+- *Exit codes.* A clean cube now exits 0; parse defects exit 10; the stuffing fallback exits 20.
+- *Exit criterion deferred.* By the user's decision (Nov 7, 2026), Milestone 9 starts with 54 of 100 conformal; the improvements are listed at the end of the plan.
 
 ### Phase 5: GUI
 
@@ -507,3 +554,18 @@ The biggest technical risk is boundary recovery in the in-house constrained Dela
 - [ ] Should open sheets be rejected, or optionally closed by thickening?
 - [ ] What mesh-size controls should users get in v1: a global target size, or per-region overrides too?
 - [x] Does the finite-volume solver read Exodus II directly, or does it need OpenFOAM polyMesh, CGNS or Fluent .msh as well?
+
+## Things to consider improving
+
+Collected at the end of Milestone 8 (Nov 7, 2026), roughly in order of value. Each is a candidate, not a commitment; the Thingi10k benchmark (`tests/oracle/tests/thingi10k.rs`) measures them.
+
+1. *Hangs with no mesh.* 91607 and 677341 (about 420 faces each) loop in the constrained kernel until the worker timeout, so no mesh comes out at all. Find the loop and bound it. A hard per-stage work budget (insertions, recovery passes, flips) that becomes `MESH_BUDGET_EXCEEDED` would turn every such case into a recorded fallback.
+2. *A per-model fallback to conforming recovery.* The earlier conforming kernel meshed 13 models that the constrained one does not. When constrained recovery fails, retrying the old way (subfacets unconstrained, Gabriel splits) before stuffing would recover them, at the cost of keeping both paths.
+3. *Facets coplanar only to float32 noise.* Neighbouring facets at a dihedral of about 1e-7 leave thin wedge tets whose faces overlap a facet's region, so adopting the mesh's facet triangulation fails and recovery stalls (most of the 10 regressions). Likely fixes: choose a non-overlapping subset of the candidate faces, or flip the wedges away first.
+4. *Near-degenerate input triangles.* Nearly collinear triangles (reported as `QUAL_SLIVER_FACE`) produce coincident subfacets of opposite orientation on one edge. Detect and handle them before meshing, or merge them with a recorded repair.
+5. *Early stop.* Recovery and refinement should give up when progress relative to the input stalls, rather than running to the budget or the timeout; some models take minutes before falling back.
+6. *Point-budget overruns* (43853, 57657, 73154). Refinement near small input features still adds too many points. A size field graded by local feature size (Milestone 10) would bound it properly.
+7. *Speed.* About 20× TetGen's total time. Profile the kernel (star queries, cavity checks, encroachment grids) and avoid the full-mesh passes in recovery.
+8. *Boundary slivers.* A few tets below 1° remain in many meshes. Vertex smoothing and richer flips (4–4 flips, multi-face removal) would clean them up.
+9. *Touching shells conformally.* Shells sharing an edge or a vertex fall back to stuffing; meshing them as one constrained region would keep them exact.
+10. *The SEACAS check* of the Exodus output (deferred from Milestone 5; do it before Milestone 10).

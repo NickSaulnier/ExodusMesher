@@ -87,20 +87,18 @@ fn clean_and_defective_fixtures() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("cube");
     let output = mesher(&fixture("cube.obj"), &out, &[], None);
-    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("8 vertices, 6 polygons, 12 triangles"),
         "{stdout}"
     );
-    assert!(
-        stdout.contains("exit 20: succeeded via fallback"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("(Delaunay)"), "{stdout}");
+    assert!(stdout.contains("exit 0: clean"), "{stdout}");
 
     let out = dir.path().join("defects");
     let output = mesher(&fixture("cube_parse_defects.obj"), &out, &[], None);
-    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(output.status.code(), Some(10));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("PARSE_BAD_LINE x2, first at line 11"),

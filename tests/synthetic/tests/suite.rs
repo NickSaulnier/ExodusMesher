@@ -22,7 +22,7 @@ use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::report::MAX_LOCATION_ITEMS;
 use mesher_core::volume::{MeshOutcome, mesh_parts};
-use mesher_core::{DefectCode, JobConfig, Outcome, Record, RecordLog, Stage};
+use mesher_core::{DefectCode, JobConfig, Kernel, Outcome, Record, RecordLog, Stage};
 use mesher_io::parse_obj;
 use mesher_synthetic::{Scene, Solid};
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
@@ -50,6 +50,9 @@ struct Case {
     repair_fails: Vec<DefectCode>,
     /// The surface is open on purpose (stuffing is not expected to apply).
     open: bool,
+    /// The conformal kernel should refuse the repaired surface (shells that
+    /// touch at duplicated vertices), so stuffing must take over.
+    conformal_fails: bool,
 }
 
 fn case(name: &'static str, scene: Scene, expect: Vec<(DefectCode, Key)>) -> Case {
@@ -63,6 +66,7 @@ fn case(name: &'static str, scene: Scene, expect: Vec<(DefectCode, Key)>) -> Cas
         gate_fails: Vec::new(),
         repair_fails: Vec::new(),
         open: false,
+        conformal_fails: false,
     }
 }
 
@@ -282,17 +286,21 @@ fn cases() -> Vec<Case> {
     {
         let s = cube().union(&Solid::cuboid([1.0, 1.0, 0.0], [2.0, 2.0, 1.0]));
         let e = [[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]].map(|p| s.find(p).unwrap());
-        out.push(case(
-            "non-manifold edge (cubes sharing an edge)",
-            Scene::single(s),
-            vec![(TopNonmanifoldEdge, verts(e))],
-        ));
+        out.push(Case {
+            conformal_fails: true,
+            ..case(
+                "non-manifold edge (cubes sharing an edge)",
+                Scene::single(s),
+                vec![(TopNonmanifoldEdge, verts(e))],
+            )
+        });
     }
     {
         let s = cube().union(&Solid::cuboid([1.0; 3], [2.0; 3]));
         let v = s.find([1.0; 3]).unwrap();
         out.push(Case {
             parts_count: Some(1),
+            conformal_fails: true,
             ..case(
                 "non-manifold vertex (cubes sharing a corner)",
                 Scene::single(s),
@@ -487,7 +495,7 @@ fn run(scene: &Scene, parts: &[&str]) -> Run {
             element_size: SUITE_ELEMENT_SIZE,
             ..config.clone()
         };
-        meshes = mesh_parts(&repaired, &mesh_config, &mut log).unwrap();
+        meshes = mesh_parts(&model, &repaired, &mesh_config, &mut log).unwrap();
     }
     Run {
         records: log.records().to_vec(),
@@ -498,11 +506,26 @@ fn run(scene: &Scene, parts: &[&str]) -> Run {
 }
 
 /// Milestone 6: stuffing on every repaired part of a closed or nearly closed case.
-fn check_stuffing(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) -> (u32, u32) {
+/// Parts meshed, accepted, and meshed by the conformal Delaunay kernel.
+#[derive(Default)]
+struct MeshTally {
+    meshed: u32,
+    accepted: u32,
+    delaunay: u32,
+}
+
+/// Check every part's volume mesh: valid, inside the kernel's quality bounds
+/// (proven for stuffing; 10 degrees for Delaunay unless the input itself has
+/// a sliver face) and of the right volume (exact for a conformal mesh).
+fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) -> MeshTally {
+    let mut tally = MeshTally::default();
     if c.open {
-        return (0, 0);
+        return tally;
     }
-    let mut accepted = 0;
+    let sliver_input = c
+        .expect
+        .iter()
+        .any(|(code, _)| *code == DefectCode::QualSliverFace);
     for r in &run.repaired {
         let Some((_, s)) = run.meshes.summaries.iter().find(|(i, _)| *i == r.part) else {
             failures.push(format!("{label}: part {} was not meshed", r.name));
@@ -511,9 +534,18 @@ fn check_stuffing(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) 
         if s.tets == 0 {
             failures.push(format!("{label}: part {} produced no tets", r.name));
         }
-        if s.min_dihedral_degrees < DIHEDRAL_MIN_DEGREES
-            || s.max_dihedral_degrees > DIHEDRAL_MAX_DEGREES
-        {
+        let (lo, hi) = match s.kernel {
+            Kernel::Stuffing => (DIHEDRAL_MIN_DEGREES, DIHEDRAL_MAX_DEGREES),
+            Kernel::Delaunay if sliver_input => (0.0, 180.0),
+            Kernel::Delaunay => (10.0, 170.0),
+        };
+        if s.kernel == Kernel::Delaunay {
+            tally.delaunay += 1;
+        }
+        if c.conformal_fails && s.kernel != Kernel::Stuffing {
+            failures.push(format!("{label}: part {} was meshed conformally", r.name));
+        }
+        if s.min_dihedral_degrees < lo || s.max_dihedral_degrees > hi {
             failures.push(format!(
                 "{label}: part {} dihedral range {:.2}..{:.2}",
                 r.name, s.min_dihedral_degrees, s.max_dihedral_degrees
@@ -526,18 +558,21 @@ fn check_stuffing(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) 
             );
         }
         if s.accepted {
-            accepted += 1;
+            tally.accepted += 1;
         }
         // The enclosed volume is the region's volume only for a surface that
         // passed the gate (overlapping shells count their overlap twice).
         if s.accepted && c.gate_fails.is_empty() {
             let error =
                 (s.volume - s.surface_volume).abs() / s.surface_volume.abs().max(f64::MIN_POSITIVE);
-            if error > 0.15 {
+            let allowed = match s.kernel {
+                Kernel::Stuffing => 0.15,
+                Kernel::Delaunay => 1e-9,
+            };
+            if error > allowed {
                 failures.push(format!(
-                    "{label}: part {} volume off by {:.1}%",
-                    r.name,
-                    100.0 * error
+                    "{label}: part {} ({:?}) volume off by {:.3e}",
+                    r.name, s.kernel, error
                 ));
             }
         }
@@ -556,12 +591,26 @@ fn check_stuffing(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) 
         DefectCode::VolInvertedTet,
         DefectCode::VolLowQuality,
         DefectCode::MeshBudgetExceeded,
+        DefectCode::MeshRecoveryFailed,
     ] {
-        if run.records.iter().any(|r| r.code == code) {
+        let expected = match code {
+            DefectCode::VolLowQuality => sliver_input,
+            DefectCode::MeshRecoveryFailed => c.conformal_fails,
+            _ => false,
+        };
+        let found = run.records.iter().any(|r| r.code == code);
+        if code == DefectCode::MeshRecoveryFailed && c.conformal_fails && !found {
+            failures.push(format!("{label}: expected {}", code.as_str()));
+        }
+        if expected {
+            continue;
+        }
+        if found {
             failures.push(format!("{label}: {}", code.as_str()));
         }
     }
-    (run.repaired.len() as u32, accepted)
+    tally.meshed = run.repaired.len() as u32;
+    tally
 }
 
 /// How the suite compares locations for each repairable code.
@@ -684,7 +733,7 @@ struct Tally {
 fn synthetic_suite() {
     let mut tally: BTreeMap<DefectCode, Tally> = BTreeMap::new();
     let mut failures = Vec::new();
-    let (mut stuffed_parts, mut accepted_parts) = (0u32, 0u32);
+    let (mut meshed_parts, mut accepted_parts, mut delaunay_parts) = (0u32, 0u32, 0u32);
     let variants = [(1.0, 0.0), (1e-3, 1e3), (1e4, -5e4)];
 
     for c in cases() {
@@ -695,16 +744,21 @@ fn synthetic_suite() {
         };
         for &(scale, offset) in runs {
             let label = format!("{} [x{scale} +{offset}]", c.name);
+            let started = std::time::Instant::now();
             let outcome = run(&c.scene.transformed(scale, offset), &c.parts);
+            if std::env::var("SUITE_TIMING").is_ok() {
+                eprintln!("{:>8.2?} {label}", started.elapsed());
+            }
             if let Some(n) = c.parts_count {
                 if outcome.parts != n {
                     failures.push(format!("{label}: {} parts, expected {n}", outcome.parts));
                 }
             }
             check_repair(&c, &outcome, &label, &mut failures);
-            let (meshed, accepted) = check_stuffing(&c, &outcome, &label, &mut failures);
-            stuffed_parts += meshed;
-            accepted_parts += accepted;
+            let t = check_meshes(&c, &outcome, &label, &mut failures);
+            meshed_parts += t.meshed;
+            accepted_parts += t.accepted;
+            delaunay_parts += t.delaunay;
             let mut detected: BTreeMap<DefectCode, Vec<&Record>> = BTreeMap::new();
             for r in outcome
                 .records
@@ -786,7 +840,7 @@ fn synthetic_suite() {
     }
 
     eprintln!(
-        "\nstuffing: {stuffed_parts} parts meshed, {accepted_parts} accepted by the volume gate"
+        "\nvolume: {meshed_parts} parts meshed ({delaunay_parts} conformal Delaunay, the rest stuffing), {accepted_parts} accepted by the volume gate"
     );
 
     // Every diagnosable code is exercised (capacity overflow cannot be synthesized).
