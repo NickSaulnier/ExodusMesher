@@ -50,6 +50,7 @@ use crate::delaunay::{Delaunay, DelaunayError, Inserted, Walk};
 use crate::fxhash::FxHashMap;
 use crate::quality::dihedral_angles;
 use crate::sizing::SizeField;
+use crate::smooth::{SmoothParams, smooth_slivers};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConformingParams {
@@ -78,6 +79,10 @@ pub struct ConformingParams {
     /// Tets with a smaller dihedral angle are slivers.
     pub sliver_degrees: f64,
     pub sliver_rounds: usize,
+    /// Passes of vertex smoothing on the finished mesh (free vertices of
+    /// tets below 15° move to raise their worst angle; see
+    /// `smooth::smooth_slivers`); `0` turns it off.
+    pub smooth_passes: usize,
     pub seed: u64,
     /// Group of each input triangle (e.g. its OBJ group). Rounding-flat
     /// slivers between two input triangles are only flattened when the two
@@ -98,6 +103,7 @@ impl ConformingParams {
             min_boundary_size: max_circumradius / 16.0,
             sliver_degrees: 10.0,
             sliver_rounds: 2,
+            smooth_passes: 4,
             seed: 0x5eed,
             groups: Vec::new(),
         }
@@ -159,6 +165,8 @@ pub struct ConformingMesh {
     pub interior_steiner: usize,
     /// Tets still below the sliver angle.
     pub slivers_left: usize,
+    /// Vertex moves made by smoothing.
+    pub smoothed: usize,
     /// Rounding-flat slivers dropped by flipping a planar quad's diagonal.
     pub flattened: usize,
 }
@@ -2054,6 +2062,23 @@ pub fn conforming_mesh(
         .into_iter()
         .map(|(f, o)| (f.map(&mut remap), o))
         .collect();
+    // Smooth the free vertices (those on no boundary face) of poor tets.
+    let mut fixed = vec![false; out_points.len()];
+    for &(f, _) in &boundary {
+        for v in f {
+            fixed[v as usize] = true;
+        }
+    }
+    let smoothed = smooth_slivers(
+        &mut out_points,
+        &tets,
+        &fixed,
+        &SmoothParams {
+            passes: params.smooth_passes,
+            ..SmoothParams::default()
+        },
+    )
+    .moves;
     let slivers_left = tets
         .iter()
         .filter(|t| {
@@ -2071,6 +2096,7 @@ pub fn conforming_mesh(
         interior_steiner: total - b.inputs - b.boundary_steiner,
         slivers_left,
         flattened,
+        smoothed,
     })
 }
 

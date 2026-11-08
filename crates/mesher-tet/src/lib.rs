@@ -9,6 +9,7 @@ pub mod prof;
 pub mod quality;
 pub mod remesh;
 pub mod sizing;
+pub mod smooth;
 pub mod stuffing;
 
 pub use conforming::{ConformingError, ConformingMesh, ConformingParams, conforming_mesh};
@@ -16,4 +17,5 @@ pub use delaunay::{Delaunay, DelaunayError, Inserted, Tetrahedralization, delaun
 pub use quality::{FvQuality, dihedral_angles, dihedral_range, fv_quality};
 pub use remesh::{RemeshError, RemeshParams, Remeshed, remesh};
 pub use sizing::{SizeField, SizingParams};
+pub use smooth::{SmoothParams, SmoothStats, smooth_slivers};
 pub use stuffing::{Stuffed, StuffingError, StuffingParams, stuff};

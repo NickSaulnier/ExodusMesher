@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use mesher_tet::{
-    ConformingParams, RemeshParams, SizeField, SizingParams, conforming_mesh, prof, remesh,
+    ConformingMesh, ConformingParams, RemeshParams, SizeField, SizingParams, conforming_mesh,
+    dihedral_angles, prof, remesh,
 };
 
 fn main() {
@@ -117,5 +118,48 @@ fn main() {
         ),
         Err(e) => eprintln!("failed after {elapsed:?}: {e}"),
     }
+    if let Ok(m) = &result {
+        slivers(m, points.len());
+    }
     eprint!("{}", prof::report());
+}
+
+/// Where the slivers are: tets below 10° (and 1°) by how many of their faces
+/// are on the boundary, how many vertices are, and how many are input
+/// vertices (indices below `inputs`).
+fn slivers(m: &ConformingMesh, inputs: usize) {
+    let key = |mut f: [u32; 3]| {
+        f.sort_unstable();
+        f
+    };
+    let faces: std::collections::HashSet<[u32; 3]> =
+        m.boundary.iter().map(|&(f, _)| key(f)).collect();
+    let on: std::collections::HashSet<u32> = m.boundary.iter().flat_map(|&(f, _)| f).collect();
+    let mut table: std::collections::BTreeMap<(usize, usize, usize), (usize, usize)> =
+        std::collections::BTreeMap::new();
+    for t in &m.tets {
+        let min = dihedral_angles(t.map(|v| m.points[v as usize]))
+            .into_iter()
+            .fold(180.0f64, f64::min);
+        if min >= 10.0 {
+            continue;
+        }
+        let bf = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
+            .iter()
+            .filter(|f| faces.contains(&key(f.map(|k| t[k]))))
+            .count();
+        let bv = t.iter().filter(|v| on.contains(v)).count();
+        let iv = t.iter().filter(|&&v| (v as usize) < inputs).count();
+        let e = table.entry((bf, bv, iv)).or_default();
+        e.0 += 1;
+        if min < 1.0 {
+            e.1 += 1;
+        }
+    }
+    eprintln!(
+        "slivers by (boundary faces, boundary vertices, input vertices): count below 10°, below 1°"
+    );
+    for ((bf, bv, iv), (n, n1)) in table {
+        eprintln!("  faces {bf} vertices {bv} input {iv}: {n:>6} {n1:>6}");
+    }
 }
