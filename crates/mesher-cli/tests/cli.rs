@@ -278,3 +278,60 @@ fn memory_cap_stops_a_runaway_worker() {
     // Running out of memory is a failure, not a bug.
     assert_eq!(output.status.code(), Some(30));
 }
+
+#[test]
+fn project_file_replays_a_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("two_objects.obj"), dir.path().join("two.obj")).unwrap();
+    let project = dir.path().join("job.toml");
+    std::fs::write(
+        &project,
+        "input = \"two.obj\"\noutput = \"out\"\n\n[settings]\nparts = [\"right\"]\n",
+    )
+    .unwrap();
+    let run = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_mesher"))
+            .arg("run")
+            .arg(&project)
+            .arg("--worker")
+            .arg(worker_path())
+            .args(extra)
+            .env_remove(TEST_FAULT_ENV)
+            .output()
+            .unwrap()
+    };
+    // Paths resolve against the project file, not the current directory.
+    let out = run(&[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let r = report(&dir.path().join("out"));
+    let selected: Vec<&str> = r
+        .parts
+        .iter()
+        .filter(|p| p.selected)
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(selected, ["right"]);
+    assert!(dir.path().join("out/mesh.exo").exists());
+    // Options given on the command line override the project.
+    let elsewhere = dir.path().join("elsewhere");
+    let out = run(&["--out", elsewhere.to_str().unwrap(), "--parts", "left"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let r = report(&elsewhere);
+    assert!(r.parts.iter().all(|p| p.selected == (p.name == "left")));
+}
+
+#[test]
+fn invalid_project_file_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("bad.toml");
+    std::fs::write(&project, "input = \"x.obj\"\nunknown = 3\n").unwrap();
+    let out = dir.path().join("out");
+    let run = mesher(&project, &out, &[], None);
+    assert_eq!(run.status.code(), Some(30), "{run:?}");
+    let r = report(&out);
+    assert!(
+        r.records
+            .iter()
+            .any(|x| x.code == DefectCode::ParseProjectInvalid)
+    );
+}

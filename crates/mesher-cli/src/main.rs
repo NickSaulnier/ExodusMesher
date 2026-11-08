@@ -2,15 +2,17 @@
 //! job, runs `mesher-worker` under a timeout, prints a summary, and turns worker
 //! crashes and timeouts into `MESH_WORKER_FAILED` reports.
 
-mod supervise;
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use mesher_core::project::{Project, ProjectError};
 use mesher_core::protocol::{Job, REPORT_FILE};
-use mesher_core::{ExitStatus, JobConfig, Outcome, Report, Severity, Stage};
+use mesher_core::{
+    Action, DefectCode, ExitStatus, JobConfig, Outcome, Record, RecordLog, Report, Severity, Stage,
+};
 
 #[derive(Parser)]
 #[command(
@@ -25,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Mesh an OBJ file (Milestone 1: parse and report only).
+    /// Mesh an OBJ file, or replay a project file (.toml) saved by the GUI.
     Run(RunArgs),
     /// Print the JSON schema of report.json.
     Schema,
@@ -33,7 +35,8 @@ enum Command {
 
 #[derive(clap::Args)]
 struct RunArgs {
-    /// Input .obj file.
+    /// Input .obj file, or a project file (.toml). A project supplies the
+    /// input, output directory and settings; options given here override it.
     input: PathBuf,
     /// Output directory [default: <input stem>_out in the current directory].
     #[arg(short, long)]
@@ -47,12 +50,14 @@ struct RunArgs {
     /// Conformal paths only; never use the stuffing fallback.
     #[arg(long)]
     strict: bool,
-    /// Largest acceptable fallback deviation, relative to each part's bounding-box diagonal.
-    #[arg(long, default_value_t = JobConfig::default().max_deviation, value_parser = positive)]
-    max_deviation: f64,
-    /// Target element size, relative to each part's bounding-box diagonal.
-    #[arg(long, default_value_t = JobConfig::default().element_size, value_parser = positive)]
-    element_size: f64,
+    /// Largest acceptable fallback deviation, relative to each part's
+    /// bounding-box diagonal [default: 0.05].
+    #[arg(long, value_parser = positive)]
+    max_deviation: Option<f64>,
+    /// Target element size, relative to each part's bounding-box diagonal
+    /// [default: 0.03].
+    #[arg(long, value_parser = positive)]
+    element_size: Option<f64>,
     /// Kill the worker after this many seconds.
     #[arg(long, default_value_t = 3600.0, value_parser = positive)]
     timeout: f64,
@@ -77,29 +82,72 @@ fn main() -> ExitCode {
 }
 
 fn run(args: RunArgs) -> i32 {
-    let out = args
-        .out
-        .clone()
-        .unwrap_or_else(|| default_out_dir(&args.input));
-    let job = Job {
-        input: args.input.display().to_string(),
-        output_dir: out.display().to_string(),
-        config: JobConfig {
-            parts: args.parts,
-            no_repair: args.no_repair,
-            strict: args.strict,
-            max_deviation: args.max_deviation,
-            element_size: args.element_size,
-        },
+    let is_project = args
+        .input
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+    let mut job = if is_project {
+        match Project::read(&args.input) {
+            Ok(project) => project.job(),
+            Err(e) => return project_failure(&args, &e),
+        }
+    } else {
+        Job {
+            input: args.input.display().to_string(),
+            output_dir: default_out_dir(&args.input).display().to_string(),
+            config: JobConfig::default(),
+        }
     };
-    let worker = args.worker.unwrap_or_else(default_worker_path);
-    let limits = supervise::Limits {
+    // Options given on the command line override the project.
+    if let Some(out) = &args.out {
+        job.output_dir = out.display().to_string();
+    }
+    let c = &mut job.config;
+    if !args.parts.is_empty() {
+        c.parts.clone_from(&args.parts);
+    }
+    c.no_repair |= args.no_repair;
+    c.strict |= args.strict;
+    if let Some(d) = args.max_deviation {
+        c.max_deviation = d;
+    }
+    if let Some(e) = args.element_size {
+        c.element_size = e;
+    }
+    let worker = args
+        .worker
+        .unwrap_or_else(mesher_client::default_worker_path);
+    let limits = mesher_client::Limits {
         timeout: Duration::try_from_secs_f64(args.timeout).unwrap_or(Duration::from_secs(3600)),
         memory: usize::try_from(args.memory_limit.saturating_mul(1 << 20)).ok(),
     };
 
-    let (report, report_path) = supervise::run_job(&worker, &job, limits);
+    let never = AtomicBool::new(false);
+    let (report, report_path) = mesher_client::run_job(&worker, &job, limits, &mut |_| {}, &never);
     print_summary(&report, report_path.as_deref());
+    report.summary.exit_code
+}
+
+/// A project file that cannot be used: a report with `PARSE_PROJECT_INVALID`.
+fn project_failure(args: &RunArgs, error: &ProjectError) -> i32 {
+    let mut log = RecordLog::new();
+    log.push(
+        Record::new(DefectCode::ParseProjectInvalid, Stage::Parse)
+            .hint(error.to_string())
+            .action(Action::Abort, Outcome::Applied),
+    );
+    let mut report = Report::new(&args.input.display().to_string(), JobConfig::default());
+    report.finish(log);
+    let out = args
+        .out
+        .clone()
+        .unwrap_or_else(|| default_out_dir(&args.input));
+    let path = out.join(REPORT_FILE);
+    let written = std::fs::create_dir_all(&out)
+        .and_then(|()| std::fs::write(&path, report.to_json()))
+        .is_ok();
+    let shown = path.display().to_string();
+    print_summary(&report, written.then_some(shown.as_str()));
     report.summary.exit_code
 }
 
@@ -115,17 +163,6 @@ fn default_out_dir(input: &Path) -> PathBuf {
         .file_stem()
         .map_or_else(|| "mesh".to_owned(), |s| s.to_string_lossy().into_owned());
     PathBuf::from(format!("{stem}_out"))
-}
-
-fn default_worker_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("MESHER_WORKER") {
-        return PathBuf::from(path);
-    }
-    let name = format!("mesher-worker{}", std::env::consts::EXE_SUFFIX);
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(&name)))
-        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 fn print_summary(report: &Report, report_path: Option<&str>) {
@@ -260,9 +297,4 @@ fn exit_label(code: i32) -> &'static str {
         Some(ExitStatus::InternalBug) => "internal error; please file a bug with the report",
         None => "unknown",
     }
-}
-
-/// Where the CLI writes a report the worker could not.
-pub(crate) fn report_file(job: &Job) -> PathBuf {
-    Path::new(&job.output_dir).join(REPORT_FILE)
 }

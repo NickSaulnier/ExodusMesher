@@ -13,10 +13,12 @@ serde_json.workspace = true
 mesher-geom.workspace = true
 mesher-tet.workspace = true
 schemars.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 jsonschema.workspace = true
 proptest.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

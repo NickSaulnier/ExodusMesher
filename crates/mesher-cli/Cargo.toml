@@ -13,9 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 mesher-core.workspace = true
+mesher-client.workspace = true
 serde_json.workspace = true
 clap.workspace = true
-process_control = "5.2.0"
 
 [dev-dependencies]
 jsonschema.workspace = true

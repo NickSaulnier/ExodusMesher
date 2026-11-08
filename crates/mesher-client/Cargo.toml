@@ -1,0 +1,16 @@
+[package]
+name = "mesher-client"
+description = "Runs mesher-worker jobs for the ExodusMesher front ends"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mesher-core.workspace = true
+serde_json.workspace = true
+process_control = "5.2.0"
+
+[lints]
+workspace = true

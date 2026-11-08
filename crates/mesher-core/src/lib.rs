@@ -6,6 +6,7 @@ pub mod exit;
 pub mod mesh;
 pub mod model;
 pub mod overlay;
+pub mod project;
 pub mod protocol;
 pub mod repair;
 pub mod report;

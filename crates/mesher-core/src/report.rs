@@ -80,6 +80,7 @@ defect_codes! {
     ParseBadLine = "PARSE_BAD_LINE", Warning, "Malformed or non-numeric OBJ line";
     ParseBadIndex = "PARSE_BAD_INDEX", Warning, "Face references a missing vertex";
     ParseReadFailed = "PARSE_READ_FAILED", Fatal, "Input file cannot be opened or read";
+    ParseProjectInvalid = "PARSE_PROJECT_INVALID", Fatal, "Project file cannot be read or is not a valid project";
     ParseNoGeometry = "PARSE_NO_GEOMETRY", Fatal, "No faces survive parsing";
     ParseUnsupportedElement = "PARSE_UNSUPPORTED_ELEMENT", Info, "Lines, points, curves or surfaces in the OBJ file";
     ParsePolygonFallback = "PARSE_POLYGON_FALLBACK", Warning, "Polygon could not be ear-clipped and was fan-triangulated";

@@ -90,11 +90,12 @@ The pipeline runs once per selected part, top to bottom through two validation g
 ```text
 crates/
   mesher-geom/    predicates, half-edge mesh, BVH, winding number
-  mesher-core/    parts, diagnose, repair, gates, sizing, report types
+  mesher-core/    parts, diagnose, repair, gates, sizing, report types, project files
   mesher-tet/     volume kernels: stuffing, Delaunay, recovery, refinement
   mesher-io/      OBJ reader; Exodus, .msh, .vtu, .vtp writers
   mesher-worker/  binary: one job, JSON-lines protocol on stdout
-  mesher-cli/     clap front end, exit codes, project files
+  mesher-client/  worker supervision shared by the front ends
+  mesher-cli/     clap front end, exit codes, `mesher run project.toml`
   mesher-gui/     egui/eframe app with wgpu viewport
   mesher-fvm/     finite-volume Poisson solver for downstream checks
 tests/
@@ -174,6 +175,7 @@ Every finding is a structured record with a stable code, a severity, a location 
 | `PARSE_BAD_LINE` | Malformed or non-numeric OBJ line | Skip line, warning |
 | `PARSE_BAD_INDEX` | Face references a missing vertex | Drop face, warning |
 | `PARSE_READ_FAILED` | Input file cannot be opened or read | Fatal |
+| `PARSE_PROJECT_INVALID` | Project file cannot be read or is not a valid project | Fatal |
 | `PARSE_NO_GEOMETRY` | No faces survive parsing | Fatal |
 | `PARSE_UNSUPPORTED_ELEMENT` | Lines, points, curves or surfaces (`l`, `p`, `curv`, `surf`, ...) | Skip line, info |
 | `PARSE_POLYGON_FALLBACK` | Polygon could not be ear-clipped (degenerate, self-overlapping or over 256 vertices) | Fan-triangulate, warning |
@@ -524,7 +526,19 @@ On the first 48 models the constrained kernel newly meshes 3 conformally (34785,
 
 ### Phase 5: GUI
 
-**Milestone 9: GUI.** `mesher-gui` with wgpu viewport, part tree, picking, overlay, run panel, export, project files shared with the CLI.
+**Milestone 9: GUI.** `mesher-gui` with wgpu viewport, part tree, picking, overlay, run panel, export, project files shared with the CLI. Exit criterion passes headless (Nov 7, 2026); the interactive check is open. Run it with `cargo run -p mesher-gui --release -- model.obj` (build `mesher-worker` too: the GUI runs the worker next to it).
+
+- [x] Project files: `mesher_core::project::Project` (input, output directory, job settings) as TOML, paths relative to the project file; `mesher run project.toml` runs it, with command-line flags overriding; an unusable project file is `PARSE_PROJECT_INVALID`
+- [x] `mesher-client`: worker supervision (spawn, stream messages, timeout, memory cap, cancel, crash and timeout reports) shared by the CLI and the GUI
+- [x] `mesher-gui` shell: eframe 0.37 app; open an OBJ or a project (file dialog, drag and drop, or a command-line argument); the model is read and diagnosed with the worker's own code on a background thread, so parts, records and the overlay match the worker exactly (no meshing in the GUI)
+- [x] Viewport: wgpu render pass into an offscreen colour and depth target shown as an egui image; orbit, pan, zoom, double-click to fit; flat shading with a headlight plus wireframe; one colour per part, grey when unselected; a clipping plane along x
+- [x] Part tree: name, triangle count, bounding-box size, defect badges by severity, selection checkbox, all and none
+- [x] Picking: click a part to toggle it (a ray from the camera against every display triangle; box and lasso selection later)
+- [x] Defect overlay: diagnosis overlay faces in red, edges as red lines, vertices as markers; a record list where clicking one highlights its faces and vertices in yellow and shows its code, hint, measurements and OBJ lines
+- [x] Run panel: element size, maximum deviation, strict and no-repair; Run streams progress into a bar and records into a log; Cancel kills the worker (a `MESH_WORKER_FAILED` report with reason `cancelled`)
+- [x] Export: output directory chooser; the worker writes Exodus, .msh, .vtu and the report; `project.toml` is saved beside them (and "Save project..." saves one anywhere)
+- [x] Exit criterion: select parts of a multi-object OBJ and export an Exodus file with one block per part, reproducible from the CLI. `crates/mesher-gui/tests/exit_criterion.rs` picks a part with a camera ray, toggles another in the session, exports through the worker (two blocks of three parts), and replays the saved project with `mesher run project.toml` to the same blocks
+- [ ] Interactive check of the window by the user (the automated tests cover the logic, not the drawing)
 
 ### Phase 6: Hardening
 
