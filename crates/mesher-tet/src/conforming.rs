@@ -47,6 +47,7 @@ use mesher_geom::vec3::{add, cross, distance_squared, dot, norm, scale, sub};
 use mesher_geom::{FastWindingNumber, Point3, Sign, TriangleSoup};
 
 use crate::delaunay::{Delaunay, DelaunayError, Inserted, Walk};
+use crate::fxhash::FxHashMap;
 use crate::quality::dihedral_angles;
 use crate::sizing::SizeField;
 
@@ -291,6 +292,8 @@ struct Builder<'a> {
     face_constraints: bool,
     /// Kernel steps taken, against `params.max_work`.
     work: u64,
+    /// Whether each tet (by sorted vertices) is inside; see `tet_inside`.
+    inside_cache: FxHashMap<[u32; 4], bool>,
 }
 
 /// Missing subfacets past which a growing repair cascade is left to a full
@@ -306,6 +309,7 @@ const MAX_FLIPS: usize = 10_000;
 /// their four points make a tet flat to rounding), face the same way and
 /// share a group.
 fn facets(points: &[Point3], triangles: &[[u32; 3]], groups: &[u32]) -> Vec<u32> {
+    let _prof = crate::prof::scope("conforming::facets");
     fn find(parent: &mut [u32], mut x: u32) -> u32 {
         while parent[x as usize] != x {
             let up = parent[parent[x as usize] as usize];
@@ -500,6 +504,7 @@ impl Builder<'_> {
         keep: &[u32],
         force: bool,
     ) -> Result<Placed, ConformingError> {
+        let _prof = crate::prof::scope("conforming::insert_point");
         self.step()?;
         let limit = self.params.max_points;
         if self.dt.points().len() >= limit {
@@ -536,6 +541,7 @@ impl Builder<'_> {
     /// tet blocks splits next to it: rounding decides on which side of its
     /// faces a new point on the facet lies.
     fn unflatten(&mut self, slot: u32) -> bool {
+        let _prof = crate::prof::scope("conforming::unflatten");
         let Some(t) = self.dt.tet(slot) else {
             return false;
         };
@@ -567,6 +573,7 @@ impl Builder<'_> {
     /// Remove the tets flat to rounding at the boundary (see `unflatten`),
     /// a few passes.
     fn unflatten_all(&mut self) {
+        let _prof = crate::prof::scope("conforming::unflatten_all");
         for _ in 0..4 {
             let mut changed = false;
             for slot in self.dt.real_slots() {
@@ -601,6 +608,7 @@ impl Builder<'_> {
     /// on the facet, in its exact frame), shrunk until `p` sees every
     /// boundary edge.
     fn facet_cavity(&self, start: u32, p: Point3, split: Option<(u32, u32)>) -> Vec<u32> {
+        let _prof = crate::prof::scope("conforming::facet_cavity");
         let f = self.facet[self.subs[start as usize].origin as usize];
         let [o, e1, e2] = self.frames[f as usize];
         let flat = |q: Point3| {
@@ -676,6 +684,7 @@ impl Builder<'_> {
         primary: &[u32],
         split: Option<(u32, u32)>,
     ) -> Result<Placed, ConformingError> {
+        let _prof = crate::prof::scope("conforming::split_boundary");
         // A tet flat to rounding next to what is split would block it.
         let mut near: Vec<u32> = primary
             .iter()
@@ -805,6 +814,7 @@ impl Builder<'_> {
 
     /// Split a subsegment. `false` when the floor forbids it.
     fn split_edge(&mut self, u: u32, v: u32) -> Result<bool, ConformingError> {
+        let _prof = crate::prof::scope("conforming::split_edge");
         if self.floored
             && distance_squared(self.pos(u), self.pos(v)) < self.params.min_boundary_size.powi(2)
         {
@@ -880,6 +890,7 @@ impl Builder<'_> {
     /// plane. Only edges inside one input triangle (both subfacets with the
     /// same origin) may flip; subsegments never do.
     fn legalize(&mut self, mut stack: Vec<(u32, u32)>) {
+        let _prof = crate::prof::scope("conforming::legalize");
         let mut flips = 0usize;
         while let Some((u, v)) = stack.pop() {
             // Exact in-circle tests on fixed 2D coordinates make flipping
@@ -937,6 +948,7 @@ impl Builder<'_> {
     /// circumcentre lies outside it or encroaches a subsegment.
     /// `false` when the floor forbids the split.
     fn split_sub(&mut self, s: u32) -> Result<bool, ConformingError> {
+        let _prof = crate::prof::scope("conforming::split_sub");
         let t = self.subs[s as usize].v;
         let [a, b, c] = t.map(|x| self.pos(x));
         let floor = self.params.min_boundary_size.powi(2);
@@ -1027,13 +1039,29 @@ impl Builder<'_> {
 
     /// What to split for a candidate point: a subsegment, a subfacet, or nothing.
     fn encroachment(&self, p: Point3) -> Option<Split> {
+        let _prof = crate::prof::scope("conforming::encroachment");
         if let Some((u, v)) = self.encroached_edge(p) {
             return Some(Split::Edge(u, v));
         }
         self.encroached_sub(p).map(Split::Sub)
     }
 
+    /// Whether tet `v` (with centroid `centroid`) is inside the region,
+    /// remembered per tet: refinement and sliver removal ask about the same
+    /// tets many times, and the winding number is the costliest query.
+    fn tet_inside(&mut self, v: [u32; 4], centroid: Point3) -> bool {
+        let mut k = v;
+        k.sort_unstable();
+        if let Some(&known) = self.inside_cache.get(&k) {
+            return known;
+        }
+        let inside = self.inside(centroid);
+        self.inside_cache.insert(k, inside);
+        inside
+    }
+
     fn inside(&self, p: Point3) -> bool {
+        let _prof = crate::prof::scope("conforming::inside");
         self.winding.winding_number(p) >= 0.5
     }
 
@@ -1042,6 +1070,7 @@ impl Builder<'_> {
     /// across their edge `uv` (missing), swap the subfacets to them. Needs a
     /// strictly convex quad in the facet's frame.
     fn swap_to_mesh(&mut self, u: u32, v: u32) -> bool {
+        let _prof = crate::prof::scope("conforming::swap_to_mesh");
         if self.is_segment(u, v) || self.dt.has_edge(u, v) {
             return false;
         }
@@ -1091,6 +1120,7 @@ impl Builder<'_> {
     /// the facet's subfacets (each keeping the input triangle holding its
     /// centroid).
     fn adopt_facet(&mut self, f: u32, subs: &[u32]) -> bool {
+        let _prof = crate::prof::scope("conforming::adopt_facet");
         let [o, e1, e2] = self.frames[f as usize];
         let flat = |b: &Self, q: u32| {
             let d = sub(b.pos(q), o);
@@ -1195,6 +1225,7 @@ impl Builder<'_> {
     /// Recover a missing subfacet whose edges are all in by flips: remove the
     /// edges crossing it, one edge-removal flip at a time.
     fn flip_recover(&mut self, s: u32) -> bool {
+        let _prof = crate::prof::scope("conforming::flip_recover");
         let v = self.subs[s as usize].v;
         for _ in 0..32 {
             if self.dt.has_face(v) {
@@ -1217,6 +1248,7 @@ impl Builder<'_> {
     /// flipping away crossing edges, then by splitting. Fails when the number
     /// missing stops going down.
     fn recover(&mut self) -> Result<(), ConformingError> {
+        let _prof = crate::prof::scope("conforming::recover");
         // Passes since the number missing last went down.
         let (mut best, mut stalled) = (usize::MAX, 0usize);
         loop {
@@ -1380,6 +1412,7 @@ impl Builder<'_> {
     /// boundary edge (an edge's midpoint is always inside the circumsphere).
     /// Returns whether anything was split.
     fn split_flat(&mut self, v: [u32; 4]) -> Result<bool, ConformingError> {
+        let _prof = crate::prof::scope("conforming::split_flat");
         let best = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
             .into_iter()
             .map(|(i, j)| key2(v[i], v[j]))
@@ -1434,6 +1467,7 @@ impl Builder<'_> {
         cc: Point3,
         fallback: bool,
     ) -> Result<Option<bool>, ConformingError> {
+        let _prof = crate::prof::scope("conforming::refine_at");
         let encroached = self.encroachment(cc);
         let any = encroached.is_some();
         let split = match encroached {
@@ -1471,6 +1505,7 @@ impl Builder<'_> {
     /// or crossing edges are flipped away, or the subfacet is split. What is
     /// still missing after a few rounds goes to a full recovery pass.
     fn repair(&mut self) -> Result<(), ConformingError> {
+        let _prof = crate::prof::scope("conforming::repair");
         let floored = self.floored;
         self.floored = false;
         let mut queue = std::mem::take(&mut self.missing);
@@ -1541,6 +1576,7 @@ impl Builder<'_> {
 
     /// Delaunay refinement on radius-edge ratio and size, inside the region.
     fn refine(&mut self) -> Result<(), ConformingError> {
+        let _prof = crate::prof::scope("conforming::refine");
         loop {
             self.step()?;
             if !self.missing.is_empty() {
@@ -1554,8 +1590,7 @@ impl Builder<'_> {
             }
             let p = v.map(|x| self.pos(x));
             let centroid = scale(add(add(p[0], p[1]), add(p[2], p[3])), 0.25);
-            let ins = self.inside(centroid);
-            if !ins {
+            if !self.tet_inside(v, centroid) {
                 continue;
             }
             let Some((cc, r)) = tet_sphere(p) else {
@@ -1592,6 +1627,7 @@ impl Builder<'_> {
     /// region, an edge removal or 2–3 flip that makes the worst tet fatter.
     /// Constrained faces and edges never flip, so the boundary stays.
     fn flip_slivers(&mut self) -> usize {
+        let _prof = crate::prof::scope("conforming::flip_slivers");
         let mut flips = 0;
         for _ in 0..4 {
             let mut changed = 0;
@@ -1608,7 +1644,7 @@ impl Builder<'_> {
                     continue;
                 }
                 let centroid = scale(add(add(p[0], p[1]), add(p[2], p[3])), 0.25);
-                if !self.inside(centroid) {
+                if !self.tet_inside(v, centroid) {
                     continue;
                 }
                 let edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
@@ -1632,6 +1668,7 @@ impl Builder<'_> {
 
     /// Refine at the circumcentres of slivers, a few rounds.
     fn remove_slivers(&mut self) -> Result<(), ConformingError> {
+        let _prof = crate::prof::scope("conforming::remove_slivers");
         for _ in 0..self.params.sliver_rounds {
             let mut inserted = 0;
             for slot in self.dt.real_slots() {
@@ -1644,7 +1681,7 @@ impl Builder<'_> {
                     .iter()
                     .copied()
                     .fold(f64::INFINITY, f64::min);
-                if min >= self.params.sliver_degrees || !self.inside(centroid) {
+                if min >= self.params.sliver_degrees || !self.tet_inside(v, centroid) {
                     continue;
                 }
                 if !self.attempt(v) {
@@ -1677,6 +1714,7 @@ pub fn conforming_mesh(
     triangles: &[[u32; 3]],
     params: &ConformingParams,
 ) -> Result<ConformingMesh, ConformingError> {
+    let _prof = crate::prof::scope("conforming::conforming_mesh");
     let soup = TriangleSoup::new(points, triangles)
         .map_err(|e| ConformingError::Surface(e.to_string()))?;
     let mut sorted = points.to_vec();
@@ -1774,6 +1812,7 @@ pub fn conforming_mesh(
         face_constraints: false,
         facet,
         work: 0,
+        inside_cache: FxHashMap::default(),
     };
     for (t, tri) in triangles.iter().enumerate() {
         b.add_sub(*tri, t as u32);

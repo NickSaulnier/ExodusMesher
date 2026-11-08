@@ -28,7 +28,7 @@
 //! that would have to delete a constraint is refused ([`DelaunayError::Blocked`])
 //! and leaves the structure unchanged.
 
-use std::collections::HashSet;
+use crate::fxhash::FxHashSet;
 
 use mesher_geom::predicates::{collinear, in_circumcircle_coplanar, insphere, orient3d};
 use mesher_geom::{Point3, Sign};
@@ -112,6 +112,20 @@ pub struct Delaunay {
     tets: Vec<Tet>,
     free: Vec<u32>,
     stamp: Vec<u32>,
+    /// Per tet face (4 per slot): the insertion (epoch) that last worked out
+    /// whether its point sees the face, and the answer (bit 0: seen, bit 1:
+    /// on one of the point's planes). Flat arrays rather than maps: the
+    /// cavity loop asks about every boundary face on every pass.
+    sight_stamp: Vec<u32>,
+    sight_bits: Vec<u8>,
+    /// Per tet: the insertion (epoch) that took it out of the cavity.
+    excluded_stamp: Vec<u32>,
+    /// Per tet: its position in the current insertion's cavity order.
+    cavity_rank: Vec<u32>,
+    /// Per tet: the insertion (epoch) that last tested it for conflict, and
+    /// the answer.
+    conflict_stamp: Vec<u32>,
+    conflict_bit: Vec<bool>,
     epoch: u32,
     alive: usize,
     last: u32,
@@ -122,8 +136,8 @@ pub struct Delaunay {
     /// A live tet holding each vertex (any one), to find its star.
     vertex_tet: Vec<u32>,
     /// Constrained faces and edges, with sorted vertices.
-    faces: HashSet<[u32; 3]>,
-    edges: HashSet<(u32, u32)>,
+    faces: FxHashSet<[u32; 3]>,
+    edges: FxHashSet<(u32, u32)>,
     lost: Vec<[u32; 3]>,
     /// Plane labels per vertex (see `set_planes`).
     planes: Vec<Vec<u32>>,
@@ -142,6 +156,7 @@ impl Delaunay {
         seed: u64,
         planes: Vec<Vec<u32>>,
     ) -> Result<Delaunay, DelaunayError> {
+        let _prof = crate::prof::scope("delaunay::with_planes");
         if let Some(i) = points.iter().position(|p| !p.iter().all(|c| c.is_finite())) {
             return Err(DelaunayError::NonFinite { point: i as u32 });
         }
@@ -152,6 +167,12 @@ impl Delaunay {
             tets: Vec::new(),
             free: Vec::new(),
             stamp: Vec::new(),
+            sight_stamp: Vec::new(),
+            sight_bits: Vec::new(),
+            excluded_stamp: Vec::new(),
+            cavity_rank: Vec::new(),
+            conflict_stamp: Vec::new(),
+            conflict_bit: Vec::new(),
             epoch: 0,
             alive: 0,
             last: 0,
@@ -159,8 +180,8 @@ impl Delaunay {
             duplicates: Vec::new(),
             created: Vec::new(),
             vertex_tet: vec![NONE; n],
-            faces: HashSet::new(),
-            edges: HashSet::new(),
+            faces: FxHashSet::default(),
+            edges: FxHashSet::default(),
             lost: Vec::new(),
             planes,
         };
@@ -219,6 +240,7 @@ impl Delaunay {
         keep: &[u32],
         force: bool,
     ) -> Result<(u32, Inserted), DelaunayError> {
+        let _prof = crate::prof::scope("delaunay::insert_with");
         self.lost.clear();
         let i = self.points.len() as u32;
         if !p.iter().all(|c| c.is_finite()) {
@@ -281,6 +303,7 @@ impl Delaunay {
     /// construction; rounding made them) by edge flips, a few passes.
     /// Returns how many remain.
     pub fn remove_flat_tets(&mut self) -> usize {
+        let _prof = crate::prof::scope("delaunay::remove_flat_tets");
         for _ in 0..8 {
             let flat: Vec<u32> = self
                 .real_slots()
@@ -338,6 +361,7 @@ impl Delaunay {
     /// Slots of the live tets (ghosts included) holding vertex `v`.
     #[must_use]
     pub fn star(&self, v: u32) -> Vec<u32> {
+        let _prof = crate::prof::scope("delaunay::star");
         let holds = |t: u32| {
             self.tets
                 .get(t as usize)
@@ -351,7 +375,8 @@ impl Delaunay {
             }
         }
         let mut out = vec![start];
-        let mut seen: HashSet<u32> = HashSet::from([start]);
+        let mut seen: FxHashSet<u32> = FxHashSet::default();
+        seen.insert(start);
         let mut k = 0;
         while k < out.len() {
             let t = self.tets[out[k] as usize];
@@ -369,6 +394,7 @@ impl Delaunay {
     /// Slots of the tets (ghosts included) with face `f`.
     #[must_use]
     pub fn face_tets(&self, f: [u32; 3]) -> Vec<u32> {
+        let _prof = crate::prof::scope("delaunay::face_tets");
         self.star(f[0])
             .into_iter()
             .filter(|&t| {
@@ -381,6 +407,7 @@ impl Delaunay {
     /// Slots of the tets (ghosts included) with edge `uv`.
     #[must_use]
     pub fn edge_tets(&self, u: u32, v: u32) -> Vec<u32> {
+        let _prof = crate::prof::scope("delaunay::edge_tets");
         self.star(u)
             .into_iter()
             .filter(|&t| self.tets[t as usize].v.contains(&v))
@@ -400,6 +427,7 @@ impl Delaunay {
     /// spreading through tets that hold a crossing edge.
     #[must_use]
     pub fn crossing_edges(&self, f: [u32; 3]) -> Vec<(u32, u32)> {
+        let _prof = crate::prof::scope("delaunay::crossing_edges");
         let [a, b, c] = f.map(|x| self.pos(x));
         let crosses = |x: u32, y: u32| {
             if x == GHOST || y == GHOST || f.contains(&x) || f.contains(&y) {
@@ -458,6 +486,7 @@ impl Delaunay {
     /// Whether face `f` is in the tetrahedralization.
     #[must_use]
     pub fn has_face(&self, f: [u32; 3]) -> bool {
+        let _prof = crate::prof::scope("delaunay::has_face");
         self.star(f[0]).into_iter().any(|t| {
             let x = self.tets[t as usize];
             x.v.contains(&f[1]) && x.v.contains(&f[2])
@@ -467,6 +496,7 @@ impl Delaunay {
     /// Whether edge `uv` is in the tetrahedralization.
     #[must_use]
     pub fn has_edge(&self, u: u32, v: u32) -> bool {
+        let _prof = crate::prof::scope("delaunay::has_edge");
         self.star(u)
             .into_iter()
             .any(|t| self.tets[t as usize].v.contains(&v))
@@ -491,6 +521,7 @@ impl Delaunay {
         want: Option<[u32; 3]>,
         improve: bool,
     ) -> bool {
+        let _prof = crate::prof::scope("delaunay::remove_edge_for");
         if u == v || self.edges.contains(&(u.min(v), u.max(v))) {
             return false;
         }
@@ -605,6 +636,7 @@ impl Delaunay {
     /// by three around the edge joining their apexes, if that edge crosses
     /// `f`; with `improve`, only if the worst new tet is fatter than both.
     pub fn flip_face(&mut self, f: [u32; 3], improve: bool) -> bool {
+        let _prof = crate::prof::scope("delaunay::flip_face");
         if self.faces.contains(&sorted3(f)) {
             return false;
         }
@@ -651,6 +683,7 @@ impl Delaunay {
     /// Replace the tets `old` by `new` (positive, filling the same region),
     /// linking the new tets to each other and to the outside.
     fn replace(&mut self, old: &[u32], new: &[[u32; 4]]) -> Result<(), ()> {
+        let _prof = crate::prof::scope("delaunay::replace");
         // Same cyclic order (one face's outward orientation)?
         let same =
             |a: [u32; 3], b: [u32; 3]| (0..3).any(|r| [b[r], b[(r + 1) % 3], b[(r + 2) % 3]] == a);
@@ -744,6 +777,7 @@ impl Delaunay {
     /// 3–2 flip of one of its edges when that edge has three tets around it.
     /// Faces that cannot flip stay. At most `max_flips`; returns the count.
     pub fn delaunize(&mut self, max_flips: usize) -> usize {
+        let _prof = crate::prof::scope("delaunay::delaunize");
         let mut queue: Vec<[u32; 3]> = Vec::new();
         for t in self.real_slots() {
             let v = self.tets[t as usize].v;
@@ -801,6 +835,7 @@ impl Delaunay {
     /// `to`, reporting the first constrained face it crosses.
     #[must_use]
     pub fn walk(&self, slot: u32, from: Point3, to: Point3) -> Walk {
+        let _prof = crate::prof::scope("delaunay::walk");
         if !self
             .tets
             .get(slot as usize)
@@ -869,6 +904,7 @@ impl Delaunay {
     /// Slots of every alive real tet, ascending.
     #[must_use]
     pub fn real_slots(&self) -> Vec<u32> {
+        let _prof = crate::prof::scope("delaunay::real_slots");
         (0..self.tets.len() as u32)
             .filter(|&t| self.tet(t).is_some())
             .collect()
@@ -877,6 +913,7 @@ impl Delaunay {
     /// The real tetrahedra, positively oriented.
     #[must_use]
     pub fn tets(&self) -> Vec<[u32; 4]> {
+        let _prof = crate::prof::scope("delaunay::tets");
         self.tets
             .iter()
             .filter(|t| t.alive && t.v[3] != GHOST)
@@ -948,6 +985,12 @@ impl Delaunay {
         } else {
             self.tets.push(t);
             self.stamp.push(0);
+            self.sight_stamp.extend([0; 4]);
+            self.sight_bits.extend([0; 4]);
+            self.excluded_stamp.push(0);
+            self.cavity_rank.push(0);
+            self.conflict_stamp.push(0);
+            self.conflict_bit.push(false);
             (self.tets.len() - 1) as u32
         };
         for x in v {
@@ -956,6 +999,35 @@ impl Delaunay {
             }
         }
         id
+    }
+
+    /// Whether point `i` (at `p`) sees face `j` of tet `t` from outside, and
+    /// whether the face is on one of `i`'s planes; worked out once per
+    /// insertion (`epoch`) and remembered.
+    fn sight(&mut self, t: u32, j: usize, p: Point3, i: u32, epoch: u32) -> (bool, bool) {
+        let slot = 4 * t as usize + j;
+        if self.sight_stamp[slot] == epoch {
+            let b = self.sight_bits[slot];
+            return (b & 1 != 0, b & 2 != 0);
+        }
+        let f = face(&self.tets[t as usize].v, j);
+        let (seen, planar) = if f.contains(&GHOST) {
+            let r: Vec<Point3> = f
+                .iter()
+                .filter(|&&x| x != GHOST)
+                .map(|&x| self.pos(x))
+                .collect();
+            (!collinear(r[0], r[1], p), false)
+        } else {
+            let [a, b, c] = f.map(|x| self.pos(x));
+            // A face on one of p's planes is seen from neither side: growing
+            // across it would only meet it again further on.
+            let planar = self.on_one_plane(&[f[0], f[1], f[2], i]);
+            (!planar && orient3d(a, b, c, p) == Sign::Negative, planar)
+        };
+        self.sight_stamp[slot] = epoch;
+        self.sight_bits[slot] = u8::from(seen) | (u8::from(planar) << 1);
+        (seen, planar)
     }
 
     /// Is face `j` of tet `t` constrained?
@@ -1065,8 +1137,20 @@ impl Delaunay {
         }
     }
 
+    /// `conflict`, remembered for the insertion (`epoch`): the cavity loop
+    /// asks about the same tets on every pass.
+    fn conflict_cached(&mut self, t: u32, p: Point3, i: u32, epoch: u32) -> bool {
+        let k = t as usize;
+        if self.conflict_stamp[k] != epoch {
+            self.conflict_bit[k] = self.conflict(t, p, i);
+            self.conflict_stamp[k] = epoch;
+        }
+        self.conflict_bit[k]
+    }
+
     /// A tet whose closure contains `p`, or a ghost whose hull face `p` is beyond.
     fn locate(&mut self, p: Point3) -> u32 {
+        let _prof = crate::prof::scope("delaunay::locate");
         let mut t = self.last;
         if !self.tets.get(t as usize).is_some_and(|x| x.alive) {
             t = self.tets.iter().position(|x| x.alive).unwrap_or(0) as u32;
@@ -1131,6 +1215,7 @@ impl Delaunay {
         force: bool,
         p: Point3,
     ) -> Result<Option<u32>, ()> {
+        let _prof = crate::prof::scope("delaunay::violation");
         let pick = |a: u32, b: Option<u32>| {
             let best = std::iter::once(a)
                 .chain(b)
@@ -1240,6 +1325,7 @@ impl Delaunay {
         keep: &[u32],
         force: bool,
     ) -> Result<Inserted, DelaunayError> {
+        let _prof = crate::prof::scope("delaunay::insert_index");
         let p = self.pos(i);
         let mut t0 = self.locate(p);
         if self.is_ghost(t0) && !self.conflict(t0, p, i) {
@@ -1273,6 +1359,7 @@ impl Delaunay {
                 cavity.push(t);
             }
         }
+        let grow_scope = crate::prof::scope("delaunay::insert/grow");
         let mut k = 0;
         while k < cavity.len() {
             let t = cavity[k];
@@ -1302,54 +1389,53 @@ impl Delaunay {
                 0
             }
         };
-        let mut excluded: HashSet<u32> = HashSet::new();
+        drop(grow_scope);
+        // Position of each cavity tet in the cavity's order (ranks only grow,
+        // so taking tets out keeps the order of the rest).
+        let mut next_rank = 0u32;
+        for &t in &cavity {
+            self.cavity_rank[t as usize] = next_rank;
+            next_rank += 1;
+        }
+        let boundary_scope = crate::prof::scope("delaunay::insert/boundary");
         let constrained = !self.faces.is_empty() || !self.edges.is_empty();
         let grow_limit = (4 * cavity.len()).max(64);
         let interior = seeds.is_empty() && keep.is_empty() && self.planes(i).is_empty();
         // Whether p sees each face, and whether the face is on one of its
         // planes: fixed for the insertion, so worked out once.
-        let mut sight: std::collections::HashMap<(u32, usize), (bool, bool)> =
-            std::collections::HashMap::new();
 
         // Boundary faces must see p: grow the cavity across any that do not,
         // or, at a constraint, shrink it. Then no constrained face, constrained
         // edge or vertex may be left inside.
+        // Boundary faces p does not see, in boundary order (cavity order,
+        // then face index): the only faces a pass looks at. Rebuilt in full
+        // after growth; after a tet is taken out only its own faces leave and
+        // its cavity neighbours' faces towards it join, so the list is
+        // updated in place.
+        let mut unseen: Vec<(u32, usize, u32)> = Vec::new();
+        let mut rebuild = true;
         let boundary = loop {
-            let mut boundary: Vec<(u32, usize, u32)> = Vec::new();
-            for &t in &cavity {
-                for j in 0..4 {
-                    let u = self.tets[t as usize].n[j];
-                    if self.stamp[u as usize] != epoch {
-                        boundary.push((t, j, u));
+            let _iter = crate::prof::scope("delaunay::insert/boundary-pass");
+            if rebuild {
+                unseen.clear();
+                for &t in &cavity {
+                    for j in 0..4 {
+                        let u = self.tets[t as usize].n[j];
+                        if self.stamp[u as usize] != epoch && !self.sight(t, j, p, i, epoch).0 {
+                            unseen.push((t, j, u));
+                        }
                     }
                 }
             }
             // Every boundary face p does not see, at once: grow across it,
             // or (at a constraint, a face on one of p's planes, or a tet taken
             // out before) take its cavity tet out.
-            let (mut grow, mut shrink) = (Vec::new(), Vec::new());
-            for &(t, j, u) in &boundary {
-                let f = face(&self.tets[t as usize].v, j);
-                let (seen, planar) = if let Some(&known) = sight.get(&(t, j)) {
-                    known
-                } else if f.contains(&GHOST) {
-                    let r: Vec<Point3> = f
-                        .iter()
-                        .filter(|&&x| x != GHOST)
-                        .map(|&x| self.pos(x))
-                        .collect();
-                    (!collinear(r[0], r[1], p), false)
-                } else {
-                    let [a, b, c] = f.map(|x| self.pos(x));
-                    // A face on one of p's planes is seen from neither side:
-                    // growing across it would only meet it again further on.
-                    let planar = self.on_one_plane(&[f[0], f[1], f[2], i]);
-                    (!planar && orient3d(a, b, c, p) == Sign::Negative, planar)
-                };
-                sight.insert((t, j), (seen, planar));
-                if seen {
-                    continue;
-                }
+            // Only the first tet to take out matters (one goes per pass),
+            // but every face is still checked for growth and for a kept tet.
+            let mut grow = Vec::new();
+            let mut first_shrink: Option<u32> = None;
+            for &(t, j, u) in &unseen {
+                let planar = self.sight_bits[4 * t as usize + j] & 2 != 0;
                 // Growing across a face p does not see is how plain
                 // Bowyer–Watson handles cospherical points. With constraints
                 // (unless forced) the mesh is not Delaunay and such faces are
@@ -1358,11 +1444,11 @@ impl Delaunay {
                 let may_grow = force
                     || !constrained
                     || (interior && cavity.len() < grow_limit)
-                    || self.conflict(u, p, i);
+                    || self.conflict_cached(u, p, i, epoch);
                 if may_grow
                     && !planar
                     && (force || !self.face_constrained(t, j))
-                    && !excluded.contains(&u)
+                    && self.excluded_stamp[u as usize] != epoch
                 {
                     if self.stamp[u as usize] != epoch {
                         self.stamp[u as usize] = epoch;
@@ -1370,17 +1456,26 @@ impl Delaunay {
                     }
                 } else if rank(t) == KEEP {
                     return Err(blocked);
-                } else if !shrink.contains(&t) {
-                    shrink.push(t);
+                } else if first_shrink.is_none() {
+                    first_shrink = Some(t);
                 }
             }
             // Grow all at once, but take tets out one at a time: one removal
             // can expose faces that make others unnecessary.
-            if !grow.is_empty() {
-                shrink.clear();
+            let mut shrink: Vec<u32> = Vec::new();
+            if grow.is_empty() {
+                shrink.extend(first_shrink);
             }
-            shrink.truncate(1);
             if grow.is_empty() && shrink.is_empty() {
+                let mut boundary: Vec<(u32, usize, u32)> = Vec::new();
+                for &t in &cavity {
+                    for j in 0..4 {
+                        let u = self.tets[t as usize].n[j];
+                        if self.stamp[u as usize] != epoch {
+                            boundary.push((t, j, u));
+                        }
+                    }
+                }
                 match self.violation(&cavity, &boundary, epoch, &rank, force, p) {
                     Ok(Some(t)) => shrink.push(t),
                     Ok(None) => break boundary,
@@ -1395,16 +1490,42 @@ impl Delaunay {
             if constrained && cavity.len() + grow.len() > MAX_CAVITY {
                 return Err(blocked);
             }
+            rebuild = !grow.is_empty();
+            for &g in &grow {
+                self.cavity_rank[g as usize] = next_rank;
+                next_rank += 1;
+            }
             cavity.extend(grow);
             for victim in shrink {
                 cavity.retain(|&x| x != victim);
                 self.stamp[victim as usize] = 0;
-                excluded.insert(victim);
+                self.excluded_stamp[victim as usize] = epoch;
+                if rebuild {
+                    continue;
+                }
+                unseen.retain(|&(t, _, _)| t != victim);
+                let around = self.tets[victim as usize].n;
+                for w in around {
+                    if self.stamp[w as usize] != epoch {
+                        continue;
+                    }
+                    for j in 0..4 {
+                        if self.tets[w as usize].n[j] != victim || self.sight(w, j, p, i, epoch).0 {
+                            continue;
+                        }
+                        let key = (self.cavity_rank[w as usize], j);
+                        let at = unseen
+                            .partition_point(|&(t, k, _)| (self.cavity_rank[t as usize], k) < key);
+                        unseen.insert(at, (w, j, victim));
+                    }
+                }
             }
             if cavity.is_empty() {
                 return Err(blocked);
             }
         };
+        drop(boundary_scope);
+        let _cone_scope = crate::prof::scope("delaunay::insert/cone");
         if boundary.is_empty() {
             return Err(fail);
         }

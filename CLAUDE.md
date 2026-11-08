@@ -10,6 +10,7 @@ Pure-Rust automatic surface + volume mesher for .obj files, with Exodus II outpu
 - Integration tests in `crates/*/tests/` allow `unwrap`/`expect`/`panic` at file level; library and binary code must not use them.
 - After changing report types, regenerate the committed schema: `UPDATE_SCHEMA=1 cargo test -p mesher-core --test schema`.
 - The synthetic suite compares every run with `tests/synthetic/golden.txt` (records by code, severity and action; each part's kernel and acceptance exactly; tet count, minimum dihedral and non-orthogonality within bands). After an intended change, regenerate it with `UPDATE_GOLDEN=1 cargo test -p mesher-synthetic` and review the diff.
+- Profile the constrained kernel with `cargo run --release -p mesher-tet --features profile --example profile -- target/thingi10k/obj/<id>.obj [--max-points N]`: timing scopes (`mesher_tet::prof::scope`) compile to nothing without the feature. Performance changes must leave results identical; check the golden reports and a model's tet count.
 - CI (`.github/workflows/ci.yml`) runs fmt, clippy and `cargo test --workspace --release` on Linux and Windows. The Thingi10k benchmarks stay local: `python tests/thingi10k/fetch.py tests/thingi10k/sample1000.txt`, then the ignored `stratified_sample_benchmark` test (or `tests/thingi10k/run_subset.py` for a quick CLI-only check).
 - Follow the workspace layout in `PLAN.md` (`crates/mesher-*`, `tests/`).
 - Before calling a task done: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.

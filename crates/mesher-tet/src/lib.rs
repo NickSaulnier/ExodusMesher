@@ -4,6 +4,8 @@
 
 pub mod conforming;
 pub mod delaunay;
+mod fxhash;
+pub mod prof;
 pub mod quality;
 pub mod remesh;
 pub mod sizing;
