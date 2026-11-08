@@ -1,7 +1,10 @@
 //! The 3D viewport: a wgpu render pass into an offscreen colour and depth
 //! target, shown in egui as an image. Flat-shaded triangles with a headlight,
 //! lines for the wireframe and the defect overlay, and an optional clipping
-//! plane.
+//! plane, over a vertical gradient.
+//!
+//! egui shows a native texture's values as they are (gamma space), so the
+//! target is plain `Rgba8Unorm` and every colour here is an sRGB value.
 
 use eframe::egui;
 use eframe::egui_wgpu::{self, wgpu};
@@ -12,7 +15,7 @@ use wgpu::util::DeviceExt;
 pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
-    /// Linear RGBA.
+    /// sRGB colour and alpha, in [0, 1].
     pub color: [f32; 4],
 }
 
@@ -28,7 +31,7 @@ pub struct Uniforms {
     pub flags: [f32; 4],
 }
 
-const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 const SHADER: &str = r"
@@ -78,9 +81,33 @@ fn fs_line(i: VOut) -> @location(0) vec4<f32> {
     if (clipped(i.world)) { discard; }
     return i.color;
 }
+
+// Background: one triangle covering the target, lighter at the top.
+struct BgOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) y: f32,
+};
+
+@vertex
+fn vs_bg(@builtin(vertex_index) i: u32) -> BgOut {
+    let x = f32(i32(i & 1u) * 4 - 1);
+    let y = f32(i32(i >> 1u) * 4 - 1);
+    var o: BgOut;
+    o.pos = vec4<f32>(x, y, 1.0, 1.0);
+    o.y = y * 0.5 + 0.5;
+    return o;
+}
+
+@fragment
+fn fs_bg(i: BgOut) -> @location(0) vec4<f32> {
+    let top = vec3<f32>(0.215, 0.235, 0.275);
+    let bottom = vec3<f32>(0.075, 0.082, 0.098);
+    return vec4<f32>(mix(bottom, top, clamp(i.y, 0.0, 1.0)), 1.0);
+}
 ";
 
 pub struct Viewport {
+    background: wgpu::RenderPipeline,
     tris: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
@@ -184,7 +211,39 @@ impl Viewport {
                 cache: None,
             })
         };
+        let background = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("viewport background"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_bg"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_bg"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COLOR,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         Viewport {
+            background,
             tris: pipeline(wgpu::PrimitiveTopology::TriangleList, "fs_tri", 2),
             lines: pipeline(wgpu::PrimitiveTopology::LineList, "fs_line", 0),
             uniforms,
@@ -219,7 +278,6 @@ impl Viewport {
         rs: &egui_wgpu::RenderState,
         size: [u32; 2],
         uniforms: &Uniforms,
-        background: [f64; 4],
     ) -> egui::TextureId {
         let size = [size[0].max(1), size[1].max(1)];
         let device = &rs.device;
@@ -276,7 +334,6 @@ impl Viewport {
             label: Some("viewport"),
         });
         {
-            let [r, g, b, a] = background;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -284,7 +341,7 @@ impl Viewport {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -301,6 +358,8 @@ impl Viewport {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_pipeline(&self.background);
+            pass.draw(0..3, 0..1);
             if let Some((buffer, count)) = &self.tri_buffer {
                 pass.set_pipeline(&self.tris);
                 pass.set_vertex_buffer(0, buffer.slice(..));

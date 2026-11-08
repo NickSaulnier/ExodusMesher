@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod render;
+mod theme;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,12 +23,14 @@ use mesher_gui::camera::Camera;
 use mesher_gui::scene::{Scene, severity_slot};
 use mesher_gui::session::Session;
 use render::{Uniforms, Vertex, Viewport};
+use theme::{Icon, IconButton};
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ExodusMesher")
-            .with_inner_size([1280.0, 800.0]),
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([960.0, 600.0]),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
@@ -54,8 +57,10 @@ const UNSELECTED: [u8; 3] = [150, 150, 150];
 const DEFECT: [u8; 3] = [235, 60, 50];
 const HIGHLIGHT: [u8; 3] = [255, 220, 40];
 
-fn linear(c: [u8; 3], alpha: f32) -> [f32; 4] {
-    let l = |v: u8| (f32::from(v) / 255.0).powf(2.2);
+/// A colour for the viewport: sRGB components in [0, 1] (egui shows the
+/// viewport texture's values as they are, so no linearisation).
+fn rgba(c: [u8; 3], alpha: f32) -> [f32; 4] {
+    let l = |v: u8| f32::from(v) / 255.0;
     [l(c[0]), l(c[1]), l(c[2]), alpha]
 }
 
@@ -96,6 +101,8 @@ struct App {
     clip: bool,
     clip_at: f32,
     record: Option<usize>,
+    /// Which severities the records list shows, by `severity_slot`.
+    record_filter: [bool; 4],
     run: Option<Run>,
     log: Vec<(Severity, String)>,
     status: String,
@@ -105,6 +112,7 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>) -> App {
+        theme::apply(&cc.egui_ctx);
         let viewport = cc.wgpu_render_state.as_ref().map(Viewport::new);
         let mut app = App {
             session: None,
@@ -117,6 +125,7 @@ impl App {
             clip: false,
             clip_at: 0.5,
             record: None,
+            record_filter: [true; 4],
             run: None,
             log: Vec::new(),
             status: "Open an OBJ file or a project to begin.".to_owned(),
@@ -153,7 +162,7 @@ impl App {
             let _ = tx.send(Scene::load(&read));
             ctx.request_repaint();
         });
-        self.status = format!("Reading {} ...", input.display());
+        self.status = format!("Reading {} ...", short_path(&input));
         self.loading = Some((input, rx, project));
     }
 
@@ -169,7 +178,7 @@ impl App {
                 self.record = None;
                 self.status = format!(
                     "{}: {} parts, {} triangles, {} records",
-                    scene.path.display(),
+                    short_path(&scene.path),
                     scene.parts.len(),
                     scene.model.triangles.len(),
                     scene.records.len()
@@ -183,7 +192,7 @@ impl App {
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                self.status = format!("Reading {} failed", path.display());
+                self.status = format!("Reading {} failed", short_path(path));
                 self.loading = None;
             }
         }
@@ -201,7 +210,7 @@ impl App {
         }
         let project = session.project();
         if let Err(e) = std::fs::create_dir_all(&session.output) {
-            self.status = format!("Cannot create {}: {e}", session.output.display());
+            self.status = format!("Cannot create {}: {e}", short_path(&session.output));
             return;
         }
         let project_path = session.project_path();
@@ -283,7 +292,7 @@ impl App {
                     let out = self
                         .session
                         .as_ref()
-                        .map(|s| s.output.join(MESH_EXODUS_FILE).display().to_string())
+                        .map(|s| short_path(&s.output.join(MESH_EXODUS_FILE)))
                         .unwrap_or_default();
                     self.status = format!("Run {outcome} ({summary}); Exodus: {out}");
                     self.log.push((Severity::Info, self.status.clone()));
@@ -314,55 +323,36 @@ impl App {
     }
 
     fn parts_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Parts");
         let Some(session) = &mut self.session else {
-            ui.label("No model loaded.");
+            ui.heading("Parts");
+            ui.label(theme::dim("No model loaded."));
             return;
         };
+        let chosen = session.selected.iter().filter(|&&s| s).count();
         ui.horizontal(|ui| {
-            if ui.button("All").clicked() {
+            ui.heading("Parts");
+            ui.label(theme::dim(format!(
+                "{chosen} of {}",
+                session.selected.len()
+            )));
+        });
+        ui.horizontal(|ui| {
+            if ui.add(IconButton::new(Icon::Check, "All")).clicked() {
                 session.selected.iter_mut().for_each(|s| *s = true);
                 self.dirty = true;
             }
-            if ui.button("None").clicked() {
+            if ui.add(IconButton::new(Icon::Cross, "None")).clicked() {
                 session.selected.iter_mut().for_each(|s| *s = false);
                 self.dirty = true;
             }
         });
-        ui.separator();
+        ui.add_space(4.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for i in 0..session.scene.parts.len() {
-                let part = &session.scene.parts[i];
-                let [r, g, b] = part_colour(i);
-                let size = {
-                    let [lo, hi] = part.bounds;
-                    (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f64>().sqrt()
-                };
-                let (tris, badges, name) = (part.triangles.len(), part.badges, part.name.clone());
-                ui.horizontal(|ui| {
-                    let mut on = session.selected[i];
-                    if ui.checkbox(&mut on, "").changed() {
-                        session.selected[i] = on;
-                        self.dirty = true;
-                    }
-                    ui.label(RichText::new("■").color(Color32::from_rgb(r, g, b)));
-                    ui.label(RichText::new(format!("{}. {name}", i + 1)).strong());
-                });
-                ui.horizontal(|ui| {
-                    ui.add_space(24.0);
-                    ui.label(format!("{tris} triangles, size {size:.3}"));
-                    for (s, sev) in [Severity::Warning, Severity::Error, Severity::Fatal]
-                        .iter()
-                        .map(|&s| (badges[severity_slot(s)], s))
-                    {
-                        if s > 0 {
-                            ui.label(
-                                RichText::new(format!("{} {s}", short(sev)))
-                                    .color(severity_colour(sev)),
-                            );
-                        }
-                    }
-                });
+                if part_card(ui, session, i) {
+                    session.toggle(i);
+                    self.dirty = true;
+                }
             }
         });
     }
@@ -373,35 +363,35 @@ impl App {
         let mut go = false;
         if let Some(session) = &mut self.session {
             let s = &mut session.settings;
-            egui::Grid::new("settings").num_columns(2).show(ui, |ui| {
-                ui.label("Element size").on_hover_text(
-                    "Target element size, relative to each part's bounding-box diagonal",
-                );
-                ui.add(
-                    egui::DragValue::new(&mut s.element_size)
-                        .speed(0.001)
-                        .range(1e-4..=1.0),
-                );
-                ui.end_row();
-                ui.label("Max deviation").on_hover_text(
-                    "Largest acceptable fallback deviation, relative to the diagonal",
-                );
-                ui.add(
-                    egui::DragValue::new(&mut s.max_deviation)
-                        .speed(0.001)
-                        .range(1e-6..=1.0),
-                );
-                ui.end_row();
-                ui.label("Strict");
-                ui.checkbox(&mut s.strict, "conformal only, no fallback");
-                ui.end_row();
-                ui.label("No repair");
-                ui.checkbox(&mut s.no_repair, "diagnose and report only");
-                ui.end_row();
-            });
+            egui::Grid::new("settings")
+                .num_columns(3)
+                .spacing([14.0, 10.0])
+                .show(ui, |ui| {
+                    ui.label("Element size").on_hover_text(
+                        "Target element size, relative to each part's bounding-box diagonal",
+                    );
+                    ui.add(percent(&mut s.element_size, 0.01, 100.0));
+                    ui.label(theme::dim("of diagonal").small());
+                    ui.end_row();
+                    ui.label("Max deviation").on_hover_text(
+                        "Largest acceptable fallback deviation, relative to the diagonal",
+                    );
+                    ui.add(percent(&mut s.max_deviation, 0.0001, 100.0));
+                    ui.label(theme::dim("of diagonal").small());
+                    ui.end_row();
+                    ui.label("Strict");
+                    theme::switch(ui, &mut s.strict);
+                    ui.label(theme::dim("conformal only, no fallback").small());
+                    ui.end_row();
+                    ui.label("No repair");
+                    theme::switch(ui, &mut s.no_repair);
+                    ui.label(theme::dim("diagnose and report only").small());
+                    ui.end_row();
+                });
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label("Output");
-                if ui.button("Choose...").clicked() {
+                if ui.add(IconButton::new(Icon::Folder, "Choose...")).clicked() {
                     if let Some(dir) = rfd::FileDialog::new()
                         .set_directory(&session.output)
                         .pick_folder()
@@ -410,11 +400,23 @@ impl App {
                     }
                 }
             });
-            ui.label(RichText::new(session.output.display().to_string()).small());
+            egui::Frame::new()
+                .fill(theme::SUNKEN)
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.add(
+                        egui::Label::new(theme::dim(short_path(&session.output)).small())
+                            .truncate(),
+                    )
+                    .on_hover_text(session.output.display().to_string());
+                });
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!running && session.any_selected(), |ui| {
                     if ui
-                        .button("Run and export")
+                        .add(IconButton::primary(Icon::Play, "Run and export"))
                         .on_hover_text("Mesh the selected parts and write Exodus, .msh, .vtu, the report and project.toml")
                         .clicked()
                     {
@@ -434,7 +436,7 @@ impl App {
                 run.stage,
                 run.fraction * 100.0
             )));
-            if ui.button("Cancel").clicked() {
+            if ui.add(IconButton::new(Icon::Stop, "Cancel")).clicked() {
                 run.cancel.store(true, Ordering::Relaxed);
             }
         }
@@ -458,17 +460,53 @@ impl App {
         let Some(session) = &self.session else {
             return;
         };
-        ui.heading(format!("Records ({})", session.scene.records.len()));
+        let records = &session.scene.records;
+        ui.horizontal(|ui| {
+            ui.heading("Records");
+            ui.label(theme::dim(records.len().to_string()));
+        });
+        // Severity filters, with counts.
+        let mut counts = [0usize; 4];
+        for r in records {
+            counts[severity_slot(r.severity)] += 1;
+        }
+        ui.horizontal_wrapped(|ui| {
+            for sev in [
+                Severity::Info,
+                Severity::Warning,
+                Severity::Error,
+                Severity::Fatal,
+            ] {
+                let slot = severity_slot(sev);
+                if counts[slot] == 0 {
+                    continue;
+                }
+                let on = self.record_filter[slot];
+                let text = format!("{} {}", short(sev), counts[slot]);
+                if theme::chip(ui, &text, severity_colour(sev), on)
+                    .on_hover_text("Show or hide this severity")
+                    .clicked()
+                {
+                    self.record_filter[slot] = !on;
+                }
+            }
+        });
+        if records.is_empty() {
+            ui.label(theme::dim("No defects found.").small());
+            return;
+        }
         let mut clicked = None;
+        let list_height = if self.record.is_some() { 220.0 } else { 420.0 };
         egui::ScrollArea::vertical()
             .id_salt("records")
-            .max_height(260.0)
+            .max_height(list_height)
+            .auto_shrink([false, true])
             .show(ui, |ui| {
-                for (i, r) in session.scene.records.iter().enumerate() {
-                    let text = RichText::new(record_line(r))
-                        .small()
-                        .color(severity_colour(r.severity));
-                    if ui.selectable_label(self.record == Some(i), text).clicked() {
+                for (i, r) in records.iter().enumerate() {
+                    if !self.record_filter[severity_slot(r.severity)] {
+                        continue;
+                    }
+                    if record_row(ui, r, i, self.record == Some(i)) {
                         clicked = Some(i);
                     }
                 }
@@ -481,32 +519,9 @@ impl App {
             };
             self.dirty = true;
         }
-        if let Some(r) = self.record.and_then(|i| session.scene.records.get(i)) {
-            ui.separator();
-            ui.label(
-                RichText::new(r.code.as_str())
-                    .strong()
-                    .color(severity_colour(r.severity)),
-            );
-            ui.label(r.code.description());
-            if let Some(part) = &r.part {
-                ui.label(format!("Part: {part}"));
-            }
-            if let Some(hint) = &r.hint {
-                ui.label(hint);
-            }
-            for (k, v) in r.measured.iter().chain(&r.threshold) {
-                ui.label(RichText::new(format!("{k}: {v}")).small());
-            }
-            let lines = &r.location.obj_lines;
-            if !lines.is_empty() {
-                let shown: Vec<String> = lines.iter().take(20).map(u32::to_string).collect();
-                ui.label(format!(
-                    "OBJ lines: {}{}",
-                    shown.join(", "),
-                    if lines.len() > 20 { ", ..." } else { "" }
-                ));
-            }
+        if let Some(r) = self.record.and_then(|i| records.get(i)) {
+            ui.add_space(6.0);
+            record_details(ui, r);
         }
     }
 
@@ -556,7 +571,7 @@ impl App {
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "The viewport needs the wgpu renderer",
-                egui::FontId::proportional(16.0),
+                egui::FontId::proportional(18.0),
                 Color32::GRAY,
             );
             return;
@@ -579,7 +594,7 @@ impl App {
             clip: [1.0, 0.0, 0.0, at as f32],
             flags: [if self.clip { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
-        let id = viewport.render(rs, size, &uniforms, [0.11, 0.12, 0.14, 1.0]);
+        let id = viewport.render(rs, size, &uniforms);
         ui.painter().image(
             id,
             rect,
@@ -587,13 +602,248 @@ impl App {
             Color32::WHITE,
         );
         ui.painter().text(
-            rect.left_bottom() + egui::vec2(8.0, -8.0),
+            rect.left_bottom() + egui::vec2(12.0, -10.0),
             egui::Align2::LEFT_BOTTOM,
             "drag: orbit   right-drag: pan   scroll: zoom   click: toggle part   double-click: fit",
-            egui::FontId::proportional(12.0),
+            egui::FontId::proportional(14.0),
             Color32::from_gray(170),
         );
     }
+}
+
+/// One part as a card: checkbox, colour swatch, name, size and defect
+/// badges. Selected parts get a filled card; the whole card highlights under
+/// the pointer and toggles on click. Returns whether it was toggled.
+fn part_card(ui: &mut egui::Ui, session: &mut Session, i: usize) -> bool {
+    let part = &session.scene.parts[i];
+    let selected = session.selected[i];
+    let [r, g, b] = part_colour(i);
+    let size = {
+        let [lo, hi] = part.bounds;
+        (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f64>().sqrt()
+    };
+    let mut frame = egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .corner_radius(8)
+        .begin(ui);
+    let mut toggled = false;
+    {
+        let ui = &mut frame.content_ui;
+        ui.set_min_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let mut on = selected;
+            toggled |= ui.checkbox(&mut on, "").changed();
+            let (swatch, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+            let swatch_colour = if selected {
+                Color32::from_rgb(r, g, b)
+            } else {
+                Color32::from_gray(90)
+            };
+            ui.painter().rect_filled(swatch, 4.0, swatch_colour);
+            let name = RichText::new(&part.name).strong();
+            ui.label(if selected {
+                name
+            } else {
+                name.color(theme::TEXT_DIM)
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(ui.spacing().icon_width + ui.spacing().item_spacing.x);
+            ui.label(
+                theme::dim(format!(
+                    "{} triangles · size {size:.3}",
+                    part.triangles.len()
+                ))
+                .small(),
+            );
+            for sev in [Severity::Warning, Severity::Error, Severity::Fatal] {
+                let n = part.badges[severity_slot(sev)];
+                if n > 0 {
+                    ui.label(
+                        RichText::new(format!("{} {n}", short(sev)))
+                            .small()
+                            .color(severity_colour(sev)),
+                    );
+                }
+            }
+        });
+    }
+    let outer = frame.allocate_space(ui);
+    let card = ui.interact(
+        outer.rect,
+        egui::Id::unique(("part card", i)),
+        egui::Sense::click(),
+    );
+    frame.frame.fill = if card.hovered() {
+        theme::CARD_HOVER
+    } else if selected {
+        theme::CARD
+    } else {
+        Color32::TRANSPARENT
+    };
+    frame.paint(ui);
+    toggled || card.clicked()
+}
+
+/// One record as a selectable row: severity chip, code and part, with the
+/// hint below. Returns whether it was clicked.
+fn record_row(ui: &mut egui::Ui, r: &Record, i: usize, selected: bool) -> bool {
+    let mut frame = egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .corner_radius(6)
+        .begin(ui);
+    {
+        let ui = &mut frame.content_ui;
+        ui.set_min_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.spacing_mut().interact_size.y = 22.0;
+        ui.horizontal(|ui| {
+            theme::chip(ui, short(r.severity), severity_colour(r.severity), true);
+            ui.label(RichText::new(r.code.as_str()).strong().small());
+            if let Some(part) = &r.part {
+                ui.label(theme::dim(part.as_str()).small());
+            }
+        });
+        if let Some(hint) = &r.hint {
+            ui.add(egui::Label::new(theme::dim(hint.as_str()).small()).truncate());
+        }
+    }
+    let outer = frame.allocate_space(ui);
+    let row = ui.interact(
+        outer.rect,
+        egui::Id::unique(("record row", i)),
+        egui::Sense::click(),
+    );
+    frame.frame.fill = if row.hovered() {
+        theme::CARD_HOVER
+    } else if selected {
+        theme::CARD
+    } else {
+        Color32::TRANSPARENT
+    };
+    if selected {
+        frame.frame.stroke = egui::Stroke::new(1.0, theme::ACCENT);
+    }
+    frame.paint(ui);
+    row.clicked()
+}
+
+/// The chosen record in full: description, hint, measurements against their
+/// thresholds, and where it is in the OBJ file.
+fn record_details(ui: &mut egui::Ui, r: &Record) {
+    egui::Frame::new()
+        .fill(theme::SUNKEN)
+        .corner_radius(8)
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.spacing_mut().interact_size.y = 20.0;
+            ui.horizontal(|ui| {
+                theme::chip(ui, short(r.severity), severity_colour(r.severity), true);
+                ui.label(RichText::new(r.code.as_str()).strong());
+            });
+            ui.label(r.code.description());
+            if let Some(hint) = &r.hint {
+                ui.label(theme::dim(hint.as_str()));
+            }
+            ui.add_space(4.0);
+            egui::Grid::new("record details")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    if let Some(part) = &r.part {
+                        ui.label(theme::dim("part").small());
+                        ui.label(RichText::new(part).small());
+                        ui.end_row();
+                    }
+                    for (k, v) in &r.measured {
+                        ui.label(theme::dim(k.as_str()).small());
+                        ui.label(RichText::new(value_text(v)).small().monospace());
+                        ui.end_row();
+                    }
+                    for (k, v) in &r.threshold {
+                        ui.label(theme::dim(format!("{k} (limit)")).small());
+                        ui.label(RichText::new(value_text(v)).small().monospace());
+                        ui.end_row();
+                    }
+                    let lines = &r.location.obj_lines;
+                    if !lines.is_empty() {
+                        let shown: Vec<String> =
+                            lines.iter().take(12).map(u32::to_string).collect();
+                        ui.label(theme::dim("OBJ lines").small());
+                        ui.label(
+                            RichText::new(format!(
+                                "{}{}",
+                                shown.join(", "),
+                                if lines.len() > 12 { ", ..." } else { "" }
+                            ))
+                            .small()
+                            .monospace(),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+/// A measured or threshold value for display: strings without quotes,
+/// floats to about four significant digits.
+fn value_text(v: &serde_json::Value) -> String {
+    if let Some(s) = v.as_str() {
+        return s.to_owned();
+    }
+    match v.as_f64() {
+        Some(x) if v.is_f64() => {
+            if x == 0.0 || (1e-3..1e5).contains(&x.abs()) {
+                let digits = (3 - x.abs().log10().floor() as i32).clamp(0, 6) as usize;
+                format!("{x:.digits$}")
+            } else {
+                format!("{x:.3e}")
+            }
+        }
+        _ => v.to_string(),
+    }
+}
+
+/// A drag field for a fraction, shown and typed as a percentage.
+fn percent(value: &mut f64, min_percent: f64, max_percent: f64) -> egui::DragValue<'_> {
+    egui::DragValue::new(value)
+        .speed(0.0002)
+        .range(min_percent / 100.0..=max_percent / 100.0)
+        .custom_formatter(|v, _| {
+            let p = v * 100.0;
+            if p >= 1.0 {
+                format!("{p:.2} %")
+            } else {
+                format!("{p:.3} %")
+            }
+        })
+        .custom_parser(|text| {
+            text.trim()
+                .trim_end_matches('%')
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .map(|p| p / 100.0)
+        })
+}
+
+/// A path shortened for display: the full path when short, else its last
+/// two components after an ellipsis.
+fn short_path(path: &Path) -> String {
+    let full = path.display().to_string();
+    if full.chars().count() <= 48 {
+        return full;
+    }
+    let mut tail: Vec<String> = path
+        .components()
+        .rev()
+        .take(2)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    tail.reverse();
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    format!("...{sep}{}", tail.join(&sep))
 }
 
 fn short(s: Severity) -> &'static str {
@@ -668,7 +918,7 @@ fn geometry(
             });
         }
     };
-    let edge_colour = [0.02, 0.02, 0.03, 0.55];
+    let edge_colour = [0.0, 0.0, 0.0, 0.35];
     for (t, tri) in model.triangles.iter().enumerate() {
         let Some(&part) = scene.triangle_part.get(t) else {
             continue;
@@ -687,13 +937,13 @@ fn geometry(
         ];
         let selected = session.selected.get(part).copied().unwrap_or(false);
         let colour = if chosen_face[t] {
-            linear(HIGHLIGHT, 1.0)
+            rgba(HIGHLIGHT, 1.0)
         } else if defect_face[t] {
-            linear(DEFECT, 1.0)
+            rgba(DEFECT, 1.0)
         } else if selected {
-            linear(part_colour(part), 1.0)
+            rgba(part_colour(part), 1.0)
         } else {
-            linear(UNSELECTED, 1.0)
+            rgba(UNSELECTED, 1.0)
         };
         for p in [a, b, c] {
             tris.push(Vertex {
@@ -718,7 +968,7 @@ fn geometry(
         }
     };
     if defects {
-        let red = linear(DEFECT, 1.0);
+        let red = rgba(DEFECT, 1.0);
         for &([a, b], _) in &scene.overlay.edges {
             line(&mut lines, pos(a), pos(b), red);
         }
@@ -727,7 +977,7 @@ fn geometry(
         }
     }
     if let Some(r) = chosen {
-        let yellow = linear(HIGHLIGHT, 1.0);
+        let yellow = rgba(HIGHLIGHT, 1.0);
         for &v in &r.location.vertices {
             marker(&mut lines, pos(v), yellow);
         }
@@ -759,70 +1009,83 @@ impl eframe::App for App {
         }
 
         let mut run_clicked = false;
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Open...").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("OBJ model or project", &["obj", "toml"])
-                        .pick_file()
-                    {
-                        self.open(&path, &ctx);
-                    }
-                }
-                ui.add_enabled_ui(self.session.is_some(), |ui| {
-                    if ui.button("Save project...").clicked() {
-                        if let Some(session) = &self.session {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("Project", &["toml"])
-                                .set_file_name("project.toml")
-                                .save_file()
-                            {
-                                self.status = match session.project().write(&path) {
-                                    Ok(()) => format!("Saved {}", path.display()),
-                                    Err(e) => format!("Cannot save: {e}"),
-                                };
-                            }
+        egui::Panel::top("toolbar")
+            .frame(theme::bar_frame())
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.add(IconButton::new(Icon::Folder, "Open...")).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("OBJ model or project", &["obj", "toml"])
+                            .pick_file()
+                        {
+                            self.open(&path, &ctx);
                         }
                     }
-                    let can_run = self.run.is_none()
-                        && self.session.as_ref().is_some_and(Session::any_selected);
-                    if ui
-                        .add_enabled(can_run, egui::Button::new("Run and export"))
-                        .clicked()
-                    {
-                        run_clicked = true;
+                    ui.add_enabled_ui(self.session.is_some(), |ui| {
+                        if ui
+                            .add(IconButton::new(Icon::Save, "Save project..."))
+                            .clicked()
+                        {
+                            if let Some(session) = &self.session {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("Project", &["toml"])
+                                    .set_file_name("project.toml")
+                                    .save_file()
+                                {
+                                    self.status = match session.project().write(&path) {
+                                        Ok(()) => format!("Saved {}", short_path(&path)),
+                                        Err(e) => format!("Cannot save: {e}"),
+                                    };
+                                }
+                            }
+                        }
+                        let can_run = self.run.is_none()
+                            && self.session.as_ref().is_some_and(Session::any_selected);
+                        if ui
+                            .add_enabled(can_run, IconButton::primary(Icon::Play, "Run and export"))
+                            .clicked()
+                        {
+                            run_clicked = true;
+                        }
+                    });
+                    ui.separator();
+                    if theme::pill(ui, &mut self.wireframe, "Wireframe").changed() {
+                        self.dirty = true;
                     }
+                    if theme::pill(ui, &mut self.defects, "Defects").changed() {
+                        self.dirty = true;
+                    }
+                    theme::pill(ui, &mut self.clip, "Clip");
+                    ui.add_enabled(
+                        self.clip,
+                        egui::Slider::new(&mut self.clip_at, 0.0..=1.0).show_value(false),
+                    );
                 });
-                ui.separator();
-                if ui.checkbox(&mut self.wireframe, "Wireframe").changed() {
-                    self.dirty = true;
-                }
-                if ui.checkbox(&mut self.defects, "Defects").changed() {
-                    self.dirty = true;
-                }
-                ui.checkbox(&mut self.clip, "Clip");
-                ui.add_enabled(
-                    self.clip,
-                    egui::Slider::new(&mut self.clip_at, 0.0..=1.0).show_value(false),
-                );
             });
-        });
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.label(&self.status);
-        });
+        egui::Panel::bottom("status")
+            .frame(theme::bar_frame())
+            .show(ui, |ui| {
+                ui.label(theme::dim(self.status.as_str()));
+            });
         egui::Panel::left("parts")
-            .default_size(280.0)
+            .default_size(320.0)
+            .frame(theme::side_frame())
             .show(ui, |ui| {
                 self.parts_panel(ui);
             });
         egui::Panel::right("run")
-            .default_size(340.0)
+            .default_size(400.0)
+            .frame(theme::side_frame())
             .show(ui, |ui| {
-                self.run_panel(ui, &ctx);
+                egui::ScrollArea::vertical()
+                    .id_salt("run panel")
+                    .show(ui, |ui| self.run_panel(ui, &ctx));
             });
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.viewport_panel(ui, frame);
-        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new())
+            .show(ui, |ui| {
+                self.viewport_panel(ui, frame);
+            });
         if run_clicked {
             self.start_run(&ctx);
         }
