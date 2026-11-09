@@ -430,7 +430,7 @@ pub struct JobConfig {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stuffing_only: bool,
     /// Mesh at `element_size` everywhere, without the sizing field (which
-    /// grades the size down to an eighth of it where the surface is curved
+    /// grades the size down to a quarter of it where the surface is curved
     /// or the part is thin).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub uniform_size: bool,
@@ -562,8 +562,9 @@ pub struct MeshSummary {
     pub steiner_points: u64,
     /// Element size used (absolute): the largest target size.
     pub element_size: f64,
-    /// Smallest target size of the sizing field (absolute), when the size
-    /// was graded (conformal meshes without `uniform_size`).
+    /// Smallest target size (absolute), when the size was graded: the
+    /// sizing field's for a conformal mesh, the surface cell size for graded
+    /// stuffing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_element_size: Option<f64>,
     /// The mesh conforms to the remeshed surface, not the repaired one (the

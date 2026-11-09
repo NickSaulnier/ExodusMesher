@@ -440,7 +440,7 @@
           "type": "boolean"
         },
         "uniform_size": {
-          "description": "Mesh at `element_size` everywhere, without the sizing field (which\ngrades the size down to an eighth of it where the surface is curved\nor the part is thin).",
+          "description": "Mesh at `element_size` everywhere, without the sizing field (which\ngrades the size down to a quarter of it where the surface is curved\nor the part is thin).",
           "type": "boolean"
         }
       },
@@ -561,7 +561,7 @@
           "format": "double"
         },
         "min_element_size": {
-          "description": "Smallest target size of the sizing field (absolute), when the size\nwas graded (conformal meshes without `uniform_size`).",
+          "description": "Smallest target size (absolute), when the size was graded: the\nsizing field's for a conformal mesh, the surface cell size for graded\nstuffing.",
           "type": [
             "number",
             "null"

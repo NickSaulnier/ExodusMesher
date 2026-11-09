@@ -1,5 +1,5 @@
-//! Keeps `schema/report.schema.json` and the `PLAN.md` taxonomy table in step
-//! with the code.
+//! Keeps `schema/report.schema.json`, the `PLAN.md` taxonomy table and the
+//! report reference (`docs/report.md`) in step with the code.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -59,6 +59,42 @@ fn plan_taxonomy_matches_enum() {
         .collect();
     let in_code: BTreeSet<&str> = DefectCode::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(in_plan, in_code);
+}
+
+/// The report reference (`docs/report.md`) lists every code, with its
+/// default severity, and nothing else.
+#[test]
+fn report_reference_lists_every_code() {
+    let doc = std::fs::read_to_string(repo_root().join("docs/report.md"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let section = doc
+        .split("## Defect codes")
+        .nth(1)
+        .expect("docs/report.md has a Defect codes section");
+    let rows: Vec<(&str, &str)> = section
+        .lines()
+        .skip_while(|l| !l.starts_with('|'))
+        .take_while(|l| l.starts_with('|'))
+        .filter_map(|l| {
+            let cells: Vec<&str> = l.split('|').map(str::trim).collect();
+            let code = cells.get(1)?.strip_prefix('`')?.strip_suffix('`')?;
+            Some((code, *cells.get(2)?))
+        })
+        .collect();
+    let documented: BTreeSet<&str> = rows.iter().map(|r| r.0).collect();
+    let in_code: BTreeSet<&str> = DefectCode::ALL.iter().map(|c| c.as_str()).collect();
+    assert_eq!(documented, in_code, "docs/report.md and DefectCode differ");
+    for code in DefectCode::ALL {
+        let severity = serde_json::to_value(code.default_severity()).unwrap();
+        let row = rows.iter().find(|r| r.0 == code.as_str()).unwrap();
+        assert_eq!(
+            Some(row.1),
+            severity.as_str(),
+            "{} has the wrong severity in docs/report.md",
+            code.as_str()
+        );
+    }
 }
 
 /// TetGen (AGPL) may only appear in test-only crates under `tests/`.

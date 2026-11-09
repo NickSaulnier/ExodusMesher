@@ -107,7 +107,9 @@ Open an OBJ or a project (or drop one on the window); pick parts in the list or 
 }
 ```
 
-Severities are `info`, `warning` (repaired; output still valid), `error` (blocks a stage; a fallback may still succeed) and `fatal`. The full list of codes, with the default action for each, is the defect taxonomy in [PLAN.md](PLAN.md#error-reporting-design). Mesh quality is reported with finite-volume metrics: face non-orthogonality, skewness, neighbour volume ratio and the dihedral angle range and histogram.
+Severities are `info`, `warning` (repaired; output still valid), `error` (blocks a stage; a fallback may still succeed) and `fatal`. Mesh quality is reported with finite-volume metrics: face non-orthogonality, skewness, neighbour volume ratio and the dihedral angle range and histogram.
+
+**[docs/report.md](docs/report.md)** is the full reference: every field, every defect code with its default severity and action, what the meshing records measure, the quality metrics, the exit codes, and the other output files.
 
 ## Development
 
