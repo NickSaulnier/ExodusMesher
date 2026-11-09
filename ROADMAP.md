@@ -31,6 +31,7 @@ The roadmap's Phase 1 is the current ExodusMesher plan plus the literature chang
 | Constrained Delaunay kernel with a stuffing fallback | Done, but on f64 Steiner points and plane labels, not indirect predicates; 54% conformal on the 100-model clean subset (Nov 7); on the 1,000-model sample (Nov 8), 304 of 350 clean models and 568 of 1,000 overall | Milestone 8; Milestones 11–13 below |
 | Exodus II, CLI, worker, GUI | Done (SEACAS check deferred; GUI interactive check open) | Milestones 5, 9 |
 | Generalized winding numbers | Done for inside/outside; ambiguity near 0.5 not reported | Milestone 16 below |
+| Indirect predicates (LNC, BPT, LPI, TPI) | Done (Milestone 11, Nov 9, 2026) | `mesher_geom::implicit` |
 | Validity check after rounding to f64 | Not needed yet (no implicit points); required once the exact kernel lands | Milestone 13 below |
 | Manufactured-solution check | Done in-house (`mesher-fvm`); not yet on your own solver | Phase 1 exit |
 
@@ -39,7 +40,7 @@ Phase 2 is partly done already: the sizing field (curvature, thickness, gradatio
 ## Decisions needed before Milestone 11
 
 1. **Milestone 10's exit criterion.** The 1,000-model benchmark ran on Nov 8, 2026 (943 meshed, 568 conformal; TetGen meshed 543; table in `PLAN.md`). It is the baseline the new kernel must beat. Only CI green on GitHub remains.
-2. **New kernel beside the old one.** Recommended: build the exact kernel as `mesher_tet::cdt` next to `mesher_tet::conforming`, choose it per job by a setting, and make it the default only when it beats the current kernel on the benchmark. Results stay comparable, and the golden reports keep guarding the old path until it retires.
+2. **New kernel beside the old one.** Decided (Nov 9, 2026), as recommended: build the exact kernel as `mesher_tet::cdt` next to `mesher_tet::conforming`, choose it per job by a setting, and make it the default only when it beats the current kernel on the benchmark. Results stay comparable, and the golden reports keep guarding the old path until it retires.
 3. **Your solver's Exodus reader.** Whether it reads polyhedral blocks (`NFACED`), and the classic and 64-bit-offset netCDF formats, decides Milestone 21 and Phase 4's output format. Check before Phase 2.
 4. **Going public.** Check the employment agreement's terms on outside projects before publishing benchmarks or the dataset (yours to do).
 
@@ -52,6 +53,8 @@ Phase 2 is partly done already: the sizing field (curvature, thickness, gradatio
 - **Benchmark conventions.** Every published result reports success on all of Thingi10k (fTetWild's convention) and on the valid subset (Diazzi's), a failure taxonomy (algorithmic limit, budget, timeout, out of memory), whether the boundary is exact or within an envelope, and the rate of valid f64 rounding.
 
 ## Phase 1 · Finish ExodusMesher
+
+Milestones 11 to 17 moved to `PLAN.md` (Phase 7) when Milestone 11 started on Nov 9, 2026; the descriptions here stay as the outline.
 
 **Goal.** A robust, fully automatic tet mesher for messy OBJ input that never fails silently, with the kernel rebuilt on exact predicates.
 

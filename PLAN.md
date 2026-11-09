@@ -310,10 +310,24 @@ Build the reporting spine before any meshing, so every later feature lands with 
    - Exit: select parts of a multi-object OBJ and export an Exodus file with one block per part, reproducible from the CLI.
 10. **Sizing, benchmark and hardening.** Sizing field and surface remeshing, full Thingi10k run, profiling, CI regression subset, documentation.
     - Exit: published outcome table by path, against TetGen, with CI green.
+11. **Indirect predicates.** Points defined by construction (on a segment, on a triangle, line–plane and three-plane intersections), with exact predicates on any mix of them.
+    - Exit: every predicate agrees with an exact rational reference on random, degenerate and nearly degenerate inputs; the filter settles at least 95% of random queries; property tests at 100,000 cases each.
+12. **Exact constrained Delaunay kernel.** `mesher_tet::cdt` beside the current kernel, after Diazzi et al. (2023).
+    - Exit: in exact form, every constraint recovered on the synthetic suite, the 100-model clean subset and the rounded UV sphere; a disjoint-cavity case reproduced.
+13. **Rounding to f64.** Round the exact mesh, check every tet exactly, untangle what flipped.
+    - Exit: rounding validity measured before and after untangling; no non-positive tet ever written; every untangle a record.
+14. **Chamfer-and-refine.** Quality refinement that terminates, after the surface-chamfering paper (2026).
+    - Exit: refinement ends within its budget on every clean-subset model or records why; angles and cost tabulated.
+15. **Worst-cell quality for finite volume.** Invariant-guarded local operations aimed at non-orthogonality and skewness at the wall.
+    - Exit: worst wall-adjacent non-orthogonality and skewness below both the current kernel's and TetGen's; byte-identical at 1, 4 and 16 threads.
+16. **Exact arrangement (repair rung 2).** Self-intersections and overlapping shells resolved exactly, cells kept by winding number.
+    - Exit: every part of the self-intersecting and multi-component strata resolves to a surface that passes the gate or fails with a located record.
+17. **Wrapping (repair rung 3).** Alpha wrapping for what the arrangement cannot fix.
+    - Exit (and the phase's): the full benchmark on all 10,000 models and the valid subset; outputs checked by `mesher-fvm` and by the user's solver.
 
 ## Phases and task breakdown
 
-The milestones group into six phases. Phases run in order, except the GUI phase, which can start once Phase 2 is done. A milestone's tasks are ticked when they land; the milestone is done only when its exit criterion passes under `cargo fmt`, `cargo clippy -D warnings` and `cargo test --workspace`.
+The milestones group into seven phases. Phases run in order, except the GUI phase, which can start once Phase 2 is done. A milestone's tasks are ticked when they land; the milestone is done only when its exit criterion passes under `cargo fmt`, `cargo clippy -D warnings` and `cargo test --workspace`.
 
 | Phase | Milestones | Delivers |
 | --- | --- | --- |
@@ -323,6 +337,7 @@ The milestones group into six phases. Phases run in order, except the GUI phase,
 | 4. Volume meshing | 6, 7, 8 | Stuffing fallback end to end, then the constrained Delaunay kernel |
 | 5. GUI | 9 | egui front end over the worker (can start after Phase 2) |
 | 6. Hardening | 10 | Sizing, Thingi10k benchmark, CI regression gate |
+| 7. Exact kernel and repair ladder | 11–17 | Indirect predicates, exact constrained Delaunay kernel, f64 rounding, terminating refinement, finite-volume quality, exact arrangement, wrapping (Phase 1 of `ROADMAP.md`) |
 
 Crates are created when their first milestone starts, so early builds do not pull in GUI or solver dependencies.
 
@@ -605,7 +620,123 @@ Scope decisions (Nov 8, 2026, by the user):
 - *An unreadable result is a bug, not a dead worker.* A result line that does not parse now becomes `MESH_WORKER_FAILED` with reason `unreadable_result` (exit 70).
 - *Benchmark tooling.* `tests/thingi10k/sample.py` writes `sample1000.txt` (350 clean, 300 self-intersecting, 150 multi-component, 120 non-manifold, 80 open; 12.4 M faces); `fetch.py` downloads any id list (two models exist only as OBJ and are meshed from the original file); `run_subset.py` runs the CLI alone in parallel for quick checks; the ignored test `stratified_sample_benchmark` in `tests/oracle/tests/thingi10k.rs` runs the CLI and TetGen in parallel and writes the outcome table and a CSV.
 
-**After v1.** Conformal interfaces between touching parts (shared side sets in Exodus), a polyhedral dual mesh for the finite-volume solver, TETRA10 elements, boundary-layer prisms, a model that predicts failure from surface features before meshing, and an agent loop that reads the report and chooses repairs. The phases beyond Milestone 10 (an exact-predicate kernel, the repair ladder, solver formats, boundary layers, a hex core, CAD and scale) are laid out as Milestones 11 to 28 in [ROADMAP.md](ROADMAP.md); each phase's milestones move into this plan when it starts.
+**After v1.** Conformal interfaces between touching parts (shared side sets in Exodus), a polyhedral dual mesh for the finite-volume solver, TETRA10 elements, boundary-layer prisms, a model that predicts failure from surface features before meshing, and an agent loop that reads the report and chooses repairs. The phases beyond Milestone 10 are laid out as Milestones 11 to 28 in [ROADMAP.md](ROADMAP.md); each phase's milestones move into this plan when it starts (Milestones 11 to 17 are Phase 7 below).
+
+### Phase 7: Exact kernel and repair ladder
+
+This is Phase 1 of [ROADMAP.md](ROADMAP.md), moved here when it started on Nov 9, 2026.
+
+**Goal.** A robust, fully automatic tet mesher for messy OBJ input that never fails silently, with the kernel rebuilt on exact predicates.
+
+**Phase exit.**
+
+- On the valid Thingi10k subset, conformal success comparable to the published exact CDT results, reported on both the full and the valid denominators.
+- Every failure carries a defect code and a location. Zero crashes, zero silent repairs, and no invalid tet ever written.
+- The Exodus files load in the user's solver and pass a manufactured-solution check there and in `mesher-fvm`.
+
+Decisions (Nov 9, 2026, by the user):
+
+- *The new kernel goes beside the old one.* `mesher_tet::cdt` is built next to `mesher_tet::conforming` and chosen per job by a setting. It becomes the default only when it beats the current kernel on the 1,000-model benchmark; the Nov 8 table is the baseline. The golden reports keep guarding the old path until it retires.
+- *Milestone 11 starts before Milestone 10's CI run is confirmed green.* The push of Nov 9 starts that run.
+
+**Milestone 11: Indirect predicates.** In `mesher-geom`, module `implicit`. Started and done Nov 9, 2026.
+
+- [x] `implicit::Point`, stored by its defining explicit points and f64 parameters and never rounded:
+  - `Explicit`.
+  - `Lnc`: t·a + (1−t)·b.
+  - `Bpt`: barycentric weights u, v, w on a triangle.
+  - `Lpi`: line pq meeting plane rst.
+  - `Tpi`: the meeting point of three planes, each through three points.
+
+  The checked constructors reject non-finite input. An exact test also rejects an intersection that does not exist (a line parallel to the plane or lying in it, three planes without a single common point, a degenerate plane) and barycentric weights summing to zero. Each point keeps the exact sign of its `W`.
+- [x] Homogeneous coordinates (X, Y, Z, W) for each kind, as polynomials in the defining coordinates. They are computed relative to an explicit point of the query inside the arithmetic, so the filter's error scales with the configuration's size, not its distance from the origin
+- [x] Three arithmetic stages behind one trait (`arith::Ring`), with each predicate written once:
+  - `Filtered`: f64 with a rigorous running error bound, which also proves exact zeros of exact inputs.
+  - `Interval`: outward rounding.
+  - `Exact`: dyadic big integers.
+
+  Queries on explicit points only go straight to Shewchuk's predicates.
+- [x] Predicates for every combination of point kinds, with the conventions of `predicates`, each with a `_staged` form that also reports the stage that settled it:
+  - `orient3d` and `insphere`.
+  - `orient2d_projected` and `incircle_projected`: the projection along an axis, the consistent tests for triangulating a facet in its projection.
+  - `incircle_coplanar`: the true circumcircle in 3D, via `insphere` with an explicit point exactly off the plane.
+- [x] `Point::approx`: the f64 position, for spatial queries and output only
+- [x] Stage statistics through the `_staged` predicates
+- [x] Tests in `crates/mesher-geom/tests/implicit_oracle.rs` against an exact `BigRational` reference. The reference divides out each point's coordinates, checks them against the definition (an LPI on its line and plane, a TPI on its three planes), and evaluates the textbook formulas; for insphere it also checks the side of the exact circumcentre. The cases:
+  - random: five points of random kinds per case, near the origin or 10⁴ away, of size 1 or 10⁻³
+  - degenerate: coplanar, cospherical and coincident points in mixed implicit forms, and points on a segment
+  - nearly degenerate: intersections of nearly parallel planes and lines (tilts from 10⁻² to 10⁻¹⁵)
+
+  The cases run on all cores in 64 seeded chunks, so they do not depend on the core count. Release builds run 100,000 cases each (about 46 s), debug builds 2,000; `IMPLICIT_CASES` overrides.
+- [x] Exit criterion: all 100,000 cases of each test agree with the reference, and the filter settles 100.00% of random queries for all four predicates
+
+**Decisions and findings in Milestone 11.**
+
+- *The exact stage uses big integers, not floating-point expansions.* The roadmap named Shewchuk-style expansions. Insphere on TPI points is a polynomial of degree about 30 in the input coordinates, where f64 expansions can overflow or underflow and lose exactness without notice. Dyadic numbers (`m·2^e` with a `BigInt` mantissa, `num-bigint`) are exact at any degree. Expansions could come back later as a faster stage if profiling shows the exact stage is hot.
+- *The filter tracks its error bound at run time, not with the paper's constants.* Diazzi et al. give static error constants per predicate (Appendix A). Rather than transcribe and verify them, the filter carries a rigorous bound through every operation: the textbook first-order bound, plus a term for underflow, inflated to cover the bound's own rounding. It also proves zeros: sums and products of exact values that round without error stay exact. It costs about twice a bare f64 evaluation. Static constants are the optimisation if Milestone 12 profiles it as hot.
+- *Intervals rarely help.* Over 190,000 nearly degenerate queries, the interval stage settled 37; the filter and the exact stage settled the rest. Keep it for now (it is cheap), and drop it if profiling says so.
+- *Two in-circle tests.* A projection keeps orientation but turns circles into ellipses. `incircle_projected` is the consistent test for triangulating a facet in its projected coordinates, as the current kernel does. `incircle_coplanar` is the true circumcircle, for when the metric matters.
+
+**Milestone 12: Exact constrained Delaunay kernel.** `mesher_tet::cdt`, following Diazzi et al. (2023), beside the current kernel.
+
+- [ ] Input a valid PLC (the surface gate guarantees it); every input triangle is a constraint, with no facet merging by tolerance
+- [ ] Segment recovery by Si's encroachment-based splitting, with LNC Steiner points
+- [ ] Face recovery: split the cavity a missing face pierces and refill each half. Before refilling, check that the two half-cavities have disjoint interiors (the paper's Section 3.5). Gift-wrapping with symbolic perturbation is the fallback from the start
+- [ ] Region marking by the parity flood fill; deterministic insertion order (BRIO)
+- [ ] Exit criterion:
+  - in exact form, every constraint recovered on the synthetic suite, the 100-model clean subset and the rounded UV sphere
+  - a test reproduces a disjoint-cavity case
+  - runtime and Steiner counts recorded against the paper's
+
+**Milestone 13: Rounding to f64.**
+
+- [ ] Round every implicit point; check the exact `orient3d` of every tet on the rounded coordinates
+- [ ] Untangle what flipped: moves within the point's rounding box, flips and extra explicit points, each recorded
+- [ ] Re-check boundary conformity after rounding
+- [ ] Codes `MESH_ROUNDING_REPAIRED` (warning) and `MESH_ROUNDING_FAILED` (error, which triggers the next fallback)
+- [ ] `--kernel exact` in the pipeline, behind the volume gate, with the current kernel and stuffing behind it
+- [ ] Exit criterion:
+  - rounding validity before and after untangling reported on the clean subset and the synthetic suite
+  - no non-positive tet written
+  - every untangle a record
+
+**Milestone 14: Chamfer-and-refine.**
+
+- [ ] Chamfer acute vertices and edges within ε of local feature size; Ruppert-style refinement with BPT points; restore the chamfered regions with the enriched CDT
+- [ ] Refinement against the sizing field. Opt-in and under the work budget; it hands over to Milestone 15 on `MESH_BUDGET_EXCEEDED`
+- [ ] Exit criterion, on the clean subset:
+  - refinement ends within budget on every model, or records why
+  - minimum face angle reported against the paper's (1.3° to 3.6°)
+  - cost per model tabulated
+
+**Milestone 15: Worst-cell quality for finite volume.**
+
+- [ ] Invariant-guarded local operations (flips, splits, collapses, vertex moves). Each is accepted only if every tet stays positive exactly, the boundary stays exact and the target improves. Sliver smoothing becomes one of them
+- [ ] A WSVM-style energy as the vertex-move objective, measured against the candidate search
+- [ ] Targets: per-face non-orthogonality and skewness, cells with a boundary face first
+- [ ] Report the worst cells and their locations, wall-adjacent cells separately. `VOL_LOW_QUALITY` is gated on non-orthogonality and skewness too
+- [ ] Absorb improvements 5, 6 and 8; parallel by independent sets with a fixed colouring
+- [ ] Exit criterion:
+  - on the clean subset, worst wall-adjacent non-orthogonality and skewness below the current kernel's and TetGen's
+  - worst cells located
+  - byte-identical results at 1, 4 and 16 threads
+
+**Milestone 16: Exact arrangement (repair rung 2).**
+
+- [ ] Arrangement of each part's triangle soup with LPI and TPI points (Cherchi et al. 2022); Guo and Fu's indirect offset predicates (2024) evaluated as the faster variant
+- [ ] Cells labelled by generalized winding number, keeping the solid region. This resolves `INT_SELF_INTERSECTION`, `INT_SHELL_OVERLAP`, `PART_OVERLAP` and touching shells (improvement 9)
+- [ ] Winding numbers by the Antipodal method's ray-crossing form, where faster
+- [ ] The resolved surface goes to the exact kernel, or is snap-rounded and re-checked
+- [ ] Report which rung succeeded, and the components and Euler characteristic before and after; proposed `TOP_AMBIGUOUS_INSIDE`
+- [ ] Exit criterion:
+  - every part of the self-intersecting and multi-component strata resolves to a surface that passes the gate, or fails with a located record
+  - component counts and Euler characteristic match a brute-force check on the synthetic intersection cases
+
+**Milestone 17: Wrapping (repair rung 3).**
+
+- [ ] Alpha wrapping after Portaneri et al. (2022), clean-room. Alpha and offset come from the element size and the diagonal; proposed `REPAIR_WRAPPED`
+- [ ] The wrapped surface goes through the exact kernel; stuffing stays last
+- [ ] Exit criterion (and the phase's): the full benchmark on all 10,000 models and the valid subset; outputs checked by `mesher-fvm` and by the user's solver
 
 ## Risks and open questions
 

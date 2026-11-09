@@ -7,6 +7,7 @@
 
 pub mod bvh;
 pub mod halfedge;
+pub mod implicit;
 pub mod intersect;
 pub mod polygon;
 pub mod predicates;
