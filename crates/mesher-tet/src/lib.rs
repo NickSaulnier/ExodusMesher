@@ -2,6 +2,7 @@
 //! and incremental Delaunay tetrahedralization (Bowyer-Watson), the base of
 //! the constrained Delaunay kernel (Milestone 8).
 
+pub mod cdt;
 pub mod conforming;
 pub mod delaunay;
 mod fxhash;

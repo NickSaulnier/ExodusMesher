@@ -1618,7 +1618,7 @@ impl SplitMix {
 
 /// Biased randomized insertion order: shuffle, split into rounds of doubling
 /// size, and sort each round along a Morton curve.
-fn brio_order(points: &[Point3], seed: u64) -> Vec<u32> {
+pub(crate) fn brio_order(points: &[Point3], seed: u64) -> Vec<u32> {
     let n = points.len();
     let mut order: Vec<u32> = (0..n as u32).collect();
     let mut rng = SplitMix(seed);

@@ -678,7 +678,20 @@ Decisions (Nov 9, 2026, by the user):
 - *Intervals rarely help.* Over 190,000 nearly degenerate queries, the interval stage settled 37; the filter and the exact stage settled the rest. Keep it for now (it is cheap), and drop it if profiling says so.
 - *Two in-circle tests.* A projection keeps orientation but turns circles into ellipses. `incircle_projected` is the consistent test for triangulating a facet in its projected coordinates, as the current kernel does. `incircle_coplanar` is the true circumcircle, for when the metric matters.
 
-**Milestone 12: Exact constrained Delaunay kernel.** `mesher_tet::cdt`, following Diazzi et al. (2023), beside the current kernel.
+**Milestone 12: Exact constrained Delaunay kernel.** `mesher_tet::cdt`, following Diazzi et al. (2023), beside the current kernel. Started Nov 9, 2026.
+
+- [x] Exact incremental Delaunay core over implicit points (`cdt::ExactDelaunay`): ghost tets, a visibility walk, a cavity of strict in-sphere conflicts grown across every face the point does not strictly see, and BRIO order by approximate positions. It also provides exact duplicate detection (`implicit::coincident`, new), vertex stars, and `check` and `check_delaunay`. Tests in `crates/mesher-tet/tests/cdt.rs`:
+  - on random points it matches the float kernel tet for tet (the Delaunay tetrahedralization is unique there)
+  - a fully cospherical 5×5×5 grid is valid, Delaunay, and fills the cube
+  - LNC, BPT and TPI points insert exactly
+- [ ] Segment recovery (`cdt::recover_segments`). Every triangle edge is a segment, split by LNC points: concentric power-of-two shells at input vertices, the middle elsewhere. Baseline only:
+  - On the synthetic shapes, every segment is recovered with few points: the cube 6, a 288-triangle UV sphere 6, the rounded off-centre UV sphere the current kernel cannot recover 8, a 3° wedge 2, a 2,208-triangle sphere 48.
+  - On the 100-model clean subset, 77 recover. The other 23 hit the point budget (20 × inputs + 10,000), at a median of 3,996 Steiner points and a maximum of 47,897, about 3.7 per input triangle.
+  - The cause is cascades. 43853's first tetrahedralization lacks 684 of its 2,196 segments, and recovery takes 36 rounds of splitting near needle triangles. Even the cube's 6 points are cospherical ties a flip would fix.
+  - Placing splits by a reference point, as TetGen does, was tried two ways (the encroacher nearest an end, and the most encroaching) and made it worse: cascades to f64-short pieces. It was reverted.
+  - Next: recover a missing segment by flips before splitting it, then re-measure. Then look again at where splits go.
+  - The example `cdt_segments` measures it on OBJ files.
+
 
 - [ ] Input a valid PLC (the surface gate guarantees it); every input triangle is a constraint, with no facet merging by tolerance
 - [ ] Segment recovery by Si's encroachment-based splitting, with LNC Steiner points

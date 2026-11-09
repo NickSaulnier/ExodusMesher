@@ -603,6 +603,33 @@ fn degenerate_queries_agree() {
 }
 
 #[test]
+fn coincidence_and_collinearity_agree() {
+    let kinds = run(0x510e_527f_ade6_82d1, |rng, i| {
+        let (c, size) = centre(rng);
+        let x = rng.point(c, size);
+        let forms = forms_of(rng, x, size);
+        let a = forms[rng.below(forms.len())];
+        let b = if i % 2 == 0 {
+            forms[rng.below(forms.len())]
+        } else {
+            random_point(rng, c, size)
+        };
+        let same = exact(&a) == exact(&b);
+        assert_eq!(implicit::coincident(&a, &b), same, "{a:?} {b:?}");
+        let m = random_point(rng, c, size);
+        let on = Point::lnc(x, m.approx(), rng.unit()).unwrap();
+        let line = [a, Point::from(m.approx()), on];
+        let (pa, pb, pc) = (exact(&line[0]), exact(&line[1]), exact(&line[2]));
+        let straight = cross(&sub(&pb, &pa), &sub(&pc, &pa))
+            .iter()
+            .all(Zero::is_zero);
+        assert_eq!(implicit::collinear(&line[0], &line[1], &line[2]), straight);
+        same
+    });
+    eprintln!("coincident pairs: {}", kinds.iter().filter(|&&s| s).count());
+}
+
+#[test]
 fn nearly_degenerate_queries_agree() {
     let runs = run(0x6a09_e667_f3bc_c909, |rng, i| {
         let mut seen: Vec<(&'static str, Stage)> = Vec::new();

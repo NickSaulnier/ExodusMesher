@@ -554,6 +554,36 @@ pub fn incircle_projected(a: &Point, b: &Point, c: &Point, d: &Point, axis: usiz
     incircle_projected_staged(a, b, c, d, axis).0
 }
 
+fn coincident_det<R: Ring>(a: &Point, b: &Point, o: Point3, k: usize) -> R {
+    let ha = homog::<R>(&a.kind, o);
+    let hb = homog::<R>(&b.kind, o);
+    ha[k].mul(&hb[3]).sub(&hb[k].mul(&ha[3]))
+}
+
+/// Are `a` and `b` the same point, exactly? (`X_a·W_b = X_b·W_a` for each
+/// coordinate.)
+#[must_use]
+pub fn coincident(a: &Point, b: &Point) -> bool {
+    if let (Kind::Explicit(p), Kind::Explicit(q)) = (a.kind, b.kind) {
+        return p == q;
+    }
+    let o = origin_of(&[a, b]);
+    (0..3).all(|k| {
+        let (s, _) = settle(|stage| match stage {
+            0 => coincident_det::<Filtered>(a, b, o, k).sign(),
+            1 => coincident_det::<Interval>(a, b, o, k).sign(),
+            _ => coincident_det::<Exact>(a, b, o, k).sign(),
+        });
+        s == Sign::Zero
+    })
+}
+
+/// Are `a`, `b` and `c` on one line (or coincident), exactly?
+#[must_use]
+pub fn collinear(a: &Point, b: &Point, c: &Point) -> bool {
+    (0..3).all(|axis| orient2d_projected(a, b, c, axis) == Sign::Zero)
+}
+
 /// Is `d`, coplanar with `a`, `b`, `c`, inside their circumcircle in 3D?
 /// `Positive` inside, `Negative` outside, `Zero` on the circle or when `abc`
 /// is collinear. Exact: every sphere through `a`, `b`, `c` meets their plane
