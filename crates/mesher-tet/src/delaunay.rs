@@ -97,8 +97,9 @@ pub enum Inserted {
 /// Where a straight walk between two points ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Walk {
-    /// The end point is reached without crossing a constrained face.
-    Clear,
+    /// The end point is reached without crossing a constrained face; it is
+    /// in (or on) the real tet at this slot.
+    Clear(u32),
     /// The first constrained face crossed (sorted vertices).
     Constraint([u32; 3]),
     /// The walk left the convex hull or did not terminate.
@@ -872,7 +873,7 @@ impl Delaunay {
                 }
             }
             let Some(j) = exit else {
-                return Walk::Clear;
+                return Walk::Clear(t);
             };
             if self.face_constrained(t, j) {
                 return Walk::Constraint(sorted3(face(&v, j)));

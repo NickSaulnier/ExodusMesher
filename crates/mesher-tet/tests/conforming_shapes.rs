@@ -242,7 +242,10 @@ fn check(name: &str, (p, f): &Surface, size: f64) {
                 Sign::Positive,
                 "{name}: non-positive tet"
             );
-            dot(sub(b, a), cross(sub(c, a), sub(d, a))) / 6.0
+            // A finite-volume solver computes volumes in floating point.
+            let v = mesher_tet::quality::float_volume([a, b, c, d]);
+            assert!(v > 0.0, "{name}: tet flat in floating point ({v:e})");
+            v
         })
         .sum();
     let expected = enclosed(p, f);
@@ -366,6 +369,7 @@ fn rounded_uv_sphere_meshes_after_remeshing() {
     // merging those that lie on one input facet makes recovery cascade.
     let params = ConformingParams {
         groups: (0..r.triangles.len() as u32).collect(),
+        side_sets: vec![0; r.triangles.len()],
         ..ConformingParams::with_size(0.083)
     };
     let m = conforming_mesh(&r.points, &r.triangles, &params)
@@ -374,6 +378,50 @@ fn rounded_uv_sphere_meshes_after_remeshing() {
     assert_eq!(m.slivers_left, 0);
     let (lo, _) = dihedral_range(&m.points, &m.tets).unwrap();
     assert!(lo >= 10.0, "{lo}");
+}
+
+/// A remeshed box: its vertices are projected onto the input faces, so
+/// neighbouring triangles of a face are coplanar only to rounding, and a tet
+/// filling the gap between two of them and their quad's other diagonal is
+/// positive exactly but flat in floating point. Each remeshed triangle is its
+/// own facet; with one side set the flat tet is dropped (flattened), and with
+/// a side set a triangle it stays, so side-set boundaries remain exact.
+#[test]
+fn remeshed_box_flattens_rounding_flat_tets_within_a_side_set() {
+    let (p, f) = boxed([-2.5, 0.0, 0.0], [2.5, 3.0, 2.25], 0, false);
+    // The exact rounding matters: these expressions reproduce the flat tet.
+    let (s, c) = (0.3f64 + 0.37).sin_cos();
+    let p: Vec<Point3> = p
+        .iter()
+        .map(|q| {
+            [
+                c * q[0] - s * q[1] + 0.1,
+                s * q[0] + c * q[1],
+                q[2] * (1.0 + 1e-3),
+            ]
+        })
+        .collect();
+    let r = remesh(&p, &f, &[], &|_| 0.45, &RemeshParams::default()).unwrap();
+    let flat = |m: &mesher_tet::ConformingMesh| {
+        m.tets
+            .iter()
+            .filter(|t| mesher_tet::quality::float_volume(t.map(|v| m.points[v as usize])) <= 0.0)
+            .count()
+    };
+    let mesh = |side_sets: Vec<u32>| {
+        let params = ConformingParams {
+            groups: (0..r.triangles.len() as u32).collect(),
+            side_sets,
+            ..ConformingParams::with_size(0.45)
+        };
+        conforming_mesh(&r.points, &r.triangles, &params).unwrap()
+    };
+    let one = mesh(vec![0; r.triangles.len()]);
+    assert_eq!(flat(&one), 0);
+    assert!(one.flattened > 0);
+    let own = mesh(Vec::new());
+    assert_eq!(own.flattened, 0);
+    assert_eq!(flat(&own), 1, "the reproducer no longer makes a flat tet");
 }
 
 /// A cube whose first triangle is split around a point 0.2% off one edge: the

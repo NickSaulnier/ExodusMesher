@@ -84,11 +84,15 @@ pub struct ConformingParams {
     /// `smooth::smooth_slivers`); `0` turns it off.
     pub smooth_passes: usize,
     pub seed: u64,
-    /// Group of each input triangle (e.g. its OBJ group). Rounding-flat
-    /// slivers between two input triangles are only flattened when the two
-    /// share a group, so group boundaries (side sets) stay exact. Empty: one
-    /// group.
+    /// Group of each input triangle (e.g. its OBJ group): coplanar triangles
+    /// merge into one facet only within a group. Empty: one group.
     pub groups: Vec<u32>,
+    /// Side set of each input triangle. Rounding-flat slivers between two
+    /// input triangles are only flattened when the two share a side set, so
+    /// side-set boundaries stay exact. Empty: the same as `groups`. A
+    /// remeshed surface makes every triangle its own facet (`groups`) but
+    /// keeps its OBJ groups here.
+    pub side_sets: Vec<u32>,
 }
 
 impl ConformingParams {
@@ -106,6 +110,7 @@ impl ConformingParams {
             smooth_passes: 4,
             seed: 0x5eed,
             groups: Vec::new(),
+            side_sets: Vec::new(),
         }
     }
 }
@@ -265,6 +270,16 @@ fn rounding_flat(p: [Point3; 4]) -> bool {
     let magnitude = p.iter().flatten().fold(0.0f64, |m, c| m.max(c.abs()));
     let flat = (1e-12 * longest).max(64.0 * f64::EPSILON * magnitude);
     volume <= flat * longest * longest
+}
+
+/// Is `p` an existing vertex `q` to rounding? Circumcentres of cospherical
+/// tets agree to a few ulps, and inserting each of them leaves a cluster of
+/// points that far apart, whose tets are positive exactly but flat in
+/// floating point. `scale` is the size of the feature being refined.
+fn rounding_close(p: Point3, q: Point3, scale: f64) -> bool {
+    let magnitude = p.iter().chain(&q).fold(0.0f64, |m, c| m.max(c.abs()));
+    let near = (1e-12 * scale).max(64.0 * f64::EPSILON * magnitude);
+    distance_squared(p, q) <= near * near
 }
 
 struct Builder<'a> {
@@ -1493,7 +1508,20 @@ impl Builder<'_> {
         // refused it): insert the circumcentre if the tet sees it.
         let w = self.dt.walk(slot, from, cc);
         let split = match w {
-            Walk::Clear => {
+            Walk::Clear(end) => {
+                // A centre that is an existing vertex to rounding would add
+                // a point a few ulps from it; refuse it.
+                let scale = self
+                    .dt
+                    .tet(slot)
+                    .map_or(0.0, |v| distance_squared(self.pos(v[0]), cc).sqrt());
+                if self
+                    .dt
+                    .tet(end)
+                    .is_some_and(|v| v.iter().any(|&x| rounding_close(cc, self.pos(x), scale)))
+                {
+                    return Ok(None);
+                }
                 self.dt
                     .set_planes(self.dt.points().len() as u32, Vec::new());
                 let placed = self.insert_point(cc, &[], &[], false)?;
@@ -1943,13 +1971,12 @@ pub fn conforming_mesh(
             if on.len() != 2 {
                 continue;
             }
-            let group = |f: [u32; 3]| {
-                params
-                    .groups
-                    .get(origin[&key3(f)] as usize)
-                    .copied()
-                    .unwrap_or(0)
+            let sides = if params.side_sets.is_empty() {
+                &params.groups
+            } else {
+                &params.side_sets
             };
+            let group = |f: [u32; 3]| sides.get(origin[&key3(f)] as usize).copied().unwrap_or(0);
             if group(faces[on[0]]) != group(faces[on[1]]) {
                 continue;
             }
@@ -2189,6 +2216,25 @@ mod tests {
                 assert!((norm(sub(*q, c2)) - r2).abs() < 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn rounding_close_is_relative_to_coordinates_and_size() {
+        let p = [-6.702895072098697, -4.210285017835796, 1.5];
+        // The cluster 69548 had: four centres a few ulps apart.
+        assert!(rounding_close(
+            p,
+            [-6.702895072098693, -4.210285017835796, 1.4999999999999998],
+            4.3
+        ));
+        assert!(!rounding_close(p, [-6.7, -4.2, 1.5], 4.3));
+        // Far from the origin, rounding is larger than of the size.
+        let q = [1e6, 0.0, 0.0];
+        assert!(rounding_close(q, [1e6 + 1e-9, 0.0, 0.0], 1e-3));
+        assert!(!rounding_close(q, [1e6 + 1e-6, 0.0, 0.0], 1e-3));
+        // Near the origin, the size decides.
+        assert!(rounding_close([0.0; 3], [1e-13, 0.0, 0.0], 1.0));
+        assert!(!rounding_close([0.0; 3], [1e-11, 0.0, 0.0], 1.0));
     }
 
     #[test]

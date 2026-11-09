@@ -82,9 +82,9 @@ open sheet beside a solid [x10000 +-50000]	TOP_OPEN_SHEET fatal x1
 self-intersection (vertex pushed through) [x1 +0]	INT_SELF_INTERSECTION error x1; INT_SELF_INTERSECTION error fallback/deferred x10; VOL_BOUNDARY_DEVIATION error x1	0 stuffing rejected 4043 15.2 7.0
 self-intersection (vertex pushed through) [x0.001 +1000]	INT_SELF_INTERSECTION error x1; INT_SELF_INTERSECTION error fallback/deferred x10; VOL_BOUNDARY_DEVIATION error x1	0 stuffing rejected 4043 15.2 7.0
 self-intersection (vertex pushed through) [x10000 +-50000]	INT_SELF_INTERSECTION error x1; INT_SELF_INTERSECTION error fallback/deferred x10; VOL_BOUNDARY_DEVIATION error x1	0 stuffing rejected 4043 15.2 7.0
-shell overlap within one part [x1 +0]	INT_SHELL_OVERLAP error x1; INT_SHELL_OVERLAP error fallback/deferred x1	0 stuffing accepted 8424 21.4 3.5
-shell overlap within one part [x0.001 +1000]	INT_SHELL_OVERLAP error x1; INT_SHELL_OVERLAP error fallback/deferred x1	0 stuffing accepted 8424 21.4 3.5
-shell overlap within one part [x10000 +-50000]	INT_SHELL_OVERLAP error x1; INT_SHELL_OVERLAP error fallback/deferred x1	0 stuffing accepted 8424 21.4 3.5
+shell overlap within one part [x1 +0]	INT_SHELL_OVERLAP warning fallback/applied x2	0 stuffing accepted 8424 21.4 3.5
+shell overlap within one part [x0.001 +1000]	INT_SHELL_OVERLAP warning fallback/applied x2	0 stuffing accepted 8424 21.4 3.5
+shell overlap within one part [x10000 +-50000]	INT_SHELL_OVERLAP warning fallback/applied x2	0 stuffing accepted 8424 21.4 3.5
 overlapping parts [x1 +0]	PART_OVERLAP error x1	0 delaunay accepted 4268 10.5 20.5; 1 delaunay accepted 4410 15.0 20.8
 overlapping parts [x0.001 +1000]	PART_OVERLAP error x1	0 delaunay accepted 4375 12.8 20.6; 1 delaunay accepted 4422 12.8 20.3
 overlapping parts [x10000 +-50000]	PART_OVERLAP error x1	0 delaunay accepted 4394 15.0 20.6; 1 delaunay accepted 4394 15.0 20.6

@@ -40,7 +40,13 @@ enum Failure {
     Timeout,
     Cancelled,
     OutOfMemory,
-    Died { status: Option<i64> },
+    Died {
+        status: Option<i64>,
+    },
+    /// The worker sent a result line that does not parse (a protocol bug).
+    UnreadableResult {
+        error: String,
+    },
 }
 
 /// Limits the worker runs under.
@@ -182,10 +188,11 @@ fn spawn_and_read(
 
     let mut delivered = None;
     let mut eof = false;
+    let mut unreadable: Option<String> = None;
     let mut handle = |event: Event, delivered: &mut Option<Delivered>, eof: &mut bool| match event {
         // A stray non-protocol line surfaces only if no result follows.
-        Event::Line(line) => {
-            if let Ok(message) = WorkerMessage::from_line(&line) {
+        Event::Line(line) => match WorkerMessage::from_line(&line) {
+            Ok(message) => {
                 on_message(&message);
                 match message {
                     WorkerMessage::Record { record } => streamed.push(*record),
@@ -197,7 +204,11 @@ fn spawn_and_read(
                     _ => {}
                 }
             }
-        }
+            Err(e) if line.starts_with(r#"{"type":"result""#) => {
+                unreadable = Some(e.to_string());
+            }
+            Err(_) => {}
+        },
         Event::Eof => *eof = true,
     };
 
@@ -243,6 +254,12 @@ fn spawn_and_read(
     match (delivered, ended) {
         (_, Some(failure)) => Err((failure, stderr)),
         (Some(result), None) => Ok(result),
+        (None, None) if unreadable.is_some() => Err((
+            Failure::UnreadableResult {
+                error: unreadable.unwrap_or_default(),
+            },
+            stderr,
+        )),
         (None, None) if stderr.contains("memory allocation of") => {
             Err((Failure::OutOfMemory, stderr))
         }
@@ -355,6 +372,13 @@ fn failure_record(failure: &Failure, stderr: &str, limits: Limits) -> (Record, b
                 .measured("reason", "died")
                 .measured("exit_status", status.map_or(Value::Null, Value::from))
                 .hint("the worker exited without a result; this is a bug");
+            true
+        }
+        Failure::UnreadableResult { error } => {
+            record = record
+                .measured("reason", "unreadable_result")
+                .measured("parse_error", error.as_str())
+                .hint("the worker finished, but its result could not be read; this is a bug");
             true
         }
     };

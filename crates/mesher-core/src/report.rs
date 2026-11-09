@@ -350,7 +350,20 @@ pub struct RecordLog {
     records: Vec<Record>,
     by_code: BTreeMap<DefectCode, CodeCount>,
     severity_counts: BTreeMap<Severity, u64>,
+    /// Errors per part, stage and code, kept or not, so a fallback that
+    /// works around them can downgrade every one of them.
+    part_errors: BTreeMap<(String, Stage, DefectCode), u64>,
 }
+
+/// The stages whose errors send a part down the fallback ladder: diagnosis,
+/// repair and the surface gate keep it from the conformal kernel, and the
+/// volume gate rejects a candidate mesh.
+const LADDER_STAGES: [Stage; 4] = [
+    Stage::Diagnose,
+    Stage::Repair,
+    Stage::SurfaceGate,
+    Stage::VolumeGate,
+];
 
 impl RecordLog {
     #[must_use]
@@ -362,6 +375,12 @@ impl RecordLog {
     /// kept record, so callers can stream it.
     pub fn push(&mut self, record: Record) -> Option<&Record> {
         *self.severity_counts.entry(record.severity).or_default() += 1;
+        if let (Severity::Error, Some(part)) = (record.severity, &record.part) {
+            *self
+                .part_errors
+                .entry((part.clone(), record.stage, record.code))
+                .or_default() += 1;
+        }
         let count = self.by_code.entry(record.code).or_default();
         count.total += 1;
         if count.reported < MAX_RECORDS_PER_CODE {
@@ -386,6 +405,49 @@ impl RecordLog {
     #[must_use]
     pub fn has_fatal(&self) -> bool {
         self.count(Severity::Fatal) > 0
+    }
+
+    /// A later step of the fallback ladder (`action`: `remesh` or `fallback`)
+    /// meshed `part` and its mesh passed the volume gate, so the part's errors
+    /// that sent it down the ladder were worked around: those from diagnosis,
+    /// repair and the surface gate, and the volume gate's rejections of earlier
+    /// candidates. Each becomes a warning, as a conformal failure that a
+    /// fallback recovered does. A finding left for later, or with no action,
+    /// gets `action` / `applied`; a repair that failed keeps its own action and
+    /// outcome. `REPAIR_GUARD_EXCEEDED` stays an error: the fallback meshed the
+    /// surface the guard objected to. Returns how many errors were downgraded,
+    /// including those over the per-code cap.
+    pub fn worked_around(&mut self, part: &str, action: Action) -> u64 {
+        let keep = |code: DefectCode| code == DefectCode::RepairGuardExceeded;
+        let mut moved = 0;
+        self.part_errors.retain(|(p, stage, code), n| {
+            if p == part && LADDER_STAGES.contains(stage) && !keep(*code) {
+                moved += *n;
+                false
+            } else {
+                true
+            }
+        });
+        if moved == 0 {
+            return 0;
+        }
+        for r in &mut self.records {
+            if r.severity == Severity::Error
+                && r.part.as_deref() == Some(part)
+                && LADDER_STAGES.contains(&r.stage)
+                && !keep(r.code)
+            {
+                r.severity = Severity::Warning;
+                if matches!(r.outcome, None | Some(Outcome::Deferred)) {
+                    r.action = Some(action);
+                    r.outcome = Some(Outcome::Applied);
+                }
+            }
+        }
+        let errors = self.severity_counts.entry(Severity::Error).or_default();
+        *errors = errors.saturating_sub(moved);
+        *self.severity_counts.entry(Severity::Warning).or_default() += moved;
+        moved
     }
 }
 
@@ -751,6 +813,70 @@ mod tests {
         assert_eq!(report.summary.warnings, 250);
         assert_eq!(report.summary.fatal, 1);
         assert_eq!(report.summary.exit_code, 30);
+    }
+
+    /// A part's surface errors become warnings once the fallback meshed it,
+    /// including those over the per-code cap; other parts, other stages and
+    /// the repair guard keep theirs.
+    #[test]
+    fn fallback_downgrades_the_errors_that_sent_a_part_there() {
+        let mut log = RecordLog::new();
+        for _ in 0..150 {
+            log.push(
+                Record::new(DefectCode::IntSelfIntersection, Stage::Diagnose)
+                    .part("a")
+                    .action(Action::Fallback, Outcome::Deferred),
+            );
+        }
+        log.push(
+            Record::new(DefectCode::TopNonmanifoldEdge, Stage::Repair)
+                .severity(Severity::Error)
+                .part("a")
+                .action(Action::SplitEdge, Outcome::Failed),
+        );
+        log.push(
+            Record::new(DefectCode::TopBoundaryEdge, Stage::SurfaceGate)
+                .severity(Severity::Error)
+                .part("a"),
+        );
+        log.push(Record::new(DefectCode::RepairGuardExceeded, Stage::Repair).part("a"));
+        log.push(Record::new(DefectCode::IntSelfIntersection, Stage::Diagnose).part("b"));
+        log.push(Record::new(DefectCode::PartOverlap, Stage::Select).part("a"));
+        assert_eq!(log.count(Severity::Error), 155);
+
+        log.push(Record::new(DefectCode::VolInvertedTet, Stage::VolumeGate).part("a"));
+        assert_eq!(log.count(Severity::Error), 156);
+
+        assert_eq!(log.worked_around("a", Action::Fallback), 153);
+        assert_eq!(log.worked_around("a", Action::Fallback), 0);
+        assert_eq!(log.count(Severity::Error), 3);
+        assert_eq!(log.count(Severity::Warning), 153);
+        let a = |code, stage| {
+            log.records()
+                .iter()
+                .find(|r| r.part.as_deref() == Some("a") && r.code == code && r.stage == stage)
+                .unwrap()
+                .clone()
+        };
+        let diag = a(DefectCode::IntSelfIntersection, Stage::Diagnose);
+        assert_eq!(diag.severity, Severity::Warning);
+        assert_eq!(
+            (diag.action, diag.outcome),
+            (Some(Action::Fallback), Some(Outcome::Applied))
+        );
+        let split = a(DefectCode::TopNonmanifoldEdge, Stage::Repair);
+        assert_eq!(split.severity, Severity::Warning);
+        assert_eq!(split.outcome, Some(Outcome::Failed));
+        let gate = a(DefectCode::TopBoundaryEdge, Stage::SurfaceGate);
+        assert_eq!(gate.action, Some(Action::Fallback));
+        assert_eq!(
+            a(DefectCode::RepairGuardExceeded, Stage::Repair).severity,
+            Severity::Error
+        );
+        assert_eq!(
+            a(DefectCode::PartOverlap, Stage::Select).severity,
+            Severity::Error
+        );
     }
 
     #[test]

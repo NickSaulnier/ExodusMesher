@@ -201,6 +201,66 @@ fn worker_hang_times_out_with_report() {
     assert_eq!(r.records.last().unwrap().measured["reason"], "timeout");
 }
 
+/// Two overlapping cubes in one object fail the surface gate and go to the
+/// stuffing fallback. Once its mesh passes the volume gate, the errors that
+/// sent the part there are warnings with `fallback` / `applied`, and the run
+/// exits 20 (succeeded via the fallback), not 30.
+#[test]
+fn surface_errors_worked_around_by_the_fallback_exit_20() {
+    let mut obj = String::from("o overlap\n");
+    for (k, offset) in [0.0, 0.5].into_iter().enumerate() {
+        for v in 0..8 {
+            let c = |bit: usize| f64::from(u8::from(v & bit != 0)) + offset;
+            obj.push_str(&format!("v {} {} {}\n", c(1), c(2), c(4)));
+        }
+        let b = k * 8;
+        for f in [
+            [1, 3, 4, 2],
+            [5, 6, 8, 7],
+            [1, 2, 6, 5],
+            [2, 4, 8, 6],
+            [4, 3, 7, 8],
+            [3, 1, 5, 7],
+        ] {
+            let f = f.map(|i| (i + b).to_string());
+            obj.push_str(&format!("f {}\n", f.join(" ")));
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("overlap.obj");
+    std::fs::write(&input, obj).unwrap();
+    let out = dir.path().join("out");
+    // Stuffing rounds the concave crease where the cubes meet (6.5% of the
+    // diagonal at the default size), so allow 10%.
+    let output = mesher(&input, &out, &["--max-deviation", "0.1"], None);
+    assert_eq!(output.status.code(), Some(20), "{output:?}");
+    let r = report(&out);
+    assert_eq!(r.summary.errors, 0);
+    let overlap = r
+        .records
+        .iter()
+        .find(|r| r.code == DefectCode::IntShellOverlap && r.stage == mesher_core::Stage::Diagnose)
+        .expect("the overlap is diagnosed");
+    assert_eq!(overlap.severity, Severity::Warning);
+    assert_eq!(overlap.outcome, Some(Outcome::Applied));
+    assert!(
+        r.parts[0]
+            .mesh
+            .as_ref()
+            .is_some_and(|m| m.accepted && m.kernel == Kernel::Stuffing)
+    );
+
+    // Under --strict there is no fallback, so the errors stand.
+    let strict = dir.path().join("strict");
+    let output = mesher(
+        &input,
+        &strict,
+        &["--strict", "--max-deviation", "0.1"],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(30), "{output:?}");
+}
+
 /// A worker that times out on the conformal path is retried once with the
 /// stuffing fallback only; the report keeps the first failure as a warning.
 #[test]

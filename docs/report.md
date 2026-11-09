@@ -95,13 +95,14 @@ These carry the measurements most often needed to act on them:
 | --- | --- |
 | `MESH_RECOVERY_FAILED` | `missing_faces`; after a remesh retry, `remeshed_triangles` (it succeeded: the record is then a warning with `remesh` / `applied`) or `remesh_retry` (why the retry did not help) |
 | `MESH_BUDGET_EXCEEDED` | `points` against `max_points`, `work_steps` against `max_work_steps` (the constrained kernel), or `lattice_vertices` against `max_lattice_vertices` (stuffing) |
-| `MESH_WORKER_FAILED` | `reason`: `timeout` (with `timeout_seconds`), `out_of_memory` (with `memory_limit_bytes`), `cancelled`, `spawn_failed` (with `io_error`) or `died` (with `exit_status`); `stderr_tail`. After a timeout or out-of-memory, the client retries with stuffing only and the record becomes a warning with `fallback` / `applied` if that produced a mesh |
+| `MESH_WORKER_FAILED` | `reason`: `timeout` (with `timeout_seconds`), `out_of_memory` (with `memory_limit_bytes`), `cancelled`, `spawn_failed` (with `io_error`), `died` (with `exit_status`) or `unreadable_result` (the worker finished but its result line did not parse, with `parse_error`; a bug, exit 70); `stderr_tail`. After a timeout or out-of-memory, the client retries with stuffing only and the record becomes a warning with `fallback` / `applied` if that produced a mesh |
 | `VOL_LOW_QUALITY` | `min_dihedral_degrees` and `max_dihedral_degrees` against the kernel's bounds (10° and 170° for the constrained Delaunay kernel; 10.7° and 164.8°, the proven bounds, for stuffing), and `max_non_orthogonality_degrees` |
 | `VOL_BOUNDARY_DEVIATION` | `hausdorff` and `hausdorff_relative` against `max_deviation_relative` |
+| `VOL_INVERTED_TET` | `tets` not positive by the exact predicate (a kernel bug), or `flat_in_float`: tets positive by the exact predicate but with no positive volume when computed in floating point, as a solver computes it (flat to rounding). Either rejects the candidate mesh, and the next step of the fallback ladder runs |
 
 ## Defect codes
 
-Severity is the code's default; records can be upgraded or downgraded where the outcome warrants it (a conformal failure that a fallback recovered is a warning).
+Severity is the code's default; records can be upgraded or downgraded where the outcome warrants it. A conformal failure that a fallback recovered is a warning. So are a part's errors from diagnosis, repair and the surface gate (a self-intersection, an overlap, a hole too large to fill, a non-manifold edge that could not be split), and the volume gate's rejections of earlier candidate meshes, once a later step (the remesh retry or the stuffing fallback) has meshed the part and its mesh passed the volume gate: a finding left for later becomes `remesh` or `fallback` / `applied`, and a failed repair keeps its `failed` outcome. `REPAIR_GUARD_EXCEEDED` stays an error.
 
 | Code | Default severity | Meaning | Default action |
 | --- | --- | --- | --- |
@@ -163,8 +164,10 @@ Each meshing attempt, in the order tried: `part`, `kernel` (`delaunay`, the cons
 | `dihedral_histogram` | Every dihedral angle (six per tet) in 10° bins, [0°, 10°) to [170°, 180°] |
 | `max_non_orthogonality_degrees`, `mean_non_orthogonality_degrees` | On interior faces, the angle between the face normal and the line joining the two cell centroids; what a finite-volume solver's non-orthogonal correction has to make up |
 | `max_skewness` | On interior faces, the distance from the face centroid to where the line joining the two cell centroids crosses the face, over the distance between the cell centroids |
-| `max_volume_ratio` | Largest volume ratio between neighbouring cells |
+| `max_volume_ratio` | Largest volume ratio between neighbouring cells, over pairs whose floating-point volumes are both positive |
 | `hausdorff`, `hausdorff_relative` | Two-sided distance between the input surface and the mesh boundary (sampled at vertices and face centroids), absolute and relative to the part's diagonal; zero to rounding for a conformal mesh of the repaired surface |
+
+Every number is finite: JSON has no infinity or NaN. A value that could not be measured (the deviation of an empty mesh, for one) is written as -1.
 
 ## Summary and exit code
 

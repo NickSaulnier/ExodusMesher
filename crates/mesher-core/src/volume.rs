@@ -164,6 +164,9 @@ fn mesh_part(
                 outcome.summaries.retain(|(i, _)| *i != r.part);
                 outcome.summaries.push((r.part, summary));
                 if accepted {
+                    // A first candidate the volume gate rejected is now
+                    // worked around.
+                    log.worked_around(name, Action::Remesh);
                     outcome.meshed.push(MeshedPart {
                         part: r.part,
                         name: name.to_owned(),
@@ -285,6 +288,8 @@ fn mesh_part(
         outcome.summaries.push((r.part, summary));
         if accepted {
             fallback_ok = true;
+            // What sent the part here is now worked around.
+            log.worked_around(name, Action::Fallback);
             outcome.meshed.push(MeshedPart {
                 part: r.part,
                 name: name.to_owned(),
@@ -389,14 +394,16 @@ fn conformal(
         .then(|| SizeField::from_surface(&r.points, &r.faces, &SizingParams::for_size(h)))
         .filter(|f| !f.is_uniform());
     let min_size = size.as_ref().map(SizeField::min);
+    let side_sets: Vec<u32> = (0..r.faces.len())
+        .map(|f| group_of(f).unwrap_or(u32::MAX))
+        .collect();
     let params = ConformingParams {
         groups: if own_facets {
             (0..r.faces.len() as u32).collect()
         } else {
-            (0..r.faces.len())
-                .map(|f| group_of(f).unwrap_or(u32::MAX))
-                .collect()
+            side_sets.clone()
         },
+        side_sets,
         size: size.map(std::sync::Arc::new),
         ..ConformingParams::with_size(h)
     };
@@ -473,6 +480,17 @@ fn volume_gate(
         );
     }
     let q = fv_quality(points, tets);
+    // Positive by the exact predicate but flat to rounding: a solver
+    // computing the volume in floating point gets zero or less.
+    if q.flat_in_float > 0 {
+        accepted = false;
+        log.push(
+            gate(DefectCode::VolInvertedTet)
+                .measured("flat_in_float", q.flat_in_float as u64)
+                .measured("kernel", format!("{:?}", c.kernel))
+                .hint("tets that are positive exactly but have no positive volume in floating point; a finite-volume solver cannot use them"),
+        );
+    }
     let (lo, hi) = match c.kernel {
         Kernel::Stuffing => (DIHEDRAL_MIN_DEGREES, DIHEDRAL_MAX_DEGREES),
         Kernel::Delaunay => (SLIVER_DEGREES, 180.0 - SLIVER_DEGREES),
@@ -525,26 +543,29 @@ fn volume_gate(
                 .hint("lower --element-size for a closer fit, or raise --max-deviation")
         });
     }
+    // JSON has no infinities or NaN (they would be written as null, which no
+    // reader accepts as a number), so a value that cannot be measured is -1.
+    let finite = |x: f64| if x.is_finite() { x } else { -1.0 };
     let summary = MeshSummary {
         kernel: c.kernel,
         accepted,
         tets: tets.len() as u64,
         nodes: points.len() as u64,
         steiner_points: c.steiner,
-        element_size: h,
-        min_element_size: c.min_size,
+        element_size: finite(h),
+        min_element_size: c.min_size.map(finite),
         remeshed: c.remeshed,
-        volume: single.volume(),
-        surface_volume: enclosed_volume(&r.points, &r.faces),
-        min_dihedral_degrees: q.min_dihedral_degrees,
-        max_dihedral_degrees: q.max_dihedral_degrees,
+        volume: finite(single.volume()),
+        surface_volume: finite(enclosed_volume(&r.points, &r.faces)),
+        min_dihedral_degrees: finite(q.min_dihedral_degrees),
+        max_dihedral_degrees: finite(q.max_dihedral_degrees),
         dihedral_histogram: q.dihedral_histogram.clone(),
-        max_non_orthogonality_degrees: q.max_non_orthogonality_degrees,
-        mean_non_orthogonality_degrees: q.mean_non_orthogonality_degrees,
-        max_skewness: q.max_skewness,
-        max_volume_ratio: q.max_volume_ratio,
-        hausdorff: if distance.is_finite() { distance } else { -1.0 },
-        hausdorff_relative: if relative.is_finite() { relative } else { -1.0 },
+        max_non_orthogonality_degrees: finite(q.max_non_orthogonality_degrees),
+        mean_non_orthogonality_degrees: finite(q.mean_non_orthogonality_degrees),
+        max_skewness: finite(q.max_skewness),
+        max_volume_ratio: finite(q.max_volume_ratio),
+        hausdorff: finite(distance),
+        hausdorff_relative: finite(relative),
     };
     Ok((accepted, summary))
 }

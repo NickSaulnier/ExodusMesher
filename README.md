@@ -7,7 +7,7 @@ A pure-Rust automatic mesher that turns OBJ files, as they occur in the wild, in
 - **Meshing:** a constrained Delaunay kernel that conforms exactly to the surface, with a size field graded for curvature and thin walls. When it cannot mesh a part, the part's surface is remeshed and the kernel retried; isosurface stuffing is the last, recorded fallback. Both are written here; TetGen is used only as a test oracle.
 - **Front ends:** a CLI and a desktop GUI (egui with a wgpu viewport). Both run the meshing in a separate `mesher-worker` process under a timeout and memory cap, so a crash or a runaway refinement becomes a report, not a hang.
 
-The design, decisions and benchmark results are in [PLAN.md](PLAN.md).
+The design, decisions and benchmark results are in [PLAN.md](PLAN.md); the phases after it are in [ROADMAP.md](ROADMAP.md).
 
 ## Build
 
@@ -129,6 +129,21 @@ cargo test --workspace
   cargo build --release -p mesher-cli -p mesher-worker
   cargo test --release -p mesher-oracle --test thingi10k stratified_sample_benchmark -- --ignored --nocapture
   ```
+
+## Benchmark
+
+The stratified 1,000-model Thingi10k sample was run on Nov 8, 2026, with default settings, against TetGen (`pzAfq`) at the same element size. Full details are in [PLAN.md](PLAN.md) (Milestone 10).
+
+| Class | Models | Conformal (exit 0 or 10) | Stuffing fallback (20) | Failed (30) | TetGen meshed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Clean | 350 | 304 | 40 | 6 | 323 |
+| Multi-component | 150 | 114 | 32 | 4 | 126 |
+| Non-manifold | 120 | 59 | 57 | 4 | 72 |
+| Open | 80 | 65 | 11 | 4 | 19 |
+| Self-intersecting | 300 | 26 | 235 | 39 | 3 |
+| All | 1,000 | 568 | 375 | 57 | 543 |
+
+On the 534 models both meshed, the median per-model minimum dihedral is 2.98° for ExodusMesher (0.90° for its conformal meshes alone) and 0.72° for TetGen. The median mean non-orthogonality is 23.2° against 27.2°. ExodusMesher takes about 15 times TetGen's total time (median 38 s a model).
 
 ## Licensing
 

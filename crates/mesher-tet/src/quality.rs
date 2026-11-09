@@ -66,8 +66,19 @@ pub struct FvQuality {
     /// Distance from the face centroid to where the centroid line crosses the
     /// face, over the centroid distance.
     pub max_skewness: f64,
-    /// Largest volume ratio between face neighbours.
+    /// Largest volume ratio between face neighbours whose floating-point
+    /// volumes are both positive; always finite.
     pub max_volume_ratio: f64,
+    /// Tets whose volume, computed in floating point as a solver would, is
+    /// not positive. Exact predicates can find such a tet positive (it is
+    /// flat to rounding), but a finite-volume solver cannot use it.
+    pub flat_in_float: usize,
+}
+
+/// The signed volume of a tet in floating point, the way a solver computes it.
+#[must_use]
+pub fn float_volume(p: [Point3; 4]) -> f64 {
+    dot(sub(p[1], p[0]), cross(sub(p[2], p[0]), sub(p[3], p[0]))) / 6.0
 }
 
 /// Faces of a positive tet, outward.
@@ -78,8 +89,7 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
     let corners = |t: &[u32; 4]| t.map(|v| points.get(v as usize).copied().unwrap_or([0.0; 3]));
     let centroid =
         |p: [Point3; 4]| [0, 1, 2].map(|k| (p[0][k] + p[1][k] + p[2][k] + p[3][k]) / 4.0);
-    let volume =
-        |p: [Point3; 4]| dot(sub(p[1], p[0]), cross(sub(p[2], p[0]), sub(p[3], p[0]))) / 6.0;
+    let volume = float_volume;
 
     let mut q = FvQuality {
         cells: tets.len(),
@@ -89,6 +99,10 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
         ..FvQuality::default()
     };
     for t in tets {
+        let v = volume(corners(t));
+        if v <= 0.0 || v.is_nan() {
+            q.flat_in_float += 1;
+        }
         for a in dihedral_angles(corners(t)) {
             q.min_dihedral_degrees = q.min_dihedral_degrees.min(a);
             q.max_dihedral_degrees = q.max_dihedral_degrees.max(a);
@@ -139,9 +153,13 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
                 norm(sub(fc, cj)) / dd
             };
             q.max_skewness = q.max_skewness.max(skew);
-            let (vj, vi) = (volume(pj).abs(), volume(pi).abs());
-            let ratio = vj.max(vi) / vj.min(vi).max(f64::MIN_POSITIVE);
-            q.max_volume_ratio = q.max_volume_ratio.max(ratio);
+            // Flat cells are counted in `flat_in_float`; a ratio against one
+            // would be unbounded.
+            let (vj, vi) = (volume(pj), volume(pi));
+            if vj > 0.0 && vi > 0.0 {
+                let ratio = (vj.max(vi) / vj.min(vi)).min(f64::MAX);
+                q.max_volume_ratio = q.max_volume_ratio.max(ratio);
+            }
         }
     }
     q.mean_non_orthogonality_degrees = if count > 0 { sum / count as f64 } else { 0.0 };
@@ -203,5 +221,24 @@ mod tests {
         assert!(q.max_skewness < 1e-9);
         assert!((q.max_volume_ratio - 1.0).abs() < 1e-12);
         assert_eq!(q.dihedral_histogram.iter().sum::<u64>(), 12);
+        assert_eq!(q.flat_in_float, 0);
+    }
+
+    /// A neighbour flat in floating point is counted, not divided by: the
+    /// volume ratio stays finite (an infinite one cannot be written as JSON).
+    #[test]
+    fn flat_neighbour_is_counted_and_ratio_stays_finite() {
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            // Exactly on the shared face's plane x + y + z = 1: a flat tet.
+            [0.5, 0.5, 0.0],
+        ];
+        let tets = [[0, 1, 2, 3], [4, 1, 3, 2]];
+        let q = fv_quality(&p, &tets);
+        assert_eq!(q.flat_in_float, 1);
+        assert!(q.max_volume_ratio.is_finite());
     }
 }

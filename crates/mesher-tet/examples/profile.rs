@@ -5,8 +5,9 @@
 //! cargo run --release -p mesher-tet --features profile --example profile -- model.obj [--uniform] [--remesh] [--size 0.03] [--max-points N]
 //! ```
 //!
-//! Prints the outcome and the time spent in each timed function (inclusive:
-//! nested scopes count in their callers too). The OBJ is read naively (`v`
+//! Prints the outcome, where the slivers are, every tet flat in floating
+//! point (with its vertices when `FLAT_DETAIL` is set), and the time spent in
+//! each timed function (inclusive: nested scopes count in their callers too). The OBJ is read naively (`v`
 //! and triangular `f` lines only); use the welded OBJ the Thingi10k harness
 //! writes.
 
@@ -80,6 +81,8 @@ fn main() {
     };
     eprintln!("size field: {:?} in {:?}", field, started.elapsed());
     let mut groups = Vec::new();
+    // As the pipeline does: a remeshed surface keeps its side sets.
+    let mut side_sets = Vec::new();
     if flag("--remesh") {
         let t = Instant::now();
         let r = remesh(
@@ -96,12 +99,14 @@ fn main() {
             t.elapsed()
         );
         groups = (0..r.triangles.len() as u32).collect();
+        side_sets = vec![0; r.triangles.len()];
         points = r.points;
         triangles = r.triangles;
     }
     let params = ConformingParams {
         size: (!field.is_uniform()).then(|| Arc::new(field)),
         groups,
+        side_sets,
         max_points,
         ..ConformingParams::with_size(h)
     };
@@ -161,5 +166,52 @@ fn slivers(m: &ConformingMesh, inputs: usize) {
     );
     for ((bf, bv, iv), (n, n1)) in table {
         eprintln!("  faces {bf} vertices {bv} input {iv}: {n:>6} {n1:>6}");
+    }
+    // Tets positive exactly but flat in floating point, which the volume
+    // gate rejects.
+    for t in &m.tets {
+        let p = t.map(|v| m.points[v as usize]);
+        let v = mesher_tet::quality::float_volume(p);
+        if v > 0.0 {
+            continue;
+        }
+        let bf = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
+            .iter()
+            .filter(|f| faces.contains(&key(f.map(|k| t[k]))))
+            .count();
+        let bv = t.iter().filter(|v| on.contains(v)).count();
+        let iv = t.iter().filter(|&&v| (v as usize) < inputs).count();
+        let longest = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+            .iter()
+            .map(|&(i, j)| {
+                (0..3)
+                    .map(|k| (p[i][k] - p[j][k]).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+            })
+            .fold(0.0f64, f64::max);
+        let shortest = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+            .iter()
+            .map(|&(i, j)| {
+                (0..3)
+                    .map(|k| (p[i][k] - p[j][k]).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+            })
+            .fold(f64::INFINITY, f64::min);
+        eprintln!(
+            "  flat in float: tet {t:?} volume {v:e}, boundary faces {bf}, boundary vertices {bv}, input vertices {iv}, edges {shortest:.3e}..{longest:.3e}"
+        );
+        if std::env::var_os("FLAT_DETAIL").is_some() {
+            for &w in t {
+                let around = m.tets.iter().filter(|u| u.contains(&w)).count();
+                eprintln!(
+                    "    vertex {w}: {:?} on boundary {} input {} in {around} tets",
+                    m.points[w as usize],
+                    on.contains(&w),
+                    (w as usize) < inputs
+                );
+            }
+        }
     }
 }

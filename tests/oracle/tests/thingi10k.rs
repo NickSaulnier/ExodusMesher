@@ -350,6 +350,11 @@ fn tetgen_in_child(id: u64, h: f64) -> Result<Reference, String> {
         return Err(e.to_owned());
     }
     let f: Vec<&str> = line.split_whitespace().collect();
+    // TetGen returns an empty mesh, without an error, on most
+    // self-intersecting input: that is not a mesh.
+    if f[0] == "0" {
+        return Err("no tetrahedra".to_owned());
+    }
     Ok(Reference {
         cells: f[0].parse().unwrap(),
         min: f[1].parse().unwrap(),
