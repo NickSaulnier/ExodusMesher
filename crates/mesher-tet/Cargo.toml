@@ -12,6 +12,7 @@ rust-version.workspace = true
 profile = []
 
 [dependencies]
+libm.workspace = true
 mesher-geom.workspace = true
 rayon.workspace = true
 

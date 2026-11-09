@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+libm.workspace = true
 mesher-core.workspace = true
 mesher-io.workspace = true
 

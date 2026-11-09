@@ -189,7 +189,7 @@ impl SizeField {
             if ns == [0.0; 3] || nt == [0.0; 3] {
                 continue;
             }
-            let phi = dot(ns, nt).clamp(-1.0, 1.0).acos();
+            let phi = libm::acos(dot(ns, nt).clamp(-1.0, 1.0));
             if !(phi > 1e-6 && phi < feature) {
                 continue;
             }
@@ -256,7 +256,7 @@ impl SizeField {
         let bounds: Aabb = bvh.bounds();
         let extent = sub(bounds.max, bounds.min);
         let volume = extent.iter().map(|e| e.max(h0)).product::<f64>();
-        let cell = (h0 / 6.0).max((volume / p.max_nodes as f64).cbrt());
+        let cell = (h0 / 6.0).max(libm::cbrt(volume / p.max_nodes as f64));
         let origin = sub(bounds.min, [cell; 3]);
         let dims = extent.map(|e| (e / cell).ceil() as usize + 3);
         let n = dims[0] * dims[1] * dims[2];
@@ -494,7 +494,7 @@ mod tests {
         for z in [0.0, height] {
             for i in 0..n {
                 let a = f64::from(i) / f64::from(n) * std::f64::consts::TAU;
-                p.push([a.cos(), a.sin(), z]);
+                p.push([libm::cos(a), libm::sin(a), z]);
             }
         }
         p.push([0.0, 0.0, 0.0]);

@@ -10,7 +10,7 @@ use mesher_geom::{Aabb, Point3};
 use mesher_tet::{ConformingParams, StuffingParams, conforming_mesh, fv_quality, stuff};
 
 fn exact(p: Point3) -> f64 {
-    (PI * p[0]).sin() * (PI * p[1]).sin() * (PI * p[2]).sin()
+    libm::sin(PI * p[0]) * libm::sin(PI * p[1]) * libm::sin(PI * p[2])
 }
 
 fn source(p: Point3) -> f64 {

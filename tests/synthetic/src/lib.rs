@@ -153,7 +153,10 @@ impl Solid {
         Solid { points, tris }
     }
 
-    /// Torus with major radius `big`, minor radius `small`.
+    /// Torus with major radius `big`, minor radius `small`. The angles use
+    /// the pure-Rust `libm`, not the platform's maths library, whose last
+    /// bits differ between Windows and Linux: the golden reports must see the
+    /// same input everywhere.
     #[must_use]
     pub fn torus(big: f64, small: f64, nu: u32, nv: u32) -> Solid {
         let mut points = Vec::new();
@@ -161,8 +164,8 @@ impl Solid {
             for j in 0..nv {
                 let u = f64::from(i) / f64::from(nu) * std::f64::consts::TAU;
                 let v = f64::from(j) / f64::from(nv) * std::f64::consts::TAU;
-                let a = big + small * v.cos();
-                points.push([a * u.cos(), a * u.sin(), small * v.sin()]);
+                let a = big + small * libm::cos(v);
+                points.push([a * libm::cos(u), a * libm::sin(u), small * libm::sin(v)]);
             }
         }
         let id = |i: u32, j: u32| (i % nu) * nv + (j % nv);

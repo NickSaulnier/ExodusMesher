@@ -72,7 +72,7 @@ fn min_dihedral(p: [Point3; 4]) -> f64 {
             max_cos = max_cos.max(-dot(a, b));
         }
     }
-    max_cos.clamp(-1.0, 1.0).acos().to_degrees()
+    libm::acos(max_cos.clamp(-1.0, 1.0)).to_degrees()
 }
 
 /// Move free vertices (`fixed[v]` false) of poor tets to raise the smallest

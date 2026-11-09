@@ -4,6 +4,9 @@
 //! through `mesher-client`, exactly as the CLI does. Every export saves a
 //! project file that `mesher run project.toml` replays.
 
+// Camera and display maths only: nothing here reaches a mesh or a report, so
+// the platform's maths library is fine (see `clippy.toml`).
+#![allow(clippy::disallowed_methods)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod render;

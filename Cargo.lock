@@ -1910,6 +1910,7 @@ version = "0.1.0"
 dependencies = [
  "clap 4.6.7",
  "jsonschema",
+ "libm",
  "mesher-client",
  "mesher-core",
  "proptest",
@@ -1931,6 +1932,7 @@ name = "mesher-core"
 version = "0.1.0"
 dependencies = [
  "jsonschema",
+ "libm",
  "mesher-geom",
  "mesher-tet",
  "proptest",
@@ -1945,6 +1947,7 @@ dependencies = [
 name = "mesher-fvm"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "mesher-geom",
  "mesher-tet",
 ]
@@ -1953,6 +1956,7 @@ dependencies = [
 name = "mesher-geom"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "num-bigint 0.4.8",
  "num-rational 0.4.2",
  "num-traits",
@@ -1981,6 +1985,7 @@ dependencies = [
 name = "mesher-io"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "mesher-core",
  "mesher-geom",
  "mshio",
@@ -1995,6 +2000,7 @@ dependencies = [
 name = "mesher-oracle"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "mesher-core",
  "mesher-geom",
  "mesher-io",
@@ -2009,6 +2015,7 @@ dependencies = [
 name = "mesher-synthetic"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "mesher-core",
  "mesher-io",
  "mesher-tet",
@@ -2020,6 +2027,7 @@ dependencies = [
 name = "mesher-tet"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "mesher-geom",
  "proptest",
  "rayon",

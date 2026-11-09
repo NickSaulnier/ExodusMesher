@@ -8,11 +8,12 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
+libm.workspace = true
 mesher-geom.workspace = true
 mesher-tet.workspace = true
 schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

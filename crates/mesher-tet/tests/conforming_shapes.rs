@@ -83,8 +83,8 @@ fn torus(nu: u32, nv: u32) -> Surface {
         for j in 0..nv {
             let u = f64::from(i) / f64::from(nu) * std::f64::consts::TAU;
             let v = f64::from(j) / f64::from(nv) * std::f64::consts::TAU;
-            let a = 2.0 + 0.75 * v.cos();
-            p.push([a * u.cos(), a * u.sin(), 0.75 * v.sin()]);
+            let a = 2.0 + 0.75 * libm::cos(v);
+            p.push([a * libm::cos(u), a * libm::sin(u), 0.75 * libm::sin(v)]);
         }
     }
     let id = |i: u32, j: u32| (i % nu) * nv + (j % nv);
@@ -108,9 +108,9 @@ fn uv_sphere(segments: u32, rings: u32, radius: f64) -> Surface {
         for j in 0..segments {
             let a = f64::from(j) / f64::from(segments) * std::f64::consts::TAU;
             p.push([
-                radius * t.sin() * a.cos(),
-                radius * t.sin() * a.sin(),
-                radius * t.cos(),
+                radius * libm::sin(t) * libm::cos(a),
+                radius * libm::sin(t) * libm::sin(a),
+                radius * libm::cos(t),
             ]);
         }
     }
@@ -312,7 +312,12 @@ fn shapes_mesh_conformally() {
     // Planar faces off the axes: Steiner points on them are off their planes
     // by rounding.
     let (p, f) = grid_cube(3);
-    let (s1, c1, s2, c2) = (0.3f64.sin(), 0.3f64.cos(), 0.7f64.sin(), 0.7f64.cos());
+    let (s1, c1, s2, c2) = (
+        libm::sin(0.3),
+        libm::cos(0.3),
+        libm::sin(0.7),
+        libm::cos(0.7),
+    );
     let p = p
         .into_iter()
         .map(|[x, y, z]| {
@@ -390,7 +395,8 @@ fn rounded_uv_sphere_meshes_after_remeshing() {
 fn remeshed_box_flattens_rounding_flat_tets_within_a_side_set() {
     let (p, f) = boxed([-2.5, 0.0, 0.0], [2.5, 3.0, 2.25], 0, false);
     // The exact rounding matters: these expressions reproduce the flat tet.
-    let (s, c) = (0.3f64 + 0.37).sin_cos();
+    // `libm`, not the platform's maths library: the same bits on every OS.
+    let (s, c) = (libm::sin(0.3f64 + 0.37), libm::cos(0.3f64 + 0.37));
     let p: Vec<Point3> = p
         .iter()
         .map(|q| {

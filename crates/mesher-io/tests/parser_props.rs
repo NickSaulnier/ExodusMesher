@@ -80,7 +80,11 @@ proptest! {
         let mut text = String::new();
         for i in 0..n {
             let a = i as f64 / n as f64 * std::f64::consts::TAU;
-            text.push_str(&format!("v {} {} 0\n", scale * a.cos(), scale * a.sin()));
+            text.push_str(&format!(
+                "v {} {} 0\n",
+                scale * libm::cos(a),
+                scale * libm::sin(a)
+            ));
         }
         text.push('f');
         for i in 1..=n {

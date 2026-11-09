@@ -29,7 +29,7 @@ pub fn dihedral_angles(p: [Point3; 4]) -> [f64; 6] {
             }
         };
         let (u, v) = (perp(p[k]), perp(p[l]));
-        norm(cross(u, v)).atan2(dot(u, v)).to_degrees()
+        libm::atan2(norm(cross(u, v)), dot(u, v)).to_degrees()
     })
 }
 
@@ -141,7 +141,7 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
             }
             let n = scale(n, 1.0 / nn);
             let cos = (dot(d, n) / dd).clamp(-1.0, 1.0);
-            let angle = cos.acos().to_degrees();
+            let angle = libm::acos(cos).to_degrees();
             q.max_non_orthogonality_degrees = q.max_non_orthogonality_degrees.max(angle);
             sum += angle;
             count += 1;
@@ -178,7 +178,7 @@ mod tests {
             [-1.0, 1.0, -1.0],
             [-1.0, -1.0, 1.0],
         ];
-        let expected = (1.0f64 / 3.0).acos().to_degrees();
+        let expected = libm::acos(1.0 / 3.0).to_degrees();
         for a in dihedral_angles(p) {
             assert!((a - expected).abs() < 1e-12);
         }

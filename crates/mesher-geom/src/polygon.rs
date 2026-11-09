@@ -275,7 +275,7 @@ mod tests {
         let pts: Vec<[f64; 3]> = (0..n)
             .map(|i| {
                 let a = i as f64 / n as f64 * std::f64::consts::TAU;
-                [a.cos(), a.sin(), 0.0]
+                [libm::cos(a), libm::sin(a), 0.0]
             })
             .collect();
         let t = triangulate_polygon(&pts);
@@ -298,7 +298,7 @@ mod tests {
             .map(|i| {
                 let a = i as f64 / n as f64 * std::f64::consts::TAU;
                 let r = radii[i % radii.len()];
-                [r * a.cos(), r * a.sin()]
+                [r * libm::cos(a), r * libm::sin(a)]
             })
             .collect()
     }

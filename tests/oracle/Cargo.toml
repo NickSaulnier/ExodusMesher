@@ -16,8 +16,9 @@ mesher-geom.workspace = true
 workspace = true
 
 [dev-dependencies]
-mesher-tet.workspace = true
+libm.workspace = true
 mesher-io.workspace = true
+mesher-tet.workspace = true
 netcdf3.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

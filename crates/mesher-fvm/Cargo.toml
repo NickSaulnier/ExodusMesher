@@ -11,6 +11,7 @@ rust-version.workspace = true
 mesher-geom.workspace = true
 
 [dev-dependencies]
+libm.workspace = true
 mesher-tet.workspace = true
 
 [lints]

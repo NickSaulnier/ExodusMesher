@@ -21,7 +21,7 @@ Pure-Rust automatic surface + volume mesher for .obj files, with Exodus II outpu
 - Library code never panics on bad input; return errors that become report records. Panics are bugs (exit code 70).
 - All orientation and in-sphere decisions go through exact predicates (`robust` crate); no epsilon comparisons for topology.
 - Tolerances are relative to the bounding-box diagonal, never absolute.
-- Deterministic output: no hash-map iteration order in anything written to disk; seeded RNGs only.
+- Deterministic output: no hash-map iteration order in anything written to disk; seeded RNGs only; the same mesh on every platform, so transcendental functions (`sin`, `acos`, `atan2`, `cbrt`, `log2`, `pow`, ...) go through `libm`, never the platform's `f64` methods (`clippy.toml` enforces it outside the GUI).
 - Meshing runs in `mesher-worker`. The CLI and GUI contain no meshing logic; both run the worker through `mesher-client`.
 - TetGen (`tritet`) is a dev-dependency for oracle tests only; never a dependency of a shipped crate.
 - Exodus: 1-based connectivity, Exodus tet face ordinals for side sets, `TETRA4` blocks per part. Unit-test ordinals on a single tet.

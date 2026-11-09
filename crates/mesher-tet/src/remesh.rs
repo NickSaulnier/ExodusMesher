@@ -314,7 +314,7 @@ pub fn remesh(
             }
         }
     }
-    let cos_feature = params.feature_degrees.to_radians().cos();
+    let cos_feature = libm::cos(params.feature_degrees.to_radians());
     let mut segments: Vec<(u32, u32)> = Vec::new();
     let mut sorted: Vec<(&(u32, u32), &u32)> = directed.iter().collect();
     sorted.sort_unstable();
@@ -606,7 +606,7 @@ fn try_flip(m: &mut Mesh, u: u32, v: u32) -> bool {
             unit(sub(m.pos[x as usize], p)),
             unit(sub(m.pos[y as usize], p)),
         );
-        dot(d0, d1).clamp(-1.0, 1.0).acos()
+        libm::acos(dot(d0, d1).clamp(-1.0, 1.0))
     };
     // A small margin keeps cocircular quads from flipping back and forth.
     if angle(a, u, v) + angle(b, u, v) <= std::f64::consts::PI + 1e-9 {
@@ -834,9 +834,9 @@ mod tests {
             for j in 0..segments {
                 let a = f64::from(j) / f64::from(segments) * std::f64::consts::TAU;
                 p.push([
-                    round(t.sin() * a.cos()),
-                    round(t.sin() * a.sin()),
-                    round(t.cos()),
+                    round(libm::sin(t) * libm::cos(a)),
+                    round(libm::sin(t) * libm::sin(a)),
+                    round(libm::cos(t)),
                 ]);
             }
         }
@@ -875,10 +875,7 @@ mod tests {
             .map(|t| {
                 let [a, b, c] = t.map(|v| r.points[v as usize]);
                 let angle = |p: Point3, q: Point3, s: Point3| {
-                    dot(unit(sub(q, p)), unit(sub(s, p)))
-                        .clamp(-1.0, 1.0)
-                        .acos()
-                        .to_degrees()
+                    libm::acos(dot(unit(sub(q, p)), unit(sub(s, p))).clamp(-1.0, 1.0)).to_degrees()
                 };
                 angle(a, b, c).min(angle(b, c, a)).min(angle(c, a, b))
             })

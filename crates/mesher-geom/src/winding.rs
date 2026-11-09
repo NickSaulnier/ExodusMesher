@@ -29,7 +29,7 @@ pub fn solid_angle(p: Point3, [a, b, c]: [Point3; 3]) -> f64 {
     let (la, lb, lc) = (norm(a), norm(b), norm(c));
     let numerator = dot(a, cross(b, c));
     let denominator = la * lb * lc + dot(a, b) * lc + dot(b, c) * la + dot(c, a) * lb;
-    2.0 * numerator.atan2(denominator)
+    2.0 * libm::atan2(numerator, denominator)
 }
 
 /// Winding number by direct summation over every triangle: the reference.

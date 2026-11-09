@@ -826,7 +826,7 @@ impl Builder<'_> {
         let (a, b) = (self.pos(apex), self.pos(other));
         let length = norm(sub(b, a));
         let unit = self.params.max_circumradius;
-        let d = unit * (length / (2.0 * unit)).log2().round().exp2();
+        let d = unit * libm::exp2(libm::log2(length / (2.0 * unit)).round());
         let t = if d.is_finite() && d > 0.0 {
             (d / length).clamp(0.25, 0.75)
         } else {

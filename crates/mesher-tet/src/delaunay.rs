@@ -1832,7 +1832,7 @@ mod tests {
     fn plane_labels_prevent_flat_tets() {
         // A 6×6 grid on a tilted plane (coplanar only to rounding) and points
         // on both sides.
-        let (s, c) = (0.37f64.sin(), 0.37f64.cos());
+        let (s, c) = (libm::sin(0.37), libm::cos(0.37));
         let mut pts = Vec::new();
         let mut planes = Vec::new();
         for i in 0..6 {

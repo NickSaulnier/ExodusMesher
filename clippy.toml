@@ -1,3 +1,29 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+
+# Deterministic output on every platform (Nov 9, 2026).
+disallowed-methods = [
+    { path = "f64::sin", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::cos", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::tan", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::asin", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::acos", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::atan", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::atan2", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::sin_cos", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::sinh", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::cosh", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::tanh", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::exp", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::exp2", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::exp_m1", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::ln", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::log", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::log2", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::log10", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::ln_1p", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::powf", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::cbrt", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+    { path = "f64::hypot", reason = "the platform's maths library differs between operating systems in the last bits; use libm, which is bit-identical everywhere" },
+]

@@ -225,7 +225,7 @@ fn mesh_part(
         if field.is_uniform() {
             0
         } else {
-            (h / field.min()).log2().ceil().clamp(0.0, 2.0) as u32
+            libm::log2(h / field.min()).ceil().clamp(0.0, 2.0) as u32
         }
     };
     let leaf = h / f64::from(1u32 << levels);

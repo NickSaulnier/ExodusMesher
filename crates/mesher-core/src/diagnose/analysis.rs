@@ -242,7 +242,7 @@ pub(crate) fn analyze_surface(
     let ratio: Vec<f64> = (0..shells)
         .map(|s| {
             if area[s] > 0.0 {
-                volume[s].abs() / area[s].powf(1.5)
+                volume[s].abs() / libm::pow(area[s], 1.5)
             } else {
                 0.0
             }
@@ -335,7 +335,7 @@ fn min_angle_degrees(p: [Point3; 3]) -> f64 {
         .map(|i| {
             let u = sub(p[(i + 1) % 3], p[i]);
             let v = sub(p[(i + 2) % 3], p[i]);
-            norm(cross(u, v)).atan2(dot(u, v))
+            libm::atan2(norm(cross(u, v)), dot(u, v))
         })
         .fold(f64::INFINITY, f64::min)
         .to_degrees()

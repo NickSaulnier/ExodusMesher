@@ -118,7 +118,7 @@ fn hostile_inputs_yield_reports() {
     let mut huge_polygon = String::new();
     for i in 0..2000 {
         let a = f64::from(i) / 2000.0 * std::f64::consts::TAU;
-        huge_polygon.push_str(&format!("v {} {} 0\n", a.cos(), a.sin()));
+        huge_polygon.push_str(&format!("v {} {} 0\n", libm::cos(a), libm::sin(a)));
     }
     huge_polygon.push('f');
     for i in 1..=2000 {

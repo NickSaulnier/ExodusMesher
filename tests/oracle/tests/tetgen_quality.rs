@@ -86,8 +86,8 @@ fn torus(nu: u32, nv: u32) -> Surface {
         for j in 0..nv {
             let u = f64::from(i) / f64::from(nu) * std::f64::consts::TAU;
             let v = f64::from(j) / f64::from(nv) * std::f64::consts::TAU;
-            let a = 2.0 + 0.75 * v.cos();
-            p.push([a * u.cos(), a * u.sin(), 0.75 * v.sin()]);
+            let a = 2.0 + 0.75 * libm::cos(v);
+            p.push([a * libm::cos(u), a * libm::sin(u), 0.75 * libm::sin(v)]);
         }
     }
     let id = |i: u32, j: u32| (i % nu) * nv + (j % nv);
