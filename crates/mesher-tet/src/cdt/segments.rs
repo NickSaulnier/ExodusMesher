@@ -11,15 +11,20 @@
 //! at the middle. Lengths are approximate (f64 positions): they only choose
 //! where to split, never decide topology.
 //!
-//! This is the baseline. On CAD-like input it needs many points (a median of
-//! about 4,000 on the 100-model clean subset), because a segment is often
-//! missing for want of a flip, not a point: a cospherical tie, or a needle
-//! triangle. Placing splits by a reference point, as TetGen does, did not
-//! help on its own; recovering missing segments by flips first is next.
+//! Each round first tries to recover every missing subsegment by flips
+//! ([`ExactDelaunay::recover_edge`]), then splits what is still missing and
+//! tries flips on the two halves. Every subsegment that is an edge is
+//! protected: flips never remove it, and split points go in by
+//! [`ExactDelaunay::insert_protected`], whose cavity never removes it, so a
+//! recovered segment stays recovered. The tetrahedralization is then no
+//! longer Delaunay. Rounds repeat until every subsegment is an edge, within a
+//! point budget.
 //!
-//! Splitting repeats until every subsegment is an edge, within a point
-//! budget. Delaunay insertion never removes a point, but it can remove
-//! an edge, so every subsegment is checked again until none is missing.
+//! On the 100-model clean subset this recovers 92 models at a median of
+//! about 420 Steiner points; splitting alone recovered 77 at a median of
+//! about 4,000. Long segments through densely packed vertices still need
+//! many splits: halving only succeeds once pieces are as short as the local
+//! spacing.
 
 use std::collections::BTreeSet;
 
@@ -102,6 +107,8 @@ pub struct RecoveredSegments {
     pub subsegments: Vec<Subsegment>,
     /// Steiner points inserted on segments.
     pub steiner: usize,
+    /// Subsegments recovered by flips.
+    pub by_flips: usize,
     /// Segments missing from the first tetrahedralization of the inputs.
     pub initially_missing: usize,
     /// Rounds of splitting.
@@ -119,6 +126,9 @@ pub fn segments_of(triangles: &[[u32; 3]]) -> Vec<(u32, u32)> {
         .collect();
     set.into_iter().collect()
 }
+
+/// Flip steps tried per missing subsegment before splitting it.
+const FLIP_STEPS: usize = 64;
 
 fn distance(a: Point3, b: Point3) -> f64 {
     (0..3).map(|k| (a[k] - b[k]).powi(2)).sum::<f64>().sqrt()
@@ -179,20 +189,44 @@ pub fn recover_segments(
         })
         .collect();
     let mut steiner = 0usize;
+    let mut by_flips = 0usize;
     let mut initially_missing = None;
     let mut rounds = 0usize;
+    let key = |u: u32, v: u32| (u.min(v), u.max(v));
     loop {
-        let missing: Vec<usize> = (0..subs.len())
-            .filter(|&k| !dt.has_edge(subs[k].ends[0], subs[k].ends[1]))
-            .collect();
+        let missing: Vec<usize> = {
+            let _s = crate::prof::scope("cdt segments: find missing");
+            (0..subs.len())
+                .filter(|&k| !dt.has_edge(subs[k].ends[0], subs[k].ends[1]))
+                .collect()
+        };
         initially_missing.get_or_insert(missing.len());
         if missing.is_empty() {
             break;
         }
         rounds += 1;
-        // Split from the back, so earlier indices stay valid.
+        // Every subsegment that is an edge is protected: no flip or
+        // insertion below removes it.
+        let mut protected: BTreeSet<(u32, u32)> = subs
+            .iter()
+            .map(|s| key(s.ends[0], s.ends[1]))
+            .filter(|&(u, v)| dt.has_edge(u, v))
+            .collect();
+        for &k in &missing {
+            let [u, v] = subs[k].ends;
+            let _s = crate::prof::scope("cdt segments: flips");
+            if dt.recover_edge(u, v, &|x, y| protected.contains(&key(x, y)), FLIP_STEPS) {
+                by_flips += 1;
+                protected.insert(key(u, v));
+            }
+        }
+        // Split what flips could not recover, from the back, so earlier
+        // indices stay valid.
         for &k in missing.iter().rev() {
             let s = subs[k];
+            if dt.has_edge(s.ends[0], s.ends[1]) {
+                continue;
+            }
             if dt.points().len() >= limit {
                 return Err(SegmentError::Budget {
                     points: dt.points().len(),
@@ -208,7 +242,8 @@ pub fn recover_segments(
             }
             let p =
                 Point::lnc(a, b, t).map_err(|_| SegmentError::TooShort { segment: s.segment })?;
-            let m = match dt.insert(p)? {
+            let _s = crate::prof::scope("cdt segments: protected insertion");
+            let m = match dt.insert_protected(p, &|x, y| protected.contains(&key(x, y)))? {
                 Inserted::New(m) => m,
                 Inserted::Duplicate(v) => {
                     return Err(SegmentError::VertexOnSegment {
@@ -231,12 +266,21 @@ pub fn recover_segments(
                     ..s
                 },
             );
+            for (u, v) in [(s.ends[0], m), (m, s.ends[1])] {
+                let _s = crate::prof::scope("cdt segments: flips after a split");
+                if dt.has_edge(u, v)
+                    || dt.recover_edge(u, v, &|x, y| protected.contains(&key(x, y)), FLIP_STEPS)
+                {
+                    protected.insert(key(u, v));
+                }
+            }
         }
     }
     Ok(RecoveredSegments {
         dt,
         subsegments: subs,
         steiner,
+        by_flips,
         initially_missing: initially_missing.unwrap_or(0),
         rounds,
     })

@@ -7,8 +7,10 @@
 //! endpoints), so nothing is rounded until the mesh is written. There is no
 //! facet merging by tolerance: every input triangle is a constraint.
 //!
-//! - [`delaunay`]: the exact incremental Delaunay tetrahedralization.
-//! - [`segments`]: segment recovery by splitting with LNC Steiner points.
+//! - [`delaunay`]: the exact incremental Delaunay tetrahedralization, with
+//!   flips, edge removal and insertion that protects chosen edges.
+//! - [`segments`]: segment recovery by flips, then splitting with LNC
+//!   Steiner points.
 //!
 //! Face recovery, region marking and the pipeline integration follow.
 

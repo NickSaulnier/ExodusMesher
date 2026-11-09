@@ -38,19 +38,29 @@ fn main() {
             }
         }
         let started = Instant::now();
-        let result = recover_segments(&points, &triangles, 0, 5);
+        // CDT_MAX_POINTS caps the vertex count (0: the default budget).
+        let max_points = std::env::var("CDT_MAX_POINTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let result = recover_segments(&points, &triangles, max_points, 5);
         let seconds = started.elapsed().as_secs_f64();
         match result {
             Ok(r) => println!(
-                "{path}\tok\t{}\t{}\t{}\t{seconds:.2}\tinitially missing {} of {}, {} rounds",
+                "{path}\tok\t{}\t{}\t{}\t{seconds:.2}\tinitially missing {} of {}, {} by flips, {} rounds",
                 triangles.len(),
                 r.subsegments.len(),
                 r.steiner,
                 r.initially_missing,
                 mesher_tet::cdt::segments::segments_of(&triangles).len(),
+                r.by_flips,
                 r.rounds
             ),
             Err(e) => println!("{path}\tfailed\t{}\t{e}\t{seconds:.2}", triangles.len()),
+        }
+        let report = mesher_tet::prof::report();
+        if !report.is_empty() {
+            eprint!("{report}");
         }
     }
 }

@@ -242,15 +242,57 @@ fn check_recovered(name: &str, (p, f): &Surface) -> usize {
 #[test]
 fn segments_are_recovered_exactly() {
     // The cube's corners are cospherical: the Delaunay tetrahedralization may
-    // choose the other diagonal of a face, which is then split (a flip would
-    // recover it without a point; not done yet).
-    assert!(check_recovered("cube", &cube()) <= 6);
-    check_recovered("uv sphere", &uv_sphere(16, 10, [0.0; 3], false));
-    // The rounded, off-centre sphere the current kernel cannot recover.
-    check_recovered(
-        "rounded uv sphere",
-        &uv_sphere(16, 10, [1.0, 1.0, 1.5], true),
+    // choose the other diagonal of a face. Hull 2-2 flips recover most; two
+    // need an edge removal greedy flips do not find, and are split.
+    assert!(check_recovered("cube", &cube()) <= 2);
+    // Flips recover every sphere segment without a point.
+    assert_eq!(
+        check_recovered("uv sphere", &uv_sphere(16, 10, [0.0; 3], false)),
+        0
     );
-    check_recovered("sharp wedge", &sharp_wedge());
-    check_recovered("fine uv sphere", &uv_sphere(48, 24, [0.3, -0.2, 0.1], true));
+    // The rounded, off-centre sphere the current kernel cannot recover.
+    assert_eq!(
+        check_recovered(
+            "rounded uv sphere",
+            &uv_sphere(16, 10, [1.0, 1.0, 1.5], true),
+        ),
+        0
+    );
+    assert!(check_recovered("sharp wedge", &sharp_wedge()) <= 1);
+    assert_eq!(
+        check_recovered("fine uv sphere", &uv_sphere(48, 24, [0.3, -0.2, 0.1], true)),
+        0
+    );
+}
+
+#[test]
+fn protected_insertion_keeps_protected_edges() {
+    let mut rng = Rng(0x5851_f42d_4c95_7f2d);
+    let p: Vec<Point3> = (0..200).map(|_| rng.point()).collect();
+    let mut d = ExactDelaunay::new(explicit(&p), 9).unwrap();
+    // Protect every edge at the vertex nearest the centre, then insert points
+    // all around it, inside the hull.
+    let hub = (0..p.len())
+        .min_by(|&i, &j| {
+            let r = |q: Point3| (0..3).map(|k| (q[k] - 0.5).powi(2)).sum::<f64>();
+            r(p[i]).total_cmp(&r(p[j]))
+        })
+        .unwrap() as u32;
+    let protected: Vec<u32> = d.neighbours(hub);
+    assert!(!protected.is_empty());
+    let is = |x: u32, y: u32| {
+        (x == hub && protected.contains(&y)) || (y == hub && protected.contains(&x))
+    };
+    for _ in 0..100 {
+        let q = [0, 1, 2].map(|k| p[hub as usize][k] + 0.2 * (rng.unit() - 0.5));
+        d.insert_protected(Point::explicit(q).unwrap(), &is)
+            .unwrap();
+        d.check().unwrap();
+    }
+    for &v in &protected {
+        assert!(d.has_edge(hub, v), "edge {hub}-{v} lost");
+    }
+    // A point outside the hull is refused.
+    let outside = d.insert_protected(Point::explicit([2.0, 2.0, 2.0]).unwrap(), &is);
+    assert!(outside.is_err());
 }

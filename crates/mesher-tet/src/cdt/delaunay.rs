@@ -24,6 +24,35 @@ const NONE: u32 = u32::MAX;
 /// Local face opposite each vertex, ordered outward for a positive tet.
 const FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
 
+/// The six edges of a tet, as local vertex pairs.
+const EDGES: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+
+/// What a segment from a vertex first meets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Crossing {
+    /// The interior of face `j` of tet `t` (the face opposite the start).
+    Face { t: u32, j: usize },
+    /// The interior of edge `xy`.
+    Edge { x: u32, y: u32 },
+    /// A vertex on the segment, or nothing found.
+    None,
+}
+
+/// What is wrong with a constrained cavity.
+enum Violation {
+    None,
+    /// Take this tet out.
+    Remove(u32),
+    /// Only a tet containing the point could be taken out.
+    Stuck,
+}
+
+/// A face's vertices rotated so the smallest is first, keeping orientation.
+fn rotated(f: [u32; 3]) -> [u32; 3] {
+    let m = (0..3).min_by_key(|&k| f[k]).unwrap_or(0);
+    [f[m], f[(m + 1) % 3], f[(m + 2) % 3]]
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Tet {
     v: [u32; 4],
@@ -38,6 +67,8 @@ pub enum DelaunayError {
     Flat,
     /// A cavity could not be filled (a bug or a pathological input).
     Cavity { point: u32 },
+    /// A protected insertion outside the convex hull.
+    Outside { point: u32 },
 }
 
 impl std::fmt::Display for DelaunayError {
@@ -46,6 +77,9 @@ impl std::fmt::Display for DelaunayError {
             DelaunayError::Flat => write!(f, "the points do not span a volume"),
             DelaunayError::Cavity { point } => {
                 write!(f, "could not fill the cavity of point {point}")
+            }
+            DelaunayError::Outside { point } => {
+                write!(f, "point {point} is outside the convex hull")
             }
         }
     }
@@ -421,8 +455,7 @@ impl ExactDelaunay {
                 .find(|&t| self.tets[t as usize].alive && self.conflict(t, &p))
                 .ok_or(fail.clone())?;
         }
-        self.epoch = self.epoch.wrapping_add(1);
-        let epoch = self.epoch;
+        let epoch = self.next_epoch();
         let mut cavity = vec![t0];
         self.stamp[t0 as usize] = epoch;
         let mut k = 0;
@@ -458,6 +491,20 @@ impl ExactDelaunay {
                 return Err(fail);
             }
         }
+        self.fill_cavity(i, &cavity)
+    }
+
+    /// A fresh cavity stamp (never 0, which marks a tet taken back out).
+    fn next_epoch(&mut self) -> u32 {
+        self.epoch = self.epoch.wrapping_add(1).max(1);
+        self.epoch
+    }
+
+    /// Replace the cavity (its tets stamped with the current epoch) by a cone
+    /// from vertex `i` over its boundary.
+    fn fill_cavity(&mut self, i: u32, cavity: &[u32]) -> Result<Inserted, DelaunayError> {
+        let fail = DelaunayError::Cavity { point: i };
+        let epoch = self.epoch;
         let boundary: Vec<(u32, usize, u32)> = cavity
             .iter()
             .flat_map(|&t| (0..4).map(move |j| (t, j)))
@@ -497,12 +544,539 @@ impl ExactDelaunay {
             }
             created.push(id);
         }
-        for &t in &cavity {
+        for &t in cavity {
             self.kill(t);
         }
         self.link_around(&created, i).map_err(|()| fail)?;
         self.last = created[0];
         Ok(Inserted::New(i))
+    }
+
+    /// Insert a point without removing any edge `protected` accepts: the
+    /// cavity starts as the Delaunay conflict region and shrinks until every
+    /// boundary face is strictly visible from the point, no protected edge
+    /// and no vertex would be lost, keeping every tet whose closure contains
+    /// the point (after Si's constrained Bowyer-Watson in TetGen). The result
+    /// need not be Delaunay.
+    ///
+    /// # Errors
+    /// [`DelaunayError::Outside`] when the point is outside the convex hull
+    /// (segment points never are), [`DelaunayError::Cavity`] when it lies on
+    /// a protected edge or the cavity cannot be filled; nothing changes then.
+    pub fn insert_protected(
+        &mut self,
+        p: Point,
+        protected: &dyn Fn(u32, u32) -> bool,
+    ) -> Result<Inserted, DelaunayError> {
+        let i = self.points.len() as u32;
+        self.points.push(p);
+        self.vertex_tet.push(NONE);
+        let result = self.insert_index_protected(i, protected);
+        if !matches!(result, Ok(Inserted::New(_))) {
+            self.points.pop();
+            self.vertex_tet.pop();
+        }
+        result
+    }
+
+    fn insert_index_protected(
+        &mut self,
+        i: u32,
+        protected: &dyn Fn(u32, u32) -> bool,
+    ) -> Result<Inserted, DelaunayError> {
+        let fail = DelaunayError::Cavity { point: i };
+        let p = *self.pt(i);
+        let s = crate::prof::scope("cdt insert: locate");
+        let t0 = self.locate(&p);
+        drop(s);
+        if self.is_ghost(t0) {
+            return Err(DelaunayError::Outside { point: i });
+        }
+        for &v in &self.tets[t0 as usize].v {
+            if implicit::coincident(self.pt(v), &p) {
+                return Ok(Inserted::Duplicate(v));
+            }
+        }
+        // Every tet whose closure contains p: connected across the faces p
+        // lies on.
+        let s = crate::prof::scope("cdt insert: must and conflicts");
+        let mut must = vec![t0];
+        let mut k = 0;
+        while k < must.len() {
+            let t = must[k];
+            k += 1;
+            let v = self.tets[t as usize].v;
+            for j in 0..4 {
+                let u = self.tets[t as usize].n[j];
+                if must.contains(&u) {
+                    continue;
+                }
+                let f = face(&v, j);
+                let on = if f.contains(&GHOST) {
+                    let r: Vec<u32> = f.iter().copied().filter(|&x| x != GHOST).collect();
+                    implicit::collinear(self.pt(r[0]), self.pt(r[1]), &p)
+                } else {
+                    self.orient(f, &p) == Sign::Zero
+                };
+                if on {
+                    must.push(u);
+                }
+            }
+        }
+        // Start from the conflict region around them.
+        let epoch = self.next_epoch();
+        for &t in &must {
+            self.stamp[t as usize] = epoch;
+        }
+        let mut cavity = must.clone();
+        let mut k = 0;
+        while k < cavity.len() {
+            let t = cavity[k];
+            k += 1;
+            for j in 0..4 {
+                let u = self.tets[t as usize].n[j];
+                if self.stamp[u as usize] != epoch && self.conflict(u, &p) {
+                    self.stamp[u as usize] = epoch;
+                    cavity.push(u);
+                }
+            }
+        }
+        drop(s);
+        // Shrink, one tet at a time, until the cavity is valid.
+        let _s = crate::prof::scope("cdt insert: shrink cavity");
+        loop {
+            // Keep what is connected to the tets containing p.
+            let mut reach = must.clone();
+            let mut seen = must.clone();
+            let mut k = 0;
+            while k < reach.len() {
+                let t = reach[k];
+                k += 1;
+                for j in 0..4 {
+                    let u = self.tets[t as usize].n[j];
+                    if self.stamp[u as usize] == epoch && !seen.contains(&u) {
+                        seen.push(u);
+                        reach.push(u);
+                    }
+                }
+            }
+            for &t in &cavity {
+                if !seen.contains(&t) {
+                    self.stamp[t as usize] = 0;
+                }
+            }
+            cavity = reach;
+            match self.cavity_violation(&cavity, &must, &p, protected) {
+                Violation::None => break,
+                Violation::Remove(t) => {
+                    self.stamp[t as usize] = 0;
+                    cavity.retain(|&x| x != t);
+                }
+                Violation::Stuck => {
+                    for &t in &cavity {
+                        self.stamp[t as usize] = 0;
+                    }
+                    return Err(fail);
+                }
+            }
+        }
+        drop(_s);
+        let _s = crate::prof::scope("cdt insert: fill");
+        self.fill_cavity(i, &cavity)
+    }
+
+    /// The first thing wrong with a constrained cavity, and a tet to take out
+    /// for it (never one of `must`).
+    fn cavity_violation(
+        &self,
+        cavity: &[u32],
+        must: &[u32],
+        p: &Point,
+        protected: &dyn Fn(u32, u32) -> bool,
+    ) -> Violation {
+        let epoch = self.epoch;
+        let inside = |t: u32| self.stamp[t as usize] == epoch;
+        // A boundary face p does not strictly see.
+        for &t in cavity {
+            if must.contains(&t) {
+                continue;
+            }
+            for j in 0..4 {
+                let u = self.tets[t as usize].n[j];
+                if !inside(u) && !self.sees(t, j, p) {
+                    return Violation::Remove(t);
+                }
+            }
+        }
+        // A protected edge with every tet around it in the cavity.
+        for &t in cavity {
+            let v = self.tets[t as usize].v;
+            for (a, b) in EDGES {
+                let (x, y) = (v[a], v[b]);
+                if x == GHOST || y == GHOST || !protected(x, y) {
+                    continue;
+                }
+                let Some(ring) = self.edge_ring(x, y) else {
+                    continue;
+                };
+                if ring.iter().all(|&r| inside(r)) {
+                    return match ring.iter().find(|r| !must.contains(r)) {
+                        Some(&r) => Violation::Remove(r),
+                        None => Violation::Stuck,
+                    };
+                }
+            }
+        }
+        // A vertex inside the cavity, on no boundary face.
+        let mut on_boundary: Vec<u32> = cavity
+            .iter()
+            .flat_map(|&t| (0..4).map(move |j| (t, j)))
+            .filter(|&(t, j)| !inside(self.tets[t as usize].n[j]))
+            .flat_map(|(t, j)| face(&self.tets[t as usize].v, j))
+            .collect();
+        on_boundary.sort_unstable();
+        on_boundary.dedup();
+        for &t in cavity {
+            for x in self.tets[t as usize].v {
+                if on_boundary.binary_search(&x).is_err() {
+                    return match cavity
+                        .iter()
+                        .find(|&&r| !must.contains(&r) && self.tets[r as usize].v.contains(&x))
+                    {
+                        Some(&r) => Violation::Remove(r),
+                        None => Violation::Stuck,
+                    };
+                }
+            }
+        }
+        Violation::None
+    }
+
+    fn orient4(&self, v: [u32; 4]) -> Sign {
+        let [a, b, c, d] = v.map(|x| self.pt(x));
+        implicit::orient3d(a, b, c, d)
+    }
+
+    /// The tets around edge `xy` in cyclic order (ghosts included), or `None`
+    /// if `xy` is not an edge.
+    #[must_use]
+    pub fn edge_ring(&self, x: u32, y: u32) -> Option<Vec<u32>> {
+        let start = *self
+            .star(x)
+            .iter()
+            .find(|&&t| self.tets[t as usize].v.contains(&y))?;
+        let mut ring = vec![start];
+        let (mut prev, mut t) = (NONE, start);
+        loop {
+            let tet = self.tets[t as usize];
+            // The two faces holding x and y are opposite the other vertices.
+            let next = (0..4)
+                .filter(|&k| tet.v[k] != x && tet.v[k] != y)
+                .map(|k| tet.n[k])
+                .find(|&u| u != prev)?;
+            if next == start {
+                return Some(ring);
+            }
+            if ring.len() > self.tets.len() {
+                return None;
+            }
+            ring.push(next);
+            (prev, t) = (t, next);
+        }
+    }
+
+    /// Replace the real tets `old` by `new` if that is a valid local
+    /// retriangulation: every new tet positive, and the faces of `new` that
+    /// are not shared between new tets exactly the boundary of `old`, with the
+    /// same orientation. Then both tile the same region. Returns whether it
+    /// was done; nothing changes otherwise.
+    fn replace(&mut self, old: &[u32], new: &[[u32; 4]]) -> bool {
+        // Ghosts (the vertex at infinity last) only take part in hull flips,
+        // whose callers check the hull stays the same.
+        if new.iter().any(|v| v[..3].contains(&GHOST)) {
+            return false;
+        }
+        if new
+            .iter()
+            .any(|&v| v[3] != GHOST && self.orient4(v) != Sign::Positive)
+        {
+            return false;
+        }
+        // The boundary of `old`, oriented outward, with the tet beyond.
+        let mut boundary: Vec<([u32; 3], u32)> = Vec::new();
+        for &t in old {
+            let tet = self.tets[t as usize];
+            for j in 0..4 {
+                if !old.contains(&tet.n[j]) {
+                    boundary.push((rotated(face(&tet.v, j)), tet.n[j]));
+                }
+            }
+        }
+        boundary.sort_unstable();
+        let faces: Vec<[u32; 3]> = new
+            .iter()
+            .flat_map(|v| (0..4).map(move |j| rotated(face(v, j))))
+            .collect();
+        let mut matched = 0;
+        for f in &faces {
+            let reverse = rotated([f[0], f[2], f[1]]);
+            if faces.contains(&reverse) {
+                continue;
+            }
+            if boundary.binary_search_by(|(b, _)| b.cmp(f)).is_err() {
+                return false;
+            }
+            matched += 1;
+        }
+        if matched != boundary.len() {
+            return false;
+        }
+        for &t in old {
+            self.kill(t);
+        }
+        let ids: Vec<u32> = new.iter().map(|&v| self.alloc(v)).collect();
+        let mut internal: Vec<([u32; 3], u32, usize)> = Vec::new();
+        for &id in &ids {
+            let v = self.tets[id as usize].v;
+            for j in 0..4 {
+                let f = rotated(face(&v, j));
+                match boundary.binary_search_by(|(b, _)| b.cmp(&f)) {
+                    Ok(at) => {
+                        let u = boundary[at].1;
+                        self.tets[id as usize].n[j] = u;
+                        let key = sorted3(f);
+                        if let Some(m) =
+                            (0..4).find(|&m| sorted3(face(&self.tets[u as usize].v, m)) == key)
+                        {
+                            self.tets[u as usize].n[m] = id;
+                        }
+                    }
+                    Err(_) => internal.push((sorted3(f), id, j)),
+                }
+            }
+        }
+        internal.sort_unstable();
+        for pair in internal.chunks(2) {
+            if let [(_, ta, ka), (_, tb, kb)] = *pair {
+                self.tets[ta as usize].n[ka] = tb;
+                self.tets[tb as usize].n[kb] = ta;
+            }
+        }
+        self.last = ids[0];
+        true
+    }
+
+    /// The 2-3 flip of face `j` of tet `t`: the two tets sharing it become
+    /// three around the edge joining their apices, if that is valid.
+    pub fn flip23(&mut self, t: u32, j: usize) -> bool {
+        let tet = self.tets[t as usize];
+        let u = tet.n[j];
+        if !tet.alive || self.is_ghost(t) || self.is_ghost(u) {
+            return false;
+        }
+        let f = face(&tet.v, j);
+        let a = tet.v[j];
+        let Some(&w) = self.tets[u as usize].v.iter().find(|x| !f.contains(x)) else {
+            return false;
+        };
+        let new = [[f[0], f[1], a, w], [f[1], f[2], a, w], [f[2], f[0], a, w]];
+        self.replace(&[t, u], &new)
+    }
+
+    /// The 3-2 flip of edge `xy` with exactly three tets around it, if valid.
+    fn flip32(&mut self, ring: &[u32], x: u32, y: u32) -> bool {
+        let mut p: Vec<u32> = ring
+            .iter()
+            .flat_map(|&t| self.tets[t as usize].v)
+            .filter(|&v| v != x && v != y)
+            .collect();
+        p.sort_unstable();
+        p.dedup();
+        let [p0, p1, p2] = p[..] else {
+            return false;
+        };
+        self.replace(ring, &[[p0, p1, p2, x], [p0, p2, p1, y]])
+            || self.replace(ring, &[[p0, p2, p1, x], [p0, p1, p2, y]])
+    }
+
+    /// The 2-2 flip of hull edge `xy` whose ring is `[ghost, real, real,
+    /// ghost]`: the hull faces `xya` and `xyc` are coplanar, and the edge
+    /// becomes `ac`, if that is valid. The hull does not change.
+    fn flip22_hull(&mut self, ring: &[u32], x: u32, y: u32) -> bool {
+        let apex = |t: u32, not: &[u32]| {
+            self.tets[t as usize]
+                .v
+                .into_iter()
+                .find(|v| !not.contains(v) && *v != GHOST)
+        };
+        let (Some(a), Some(c)) = (apex(ring[0], &[x, y]), apex(ring[3], &[x, y])) else {
+            return false;
+        };
+        let Some(w) = apex(ring[1], &[x, y, a]) else {
+            return false;
+        };
+        if self.orient4([x, y, a, c]) != Sign::Zero {
+            return false;
+        }
+        let mut new = Vec::with_capacity(4);
+        for e in [x, y] {
+            let mut v = [a, c, e, w];
+            if self.orient4(v) == Sign::Negative {
+                v.swap(0, 1);
+            }
+            // The hull face, outward from the real tet, is opposite w.
+            let f = face(&v, 3);
+            new.push(v);
+            new.push([f[0], f[1], f[2], GHOST]);
+        }
+        self.replace(ring, &new)
+    }
+
+    /// Remove edge `xy` by flips: 2-3 flips of faces around it shrink its
+    /// ring to three tets, then a 3-2 flip removes it. Greedy, so it can fail
+    /// part way (the tetrahedralization stays valid). Never removes an edge
+    /// `protected` accepts.
+    fn remove_edge(&mut self, x: u32, y: u32, protected: &dyn Fn(u32, u32) -> bool) -> bool {
+        if protected(x, y) {
+            return false;
+        }
+        loop {
+            let Some(mut ring) = self.edge_ring(x, y) else {
+                return true;
+            };
+            if ring.iter().any(|&t| self.is_ghost(t)) {
+                // A hull edge: its ring is two adjacent ghosts and real tets.
+                // Start at the ghost a real tet follows, shrink the real part
+                // to two, then 2-2 flip.
+                let n = ring.len();
+                let Some(g) =
+                    (0..n).find(|&k| self.is_ghost(ring[k]) && !self.is_ghost(ring[(k + 1) % n]))
+                else {
+                    return false;
+                };
+                ring.rotate_left(g);
+                if n < 4 || !self.is_ghost(ring[n - 1]) {
+                    return false;
+                }
+                if n == 4 {
+                    return self.flip22_hull(&ring, x, y);
+                }
+                let flipped = (1..n - 2).any(|i| {
+                    let (t, u) = (ring[i], ring[i + 1]);
+                    (0..4)
+                        .find(|&j| self.tets[t as usize].n[j] == u)
+                        .is_some_and(|j| self.flip23(t, j))
+                });
+                if !flipped {
+                    return false;
+                }
+                continue;
+            }
+            if ring.len() <= 3 {
+                return ring.len() == 3 && self.flip32(&ring, x, y);
+            }
+            let n = ring.len();
+            let flipped = (0..n).any(|i| {
+                let (t, u) = (ring[i], ring[(i + 1) % n]);
+                (0..4)
+                    .find(|&j| self.tets[t as usize].n[j] == u)
+                    .is_some_and(|j| self.flip23(t, j))
+            });
+            if !flipped {
+                return false;
+            }
+        }
+    }
+
+    /// What the segment from vertex `a` to vertex `b` first meets after
+    /// leaving `a`.
+    fn crossing(&self, a: u32, b: u32) -> Crossing {
+        let pb = *self.pt(b);
+        for t in self.star(a) {
+            if self.is_ghost(t) {
+                continue;
+            }
+            let v = self.tets[t as usize].v;
+            let Some(k) = v.iter().position(|&x| x == a) else {
+                continue;
+            };
+            let mut zeros = Vec::new();
+            let mut outside = false;
+            for j in (0..4).filter(|&j| j != k) {
+                match self.orient(face(&v, j), &pb) {
+                    Sign::Positive => {
+                        outside = true;
+                        break;
+                    }
+                    Sign::Zero => zeros.push(j),
+                    Sign::Negative => {}
+                }
+            }
+            if outside {
+                continue;
+            }
+            return match zeros[..] {
+                [] if self.orient(face(&v, k), &pb) == Sign::Positive => Crossing::Face { t, j: k },
+                [] => Crossing::None,
+                [z] => {
+                    let e: Vec<u32> = face(&v, z).into_iter().filter(|&x| x != a).collect();
+                    Crossing::Edge { x: e[0], y: e[1] }
+                }
+                _ => Crossing::None,
+            };
+        }
+        Crossing::None
+    }
+
+    /// One flip, or edge removal, toward making `ab` an edge, from `a`'s end.
+    fn flip_toward(&mut self, a: u32, b: u32, protected: &dyn Fn(u32, u32) -> bool) -> bool {
+        match self.crossing(a, b) {
+            Crossing::Face { t, j } => {
+                if self.flip23(t, j) {
+                    return true;
+                }
+                // Not convex across the face: remove the edge in the way.
+                let tet = self.tets[t as usize];
+                let f = face(&tet.v, j);
+                let Some(&w) = self.tets[tet.n[j] as usize]
+                    .v
+                    .iter()
+                    .find(|x| !f.contains(x))
+                else {
+                    return false;
+                };
+                (0..3).any(|m| {
+                    let (e0, e1) = (f[m], f[(m + 1) % 3]);
+                    self.orient4([e0, e1, a, w]) != Sign::Positive
+                        && self.remove_edge(e0, e1, protected)
+                })
+            }
+            Crossing::Edge { x, y } => self.remove_edge(x, y, protected),
+            Crossing::None => false,
+        }
+    }
+
+    /// Try to make `ab` an edge by flips alone, at most `max_steps` steps,
+    /// never removing an edge `protected` accepts. The result need not be
+    /// Delaunay. Returns whether `ab` is an edge.
+    pub fn recover_edge(
+        &mut self,
+        a: u32,
+        b: u32,
+        protected: &dyn Fn(u32, u32) -> bool,
+        max_steps: usize,
+    ) -> bool {
+        for _ in 0..max_steps {
+            if self.has_edge(a, b) {
+                return true;
+            }
+            if !(self.flip_toward(a, b, protected) || self.flip_toward(b, a, protected)) {
+                break;
+            }
+        }
+        // A failed attempt keeps its flips: undoing them was measured to
+        // recover fewer segments overall.
+        self.has_edge(a, b)
     }
 
     /// Structural and geometric validity: every real tet positive (exactly),
