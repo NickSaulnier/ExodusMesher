@@ -244,8 +244,12 @@ pub fn recover_faces(
         }
         p
     };
-    let crossed =
-        |dt: &ExactDelaunay, f: &Facet| !dt.facet_crossings(f.corners, &f.vertices()).is_empty();
+    // A facet with no points inside whose subfaces are all faces is covered;
+    // otherwise look for an edge meeting it.
+    let crossed = |dt: &ExactDelaunay, f: &Facet| {
+        !(f.inside.is_empty() && f.subfaces.iter().all(|&s| dt.has_face(s)))
+            && !dt.facet_crossings(f.corners, &f.vertices()).is_empty()
+    };
     let crossed_before = facets.iter().filter(|f| crossed(&dt, f)).count();
     // 1. Flips.
     for pass in 0..MAX_PASSES {
@@ -283,7 +287,8 @@ pub fn recover_faces(
             break;
         }
     }
-    // A recovered facet stays recovered: its faces are protected.
+    // A recovered facet stays recovered, its faces protected, so only these
+    // are checked again (every facet is, at the end).
     let mut active: Vec<usize> = (0..facets.len())
         .filter(|&ti| crossed(&dt, &facets[ti]))
         .collect();
@@ -301,7 +306,15 @@ pub fn recover_faces(
             let is_protected = |x: u32, y: u32| protected.contains(&key(x, y));
             let f = &facets[ti];
             let _s = crate::prof::scope("cdt faces: cavity");
-            if !dt.recover_facet_by_cavity(f.corners, &f.vertices(), &is_protected) {
+            if dt.recover_facet_by_cavity(f.corners, &f.vertices(), &is_protected) {
+                // The cavity chose how the uncovered part is triangulated:
+                // read it back, so the faces it made are protected.
+                if facets[ti].inside.is_empty() {
+                    if let Some(s) = triangulate(&dt, &facets[ti].polygon) {
+                        facets[ti].subfaces = s;
+                    }
+                }
+            } else {
                 left.push(ti);
             }
         }
@@ -341,7 +354,7 @@ pub fn recover_faces(
     let mut missing = Vec::new();
     let mut subfaces = Vec::new();
     for (ti, f) in facets.iter().enumerate() {
-        if active.contains(&ti) && crossed(&dt, f) {
+        if crossed(&dt, f) {
             missing.push(ti as u32);
         } else {
             subfaces.extend(faces_on(&dt, &f.vertices()).into_iter().map(|v| Subface {

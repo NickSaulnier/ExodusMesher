@@ -5,7 +5,7 @@
 
 use mesher_geom::Point3;
 use mesher_geom::implicit::Point;
-use mesher_tet::cdt::{ExactDelaunay, Inserted, recover_faces, recover_segments};
+use mesher_tet::cdt::{ExactDelaunay, Inserted, mesh_region, recover_faces, recover_segments};
 use mesher_tet::delaunay;
 
 struct Rng(u64);
@@ -409,9 +409,10 @@ fn schonhardt() -> Surface {
     (p, f)
 }
 
-/// A large tetrahedron with a small one just above and just below the
-/// middle of its base, a tenth of their size from it: the Delaunay edges
-/// between the small ones cross the base.
+/// A large tetrahedron with a small one just above the middle of its base
+/// (a void inside it, faces inward) and one just below (outside), a tenth
+/// of their size from it: the Delaunay edges between the small ones cross
+/// the base.
 fn sandwich() -> Surface {
     let tet = |c: Point3, r: f64, flip: bool| -> Vec<Point3> {
         let z = if flip { -r } else { r };
@@ -426,7 +427,8 @@ fn sandwich() -> Surface {
     p.extend(tet([0.1, 0.05, 0.02], 0.2, false));
     p.extend(tet([-0.05, 0.1, -0.02], 0.2, true));
     let mut f = Vec::new();
-    for (base, flip) in [(0u32, false), (4, false), (8, true)] {
+    // Reversed: the void, and the mirrored one below to face outward.
+    for (base, flip) in [(0u32, false), (4, true), (8, true)] {
         let [a, b, c, d] = [base, base + 1, base + 2, base + 3];
         let faces = [[a, c, b], [a, b, d], [b, c, d], [c, a, d]];
         for t in faces {
@@ -471,4 +473,81 @@ fn an_untetrahedralizable_prism_is_recovered_with_steiner_points() {
     assert_eq!(check_faces("schonhardt", &(p.clone(), f.clone())), 0);
     let r = recover_faces(&p, &f, 0, 5).unwrap();
     assert!(r.steiner + r.steiner_on_faces > 0);
+}
+
+/// A unit cube with a cube of side 0.4 removed from its middle (the inner
+/// shell faces inward).
+fn hollow_cube() -> Surface {
+    let (mut p, mut f) = cube();
+    let (inner, faces) = cube();
+    let n = p.len() as u32;
+    p.extend(inner.iter().map(|q| q.map(|x| 0.3 + 0.4 * x)));
+    f.extend(faces.iter().map(|t| [t[0] + n, t[2] + n, t[1] + n]));
+    (p, f)
+}
+
+/// The inside tets fill exactly the volume the surface encloses, and the
+/// boundary is one outward face per subface, covering the surface.
+fn check_region(name: &str, (p, f): &Surface) {
+    let r = mesh_region(p, f, 0, 5).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let at = |v: u32| r.dt().points()[v as usize].approx();
+    let det = |a: Point3, b: Point3, c: Point3| {
+        a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0])
+    };
+    let enclosed: f64 = f
+        .iter()
+        .map(|t| det(p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]) / 6.0)
+        .sum::<f64>()
+        .abs();
+    let volume: f64 = r
+        .tets
+        .iter()
+        .map(|t| mesher_tet::quality::float_volume(t.map(at)))
+        .sum();
+    // The divergence theorem over the boundary, outward, gives it again.
+    let through_boundary: f64 = r
+        .boundary
+        .iter()
+        .map(|(t, _)| det(at(t[0]), at(t[1]), at(t[2])) / 6.0)
+        .sum();
+    let tol = 1e-9 * enclosed.max(1.0);
+    assert!(
+        (volume - enclosed).abs() <= tol,
+        "{name}: {volume} against {enclosed}"
+    );
+    assert!(
+        (through_boundary - enclosed).abs() <= tol,
+        "{name}: boundary {through_boundary}"
+    );
+    assert_eq!(r.boundary.len(), r.recovered.subfaces.len(), "{name}");
+    for &(face, triangle) in &r.boundary {
+        let s = r.recovered.subfaces.iter().find(|s| {
+            let (mut a, mut b) = (s.v, face);
+            a.sort_unstable();
+            b.sort_unstable();
+            a == b
+        });
+        assert_eq!(s.map(|s| s.triangle), Some(triangle), "{name}");
+    }
+    eprintln!(
+        "{name:<20} {:>6} tets inside, {:>5} boundary faces",
+        r.tets.len(),
+        r.boundary.len()
+    );
+}
+
+#[test]
+fn regions_are_the_inside_of_the_surface() {
+    check_region("cube", &cube());
+    check_region("hollow cube", &hollow_cube());
+    check_region("uv sphere", &uv_sphere(16, 10, [0.0; 3], false));
+    check_region(
+        "rounded uv sphere",
+        &uv_sphere(16, 10, [1.0, 1.0, 1.5], true),
+    );
+    check_region("sharp wedge", &sharp_wedge());
+    check_region("schonhardt", &schonhardt());
+    check_region("sandwich", &sandwich());
+    check_region("fine uv sphere", &uv_sphere(48, 24, [0.3, -0.2, 0.1], true));
 }

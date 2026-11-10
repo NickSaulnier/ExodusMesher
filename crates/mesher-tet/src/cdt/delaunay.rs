@@ -1288,6 +1288,49 @@ impl ExactDelaunay {
         s[0] != Sign::Zero && s.iter().all(|&e| e == s[0])
     }
 
+    /// Does the edge `xy`, lying in the plane of triangle `f`, meet the
+    /// triangle's interior? Exact: in 2D, the open segment misses the open
+    /// triangle exactly when a side's line or the segment's own line weakly
+    /// separates them.
+    fn lies_across_triangle(&self, x: u32, y: u32, f: [u32; 3]) -> bool {
+        let [a, b, c] = f.map(|v| self.pt(v));
+        let Some(axis) = (0..3).find(|&k| implicit::orient2d_projected(a, b, c, k) != Sign::Zero)
+        else {
+            return false;
+        };
+        let o = |p: &Point, q: &Point, r: &Point| implicit::orient2d_projected(p, q, r, axis);
+        let (px, py) = (self.pt(x), self.pt(y));
+        for k in 0..3 {
+            let (u, v, w) = (
+                self.pt(f[k]),
+                self.pt(f[(k + 1) % 3]),
+                self.pt(f[(k + 2) % 3]),
+            );
+            let inner = o(u, v, w);
+            let off = |p: &Point| {
+                let s = o(u, v, p);
+                s == Sign::Zero || s != inner
+            };
+            if off(px) && off(py) {
+                return false;
+            }
+        }
+        let sides = [a, b, c].map(|p| o(px, py, p));
+        !(sides.iter().all(|&s| s != Sign::Negative) || sides.iter().all(|&s| s != Sign::Positive))
+    }
+
+    /// Does the edge `xy` meet the interior of triangle `f`, crossing it or
+    /// lying in its plane across it? Exact.
+    fn meets_triangle(&self, x: u32, y: u32, f: [u32; 3]) -> bool {
+        let sx = self.orient4([f[0], f[1], f[2], x]);
+        let sy = self.orient4([f[0], f[1], f[2], y]);
+        if sx == Sign::Zero && sy == Sign::Zero {
+            self.lies_across_triangle(x, y, f)
+        } else {
+            self.crosses_triangle(x, y, f)
+        }
+    }
+
     /// The edges crossing the interior of triangle `f`, from the tets around
     /// its sides: where the triangle is not a face but its sides are edges,
     /// it leaves some tet at a side through the edge opposite that side.
@@ -1358,14 +1401,16 @@ impl ExactDelaunay {
         })
     }
 
-    /// The edges crossing the interior of the input triangle with vertices
+    /// The edges meeting the interior of the input triangle with vertices
     /// `corners`, whose sides are chains of edges, from the tets at
-    /// `on_facet` (every vertex on the triangle). Each part of the triangle
-    /// not covered by faces is bounded by such vertices, and the tets there
-    /// have an edge crossing it, so this is empty exactly when the triangle
-    /// is a union of faces. Sorted.
+    /// `on_facet` (every vertex on the triangle): crossing it, or lying in
+    /// its plane across it with an end off it. Each part of the triangle not covered by faces
+    /// is bounded by such vertices, and the tets there have such an edge, so
+    /// this is empty exactly when the triangle is a union of faces. Sorted.
     #[must_use]
     pub fn facet_crossings(&self, corners: [u32; 3], on_facet: &[u32]) -> Vec<(u32, u32)> {
+        let mut on: Vec<u32> = on_facet.to_vec();
+        on.sort_unstable();
         let mut out = BTreeSet::new();
         for &v in on_facet {
             for t in self.star(v) {
@@ -1375,7 +1420,10 @@ impl ExactDelaunay {
                 let w = self.tets[t as usize].v;
                 for (i, j) in EDGES {
                     let (x, y) = (w[i].min(w[j]), w[i].max(w[j]));
-                    if !out.contains(&(x, y)) && self.crosses_triangle(x, y, corners) {
+                    // An edge between two of its vertices is one of its
+                    // own, in it.
+                    let own = on.binary_search(&x).is_ok() && on.binary_search(&y).is_ok();
+                    if !own && !out.contains(&(x, y)) && self.meets_triangle(x, y, corners) {
                         out.insert((x, y));
                     }
                 }
@@ -1783,6 +1831,53 @@ impl ExactDelaunay {
         // A failed attempt keeps its flips: undoing them was measured to
         // recover fewer segments overall.
         self.has_edge(a, b)
+    }
+
+    /// Label every real tet inside or outside the surface whose faces `wall`
+    /// accepts (vertices sorted): a flood from the ghosts, which are outside,
+    /// that toggles at every wall it crosses. Topological, so no tet is too
+    /// thin to classify. Returns each real tet, positively oriented, in slot
+    /// order, with whether it is inside, or a wall face where the labels
+    /// disagree (the walls do not bound a region: a face is missing).
+    ///
+    /// # Errors
+    /// The face where two labels meet that disagree.
+    pub fn flood_regions(
+        &self,
+        wall: &dyn Fn([u32; 3]) -> bool,
+    ) -> Result<Vec<([u32; 4], bool)>, [u32; 3]> {
+        let mut label: Vec<Option<bool>> = vec![None; self.tets.len()];
+        let mut queue: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+        for (t, tet) in self.tets.iter().enumerate() {
+            if tet.alive && tet.v[3] == GHOST {
+                label[t] = Some(false);
+                queue.push_back(t as u32);
+            }
+        }
+        while let Some(t) = queue.pop_front() {
+            let tet = self.tets[t as usize];
+            let here = label[t as usize].unwrap_or(false);
+            for j in 0..4 {
+                let u = tet.n[j];
+                let f = sorted3(face(&tet.v, j));
+                let want = here ^ (!f.contains(&GHOST) && wall(f));
+                match label[u as usize] {
+                    None => {
+                        label[u as usize] = Some(want);
+                        queue.push_back(u);
+                    }
+                    Some(have) if have != want => return Err(f),
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(self
+            .tets
+            .iter()
+            .zip(&label)
+            .filter(|(t, _)| t.alive && t.v[3] != GHOST)
+            .map(|(t, l)| (t.v, l.unwrap_or(false)))
+            .collect())
     }
 
     /// Structural and geometric validity: every real tet positive (exactly),
