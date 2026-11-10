@@ -5,7 +5,7 @@
 
 use mesher_geom::Point3;
 use mesher_geom::implicit::Point;
-use mesher_tet::cdt::{ExactDelaunay, Inserted, recover_segments};
+use mesher_tet::cdt::{ExactDelaunay, Inserted, recover_faces, recover_segments};
 use mesher_tet::delaunay;
 
 struct Rng(u64);
@@ -346,4 +346,129 @@ fn edge_removal_keeps_the_tetrahedralization_valid() {
         }
     }
     assert!(flipped >= 1, "{flipped} of 4 removed");
+}
+
+/// Every subface is a face, and each triangle's subfaces cover it: their
+/// areas sum to its area.
+fn check_faces(name: &str, (p, f): &Surface) -> usize {
+    let r = recover_faces(p, f, 0, 5).unwrap_or_else(|e| panic!("{name}: {e}"));
+    r.dt.check().unwrap_or_else(|e| panic!("{name}: {e}"));
+    let area = |t: [Point3; 3]| {
+        let u = [0, 1, 2].map(|k| t[1][k] - t[0][k]);
+        let w = [0, 1, 2].map(|k| t[2][k] - t[0][k]);
+        let n = [
+            u[1] * w[2] - u[2] * w[1],
+            u[2] * w[0] - u[0] * w[2],
+            u[0] * w[1] - u[1] * w[0],
+        ];
+        0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
+    };
+    for (ti, t) in f.iter().enumerate() {
+        let whole = area(t.map(|v| p[v as usize]));
+        let parts: f64 = r
+            .subfaces
+            .iter()
+            .filter(|s| s.triangle == ti as u32)
+            .map(|s| area(s.v.map(|v| r.dt.points()[v as usize].approx())))
+            .sum();
+        assert!(
+            (parts - whole).abs() <= 1e-9 * whole.max(1.0),
+            "{name}: triangle {ti}"
+        );
+    }
+    eprintln!(
+        "{name:<20} {:>5} subfaces, {:>4} missing after segments, {:>4} triangles crossed, {} + {} Steiner points",
+        r.subfaces.len(),
+        r.initially_missing,
+        r.missing.len(),
+        r.steiner,
+        r.steiner_on_faces
+    );
+    r.missing.len()
+}
+
+/// Schönhardt's twisted prism: a triangle over a triangle turned by 30°,
+/// each side quad split along its reflex diagonal. Its inside cannot be
+/// tetrahedralized without Steiner points.
+fn schonhardt() -> Surface {
+    let mut p = Vec::new();
+    for (z, turn) in [(0.0, 0.0), (1.0, std::f64::consts::FRAC_PI_6)] {
+        for k in 0..3 {
+            let a = turn + f64::from(k) * std::f64::consts::TAU / 3.0;
+            p.push([libm::cos(a), libm::sin(a), z]);
+        }
+    }
+    let mut f = vec![[0, 2, 1], [3, 4, 5]];
+    for k in 0..3u32 {
+        let (a, b) = (k, (k + 1) % 3);
+        let (c, d) = (a + 3, b + 3);
+        // The quad a b d c, split along a-d.
+        f.push([a, b, d]);
+        f.push([a, d, c]);
+    }
+    (p, f)
+}
+
+/// A large tetrahedron with a small one just above and just below the
+/// middle of its base, a tenth of their size from it: the Delaunay edges
+/// between the small ones cross the base.
+fn sandwich() -> Surface {
+    let tet = |c: Point3, r: f64, flip: bool| -> Vec<Point3> {
+        let z = if flip { -r } else { r };
+        vec![
+            [c[0] - r, c[1] - r, c[2]],
+            [c[0] + r, c[1] - r, c[2]],
+            [c[0], c[1] + r, c[2]],
+            [c[0], c[1], c[2] + z],
+        ]
+    };
+    let mut p = tet([0.0, 0.0, 0.0], 4.0, false);
+    p.extend(tet([0.1, 0.05, 0.02], 0.2, false));
+    p.extend(tet([-0.05, 0.1, -0.02], 0.2, true));
+    let mut f = Vec::new();
+    for (base, flip) in [(0u32, false), (4, false), (8, true)] {
+        let [a, b, c, d] = [base, base + 1, base + 2, base + 3];
+        let faces = [[a, c, b], [a, b, d], [b, c, d], [c, a, d]];
+        for t in faces {
+            f.push(if flip { [t[0], t[2], t[1]] } else { t });
+        }
+    }
+    (p, f)
+}
+
+#[test]
+fn faces_are_recovered_by_flips() {
+    assert_eq!(check_faces("cube", &cube()), 0);
+    assert_eq!(
+        check_faces("uv sphere", &uv_sphere(16, 10, [0.0; 3], false)),
+        0
+    );
+    assert_eq!(
+        check_faces(
+            "rounded uv sphere",
+            &uv_sphere(16, 10, [1.0, 1.0, 1.5], true)
+        ),
+        0
+    );
+    assert_eq!(check_faces("sharp wedge", &sharp_wedge()), 0);
+    assert_eq!(
+        check_faces("fine uv sphere", &uv_sphere(48, 24, [0.3, -0.2, 0.1], true)),
+        0
+    );
+}
+
+#[test]
+fn faces_crossed_by_edges_are_recovered() {
+    let (p, f) = sandwich();
+    let r = recover_faces(&p, &f, 0, 5).unwrap();
+    assert!(r.initially_missing > 0, "the base should start crossed");
+    assert_eq!(check_faces("sandwich", &(p, f)), 0);
+}
+
+#[test]
+fn an_untetrahedralizable_prism_is_recovered_with_steiner_points() {
+    let (p, f) = schonhardt();
+    assert_eq!(check_faces("schonhardt", &(p.clone(), f.clone())), 0);
+    let r = recover_faces(&p, &f, 0, 5).unwrap();
+    assert!(r.steiner + r.steiner_on_faces > 0);
 }

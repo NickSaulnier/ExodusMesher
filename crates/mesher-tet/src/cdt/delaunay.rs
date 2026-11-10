@@ -14,6 +14,8 @@
 //! or constructed (LNC, BPT, LPI, TPI) and are never rounded. f64
 //! approximations are used only to order insertions.
 
+use std::collections::BTreeSet;
+
 use mesher_geom::Sign;
 use mesher_geom::implicit::{self, Point};
 
@@ -33,6 +35,17 @@ const MAX_RING: usize = 20;
 
 /// How deep edge removal recurses into removing the edges around an edge.
 const REMOVE_DEPTH: usize = 1;
+
+/// The most times a facet cavity grows before it gives up.
+const MAX_EXPANSIONS: usize = 4;
+
+/// What filling a facet cavity came to.
+enum Fill {
+    Done(Vec<[u32; 4]>),
+    /// Grow the cavity by these tets and try again.
+    Grow(Vec<u32>),
+    Fail,
+}
 
 /// What a segment from a vertex first meets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -559,18 +572,19 @@ impl ExactDelaunay {
         Ok(Inserted::New(i))
     }
 
-    /// Insert a point without removing any edge `protected` accepts: the
-    /// cavity starts as the Delaunay conflict region (reached across faces the
-    /// point strictly sees) and shrinks until every
-    /// boundary face is strictly visible from the point, no protected edge
-    /// and no vertex would be lost, keeping every tet whose closure contains
-    /// the point (after Si's constrained Bowyer-Watson in TetGen). The result
-    /// need not be Delaunay.
+    /// Insert a point without removing any edge `protected` accepts, or any
+    /// face whose three sides it accepts: the cavity starts as the Delaunay
+    /// conflict region (reached across faces the point strictly sees) and
+    /// shrinks until every boundary face is strictly visible from the point
+    /// and no protected edge or face and no vertex would be lost, keeping
+    /// every tet whose closure contains the point (after Si's constrained
+    /// Bowyer-Watson in TetGen). The result need not be Delaunay.
     ///
     /// # Errors
     /// [`DelaunayError::Outside`] when the point is outside the convex hull
     /// (segment points never are), [`DelaunayError::Cavity`] when it lies on
-    /// a protected edge or the cavity cannot be filled; nothing changes then.
+    /// a protected edge or face or the cavity cannot be filled; nothing
+    /// changes then.
     pub fn insert_protected(
         &mut self,
         p: Point,
@@ -739,6 +753,25 @@ impl ExactDelaunay {
                         None => Violation::Stuck,
                     };
                 }
+            }
+        }
+        // A protected face (every side protected) between two cavity tets.
+        for &t in cavity {
+            let tet = self.tets[t as usize];
+            for j in 0..4 {
+                let u = tet.n[j];
+                let f = face(&tet.v, j);
+                if u < t
+                    || !inside(u)
+                    || f.contains(&GHOST)
+                    || !(0..3).all(|k| protected(f[k], f[(k + 1) % 3]))
+                {
+                    continue;
+                }
+                return match [t, u].into_iter().find(|r| !must.contains(r)) {
+                    Some(r) => Violation::Remove(r),
+                    None => Violation::Stuck,
+                };
             }
         }
         // A vertex inside the cavity, on no boundary face.
@@ -1220,6 +1253,485 @@ impl ExactDelaunay {
             };
         }
         Crossing::None
+    }
+
+    /// The faces of real tets at vertex `v`, each with its vertices sorted,
+    /// sorted and without repeats.
+    #[must_use]
+    pub fn faces_at(&self, v: u32) -> Vec<[u32; 3]> {
+        let mut out: Vec<[u32; 3]> = self
+            .star(v)
+            .into_iter()
+            .filter(|&t| !self.is_ghost(t))
+            .flat_map(|t| {
+                let w = self.tets[t as usize].v;
+                (0..4).map(move |j| sorted3(face(&w, j)))
+            })
+            .filter(|f| f.contains(&v))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Does the edge `xy` cross the interior of triangle `f` at one point
+    /// inside it? Exact.
+    fn crosses_triangle(&self, x: u32, y: u32, f: [u32; 3]) -> bool {
+        let sx = self.orient4([f[0], f[1], f[2], x]);
+        let sy = self.orient4([f[0], f[1], f[2], y]);
+        if sx == Sign::Zero || sy == Sign::Zero || sx == sy {
+            return false;
+        }
+        let s: Vec<Sign> = (0..3)
+            .map(|k| self.orient4([x, y, f[k], f[(k + 1) % 3]]))
+            .collect();
+        s[0] != Sign::Zero && s.iter().all(|&e| e == s[0])
+    }
+
+    /// The edges crossing the interior of triangle `f`, from the tets around
+    /// its sides: where the triangle is not a face but its sides are edges,
+    /// it leaves some tet at a side through the edge opposite that side.
+    /// Sorted, without repeats.
+    fn face_crossings(&self, f: [u32; 3]) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for k in 0..3 {
+            let (a, b) = (f[k], f[(k + 1) % 3]);
+            let Some(ring) = self.edge_ring(a, b) else {
+                continue;
+            };
+            for t in ring {
+                if self.is_ghost(t) {
+                    continue;
+                }
+                let v = self.tets[t as usize].v;
+                let o: Vec<u32> = v.into_iter().filter(|&w| w != a && w != b).collect();
+                let (x, y) = (o[0].min(o[1]), o[0].max(o[1]));
+                if self.crosses_triangle(x, y, f) {
+                    out.push((x, y));
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Try to make triangle `f`, whose sides are edges, a face by flips:
+    /// remove an edge crossing it, at most `max_steps` times, never removing
+    /// an edge `protected` accepts (protect the triangle's sides). Returns
+    /// whether `f` is a face; a failed attempt keeps its flips.
+    pub fn recover_face(
+        &mut self,
+        f: [u32; 3],
+        protected: &dyn Fn(u32, u32) -> bool,
+        max_steps: usize,
+    ) -> bool {
+        for _ in 0..max_steps {
+            if self.has_face(f) {
+                return true;
+            }
+            if !(0..3).all(|k| self.has_edge(f[k], f[(k + 1) % 3])) {
+                return false;
+            }
+            let crossings = self.face_crossings(f);
+            if !crossings
+                .into_iter()
+                .any(|(x, y)| self.remove_edge(x, y, protected))
+            {
+                return false;
+            }
+        }
+        self.has_face(f)
+    }
+
+    /// The live real tet with face `f` (any vertex order) whose fourth vertex
+    /// is strictly on the negative side of `f` as ordered: the tet `f`, taken
+    /// as an outward face, bounds.
+    fn tet_inside(&self, f: [u32; 3]) -> Option<u32> {
+        self.star(f[0]).into_iter().find(|&t| {
+            let v = self.tets[t as usize].v;
+            !self.is_ghost(t)
+                && f.iter().all(|x| v.contains(x))
+                && v.iter()
+                    .find(|x| !f.contains(x))
+                    .is_some_and(|&w| self.orient(f, self.pt(w)) == Sign::Negative)
+        })
+    }
+
+    /// The edges crossing the interior of the input triangle with vertices
+    /// `corners`, whose sides are chains of edges, from the tets at
+    /// `on_facet` (every vertex on the triangle). Each part of the triangle
+    /// not covered by faces is bounded by such vertices, and the tets there
+    /// have an edge crossing it, so this is empty exactly when the triangle
+    /// is a union of faces. Sorted.
+    #[must_use]
+    pub fn facet_crossings(&self, corners: [u32; 3], on_facet: &[u32]) -> Vec<(u32, u32)> {
+        let mut out = BTreeSet::new();
+        for &v in on_facet {
+            for t in self.star(v) {
+                if self.is_ghost(t) {
+                    continue;
+                }
+                let w = self.tets[t as usize].v;
+                for (i, j) in EDGES {
+                    let (x, y) = (w[i].min(w[j]), w[i].max(w[j]));
+                    if !out.contains(&(x, y)) && self.crosses_triangle(x, y, corners) {
+                        out.insert((x, y));
+                    }
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Make an input triangle a union of faces by retetrahedralizing the
+    /// cavity of the tets crossing it (after Si's and Diazzi et al.'s cavity
+    /// retetrahedralization). `corners` are its vertices, whose sides are
+    /// chains of edges, and `on_facet` every vertex on it. Returns whether it
+    /// is a union of faces.
+    ///
+    /// The cavity is every tet whose interior meets the triangle's. Each of
+    /// those meets the plane only inside the triangle (its sides are edges),
+    /// so no boundary face of the cavity crosses the plane: the faces above
+    /// bound the upper half, those below the lower one, and both meet the
+    /// plane in the part of the triangle not covered by faces. One half is
+    /// filled with the Delaunay tetrahedralization of its vertices, in which
+    /// its boundary faces are recovered by flips; its tets are found by flood
+    /// fill, which leaves it only through faces on the plane, and those
+    /// faces then bound the other half, filled the same way. The cavity grows
+    /// across old boundary faces a fill lacks. The result goes in through the
+    /// validated local replacement. Fails, changing nothing, where a half's
+    /// boundary cannot be recovered, a protected edge or face would be lost,
+    /// or the cavity reaches the hull.
+    pub fn recover_facet_by_cavity(
+        &mut self,
+        corners: [u32; 3],
+        on_facet: &[u32],
+        protected: &dyn Fn(u32, u32) -> bool,
+    ) -> bool {
+        let side = |s: &Self, v: u32| s.orient4([corners[0], corners[1], corners[2], v]);
+        // Edges crossing the triangle's interior, from the tets at its
+        // vertices, then grown through their tets.
+        let mut seen_edges: BTreeSet<(u32, u32)> = BTreeSet::new();
+        let mut queue: Vec<(u32, u32)> = Vec::new();
+        let mut cavity: Vec<u32> = Vec::new();
+        let epoch = self.next_epoch();
+        let mut consider = |s: &mut Self, t: u32, queue: &mut Vec<(u32, u32)>| {
+            let v = s.tets[t as usize].v;
+            for (i, j) in EDGES {
+                let (x, y) = (v[i].min(v[j]), v[i].max(v[j]));
+                if y == GHOST || !seen_edges.insert((x, y)) {
+                    continue;
+                }
+                if s.crosses_triangle(x, y, corners) {
+                    queue.push((x, y));
+                }
+            }
+        };
+        for &v in on_facet {
+            for t in self.star(v) {
+                if !self.is_ghost(t) {
+                    consider(self, t, &mut queue);
+                }
+            }
+        }
+        while let Some((x, y)) = queue.pop() {
+            let Some(ring) = self.edge_ring(x, y) else {
+                return false;
+            };
+            for t in ring {
+                if self.is_ghost(t) {
+                    self.unstamp(&cavity);
+                    return false;
+                }
+                if self.stamp[t as usize] != epoch {
+                    self.stamp[t as usize] = epoch;
+                    cavity.push(t);
+                    consider(self, t, &mut queue);
+                }
+            }
+        }
+        if cavity.is_empty() {
+            return true;
+        }
+        // Grow the cavity across old boundary faces a half's fill lacks
+        // (TetGen's cavity expansion).
+        let mut result = None;
+        for _ in 0..MAX_EXPANSIONS {
+            match self.fill_facet_cavity(&cavity, protected, &side) {
+                Fill::Done(new) => {
+                    result = Some(new);
+                    break;
+                }
+                Fill::Grow(more) => {
+                    for t in more {
+                        if self.is_ghost(t) {
+                            self.unstamp(&cavity);
+                            return false;
+                        }
+                        if self.stamp[t as usize] != epoch {
+                            self.stamp[t as usize] = epoch;
+                            cavity.push(t);
+                        }
+                    }
+                }
+                Fill::Fail => {
+                    break;
+                }
+            }
+        }
+        self.unstamp(&cavity);
+        match result {
+            Some(new) => {
+                let _s = crate::prof::scope("cdt cavity: replace");
+                self.replace(&cavity, &new)
+            }
+            None => false,
+        }
+    }
+
+    fn unstamp(&mut self, tets: &[u32]) {
+        for &t in tets {
+            self.stamp[t as usize] = 0;
+        }
+    }
+
+    /// The new tets for a facet cavity (stamped with the current epoch), the
+    /// tets to grow it by, or failure.
+    fn fill_facet_cavity(
+        &self,
+        cavity: &[u32],
+        protected: &dyn Fn(u32, u32) -> bool,
+        side: &dyn Fn(&Self, u32) -> Sign,
+    ) -> Fill {
+        let s = crate::prof::scope("cdt cavity: halves");
+        let halves = self.facet_halves(cavity, protected, side);
+        drop(s);
+        let Some(halves) = halves else {
+            return Fill::Fail;
+        };
+        let on_plane = |v: u32| side(self, v) == Sign::Zero;
+        let mut grow = Vec::new();
+        // One half is filled from its old faces alone and chooses the
+        // triangulation of the missing region (the plane faces its flood fill
+        // reaches); the other must match it. Then the other way round.
+        for (open, closed) in [(0, 1), (1, 0)] {
+            let old = &halves[open];
+            let faces: Vec<[u32; 3]> = old.iter().map(|&(f, _)| f).collect();
+            let (tets, region) = match self.fill_half(&faces, Some(&on_plane)) {
+                Ok(x) => x,
+                Err(lost) => {
+                    self.grow_across(old, &lost, protected, &mut grow);
+                    continue;
+                }
+            };
+            let mut other = halves[closed].clone();
+            other.extend(region.iter().map(|f| ([f[0], f[2], f[1]], None)));
+            let faces: Vec<[u32; 3]> = other.iter().map(|&(f, _)| f).collect();
+            match self.fill_half(&faces, None) {
+                Ok((more, _)) => {
+                    let mut new = tets;
+                    new.extend(more);
+                    return Fill::Done(new);
+                }
+                Err(lost) => self.grow_across(&other, &lost, protected, &mut grow),
+            }
+        }
+        if grow.is_empty() {
+            return Fill::Fail;
+        }
+        grow.sort_unstable();
+        grow.dedup();
+        Fill::Grow(grow)
+    }
+
+    /// The tets beyond the lost old boundary faces `lost` of `half`, except
+    /// across a protected face.
+    fn grow_across(
+        &self,
+        half: &[([u32; 3], Option<u32>)],
+        lost: &[usize],
+        protected: &dyn Fn(u32, u32) -> bool,
+        grow: &mut Vec<u32>,
+    ) {
+        for &k in lost {
+            if let (f, Some(u)) = half[k] {
+                if !(0..3).all(|i| protected(f[i], f[(i + 1) % 3])) {
+                    grow.push(u);
+                }
+            }
+        }
+    }
+
+    /// The boundaries of a facet cavity's two halves, faces outward, each with
+    /// the tet beyond it, or `None` where a protected edge or face is inside
+    /// or a boundary face crosses the plane.
+    #[allow(clippy::type_complexity)]
+    fn facet_halves(
+        &self,
+        cavity: &[u32],
+        protected: &dyn Fn(u32, u32) -> bool,
+        side: &dyn Fn(&Self, u32) -> Sign,
+    ) -> Option<[Vec<([u32; 3], Option<u32>)>; 2]> {
+        let epoch = self.epoch;
+        let inside = |t: u32| self.stamp[t as usize] == epoch;
+        // No protected edge or face may be inside the cavity.
+        for &t in cavity {
+            let v = self.tets[t as usize].v;
+            for (i, j) in EDGES {
+                if protected(v[i], v[j]) {
+                    let ring = self.edge_ring(v[i], v[j])?;
+                    if ring.iter().all(|&r| inside(r)) {
+                        return None;
+                    }
+                }
+            }
+            for j in 0..4 {
+                let f = face(&v, j);
+                if inside(self.tets[t as usize].n[j])
+                    && (0..3).all(|k| protected(f[k], f[(k + 1) % 3]))
+                {
+                    return None;
+                }
+            }
+        }
+        // The boundary, outward, split by side of the plane.
+        let mut upper: Vec<([u32; 3], Option<u32>)> = Vec::new();
+        let mut lower: Vec<([u32; 3], Option<u32>)> = Vec::new();
+        for &t in cavity {
+            let v = self.tets[t as usize].v;
+            for j in 0..4 {
+                let u = self.tets[t as usize].n[j];
+                if inside(u) {
+                    continue;
+                }
+                let f = face(&v, j);
+                let signs: Vec<Sign> = f.iter().map(|&x| side(self, x)).collect();
+                if signs.iter().all(|&s| s != Sign::Negative) && signs.contains(&Sign::Positive) {
+                    upper.push((f, Some(u)));
+                } else if signs.iter().all(|&s| s != Sign::Positive)
+                    && signs.contains(&Sign::Negative)
+                {
+                    lower.push((f, Some(u)));
+                } else {
+                    return None;
+                }
+            }
+        }
+        Some([upper, lower])
+    }
+
+    /// The tets of the Delaunay tetrahedralization of the vertices of a
+    /// boundary (faces outward) that lie inside it, after recovering every
+    /// boundary face by flips. With `open`, the boundary may be open where
+    /// the hull lies on the plane of the vertices `open` accepts: the flood
+    /// fill leaves through those hull faces, which come back too (outward).
+    /// Otherwise the boundary faces that could not be recovered (none if
+    /// something else failed).
+    #[allow(clippy::type_complexity)]
+    fn fill_half(
+        &self,
+        boundary: &[[u32; 3]],
+        open: Option<&dyn Fn(u32) -> bool>,
+    ) -> Result<(Vec<[u32; 4]>, Vec<[u32; 3]>), Vec<usize>> {
+        let mut ids: Vec<u32> = boundary.iter().flatten().copied().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let local = |v: u32| ids.binary_search(&v).ok().map(|i| i as u32);
+        let points: Vec<Point> = ids.iter().map(|&v| *self.pt(v)).collect();
+        let s = crate::prof::scope("cdt cavity: delaunay");
+        let dt = ExactDelaunay::new(points, 0x5eed);
+        drop(s);
+        let _s = crate::prof::scope("cdt cavity: recover boundary");
+        let Ok(mut dt) = dt else {
+            return Err(Vec::new());
+        };
+        if !dt.duplicates().is_empty() {
+            return Err(Vec::new());
+        }
+        let faces: Vec<[u32; 3]> = boundary
+            .iter()
+            .map(|f| f.map(|v| local(v).unwrap_or(u32::MAX)))
+            .collect();
+        let mut keep: BTreeSet<(u32, u32)> = BTreeSet::new();
+        for f in &faces {
+            for k in 0..3 {
+                keep.insert((f[k].min(f[(k + 1) % 3]), f[k].max(f[(k + 1) % 3])));
+            }
+        }
+        let is_kept = |x: u32, y: u32| keep.contains(&(x.min(y), x.max(y)));
+        // Rounds while they make progress.
+        for _ in 0..4 {
+            let (mut all, mut progress) = (true, false);
+            for &(x, y) in &keep {
+                if !dt.has_edge(x, y) {
+                    if dt.recover_edge(x, y, &is_kept, 64) {
+                        progress = true;
+                    } else {
+                        all = false;
+                    }
+                }
+            }
+            for &f in &faces {
+                if !dt.has_face(f) {
+                    if dt.recover_face(f, &is_kept, 64) {
+                        progress = true;
+                    } else {
+                        all = false;
+                    }
+                }
+            }
+            if all || !progress {
+                break;
+            }
+        }
+        let lost: Vec<usize> = (0..faces.len())
+            .filter(|&k| !dt.has_face(faces[k]))
+            .collect();
+        if !lost.is_empty() {
+            return Err(lost);
+        }
+        let walls: BTreeSet<[u32; 3]> = faces.iter().map(|&f| sorted3(f)).collect();
+        // Flood fill from the inner side of every boundary face.
+        let mut region: Vec<[u32; 3]> = Vec::new();
+        let mut seen: BTreeSet<u32> = BTreeSet::new();
+        let mut stack = Vec::new();
+        for &f in &faces {
+            let Some(t) = dt.tet_inside(f) else {
+                return Err(Vec::new());
+            };
+            if seen.insert(t) {
+                stack.push(t);
+            }
+        }
+        while let Some(t) = stack.pop() {
+            let tet = dt.tets[t as usize];
+            for j in 0..4 {
+                if walls.contains(&sorted3(face(&tet.v, j))) {
+                    continue;
+                }
+                let u = tet.n[j];
+                if dt.is_ghost(u) {
+                    let f = face(&tet.v, j);
+                    if let Some(on) = open {
+                        if f.iter().all(|&v| on(ids[v as usize])) {
+                            region.push(f.map(|v| ids[v as usize]));
+                            continue;
+                        }
+                    }
+                    return Err(Vec::new());
+                }
+                if seen.insert(u) {
+                    stack.push(u);
+                }
+            }
+        }
+        Ok((
+            seen.into_iter()
+                .map(|t| dt.tets[t as usize].v.map(|v| ids[v as usize]))
+                .collect(),
+            region,
+        ))
     }
 
     /// One flip, or edge removal, toward making `ab` an edge, from `a`'s end.

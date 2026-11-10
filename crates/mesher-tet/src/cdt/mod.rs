@@ -12,11 +12,15 @@
 //!   that protects chosen edges.
 //! - [`segments`]: segment recovery by flips, then splitting with LNC
 //!   Steiner points.
+//! - [`faces`]: face recovery by flips, then cavity retetrahedralization,
+//!   then Steiner points on the faces.
 //!
-//! Face recovery, region marking and the pipeline integration follow.
+//! Region marking and the pipeline integration follow.
 
 pub mod delaunay;
+pub mod faces;
 pub mod segments;
 
 pub use delaunay::{DelaunayError, ExactDelaunay, GHOST, Inserted};
+pub use faces::{FaceError, RecoveredFaces, Subface, recover_faces};
 pub use segments::{RecoveredSegments, SegmentError, recover_segments};
