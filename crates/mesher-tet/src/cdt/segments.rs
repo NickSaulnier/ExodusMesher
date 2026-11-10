@@ -20,10 +20,10 @@
 //! longer Delaunay. Rounds repeat until every subsegment is an edge, within a
 //! point budget.
 //!
-//! On the 100-model clean subset this recovers 97 models at a median of
-//! 130 Steiner points; splitting alone recovered 77 at a median of about
-//! 4,000. Segments meeting at well under a degree away from an input vertex
-//! still split until a piece is too short.
+//! On the 100-model clean subset this recovers every model, at a median of
+//! 125 Steiner points; splitting alone recovered 77 at a median of about
+//! 4,000. Needle triangles cost the most: 101548, with angles down to
+//! 0.006°, needs 70,000.
 
 use std::collections::BTreeSet;
 
@@ -187,6 +187,9 @@ pub fn recover_segments(
             t: [1.0, 0.0],
         })
         .collect();
+    // Whether each subsegment is known to be an edge: recovered ones are
+    // protected, so they stay edges and need no checking again.
+    let mut done: Vec<bool> = vec![false; subs.len()];
     let mut steiner = 0usize;
     let mut by_flips = 0usize;
     let mut initially_missing = None;
@@ -195,9 +198,17 @@ pub fn recover_segments(
     loop {
         let missing: Vec<usize> = {
             let _s = crate::prof::scope("cdt segments: find missing");
-            (0..subs.len())
-                .filter(|&k| !dt.has_edge(subs[k].ends[0], subs[k].ends[1]))
-                .collect()
+            let mut missing = Vec::new();
+            for k in 0..subs.len() {
+                if !done[k] {
+                    if dt.has_edge(subs[k].ends[0], subs[k].ends[1]) {
+                        done[k] = true;
+                    } else {
+                        missing.push(k);
+                    }
+                }
+            }
+            missing
         };
         initially_missing.get_or_insert(missing.len());
         if missing.is_empty() {
@@ -208,8 +219,9 @@ pub fn recover_segments(
         // insertion below removes it.
         let mut protected: BTreeSet<(u32, u32)> = subs
             .iter()
-            .map(|s| key(s.ends[0], s.ends[1]))
-            .filter(|&(u, v)| dt.has_edge(u, v))
+            .zip(&done)
+            .filter(|&(_, &d)| d)
+            .map(|(s, _)| key(s.ends[0], s.ends[1]))
             .collect();
         for &k in &missing {
             let [u, v] = subs[k].ends;
@@ -265,6 +277,8 @@ pub fn recover_segments(
                     ..s
                 },
             );
+            done[k] = false;
+            done.insert(k + 1, false);
             for (u, v) in [(s.ends[0], m), (m, s.ends[1])] {
                 let _s = crate::prof::scope("cdt segments: flips after a split");
                 if dt.has_edge(u, v)

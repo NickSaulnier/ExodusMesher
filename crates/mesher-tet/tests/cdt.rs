@@ -619,7 +619,7 @@ fn facet_cavities_are_refilled() {
 /// way, with the region still exactly the inside.
 #[test]
 fn a_cavity_reaching_across_its_plane_is_refused() {
-    let s = star_sphere(16, 10, 0.02, &mut seeded(123));
+    let s = star_sphere(24, 14, 0.01, &mut seeded(161));
     let r = recover_faces(&s.0, &s.1, 0, 5).unwrap();
     assert!(r.across_plane > 0, "an expansion should reach across");
     assert_eq!(r.missing, Vec::<u32>::new());

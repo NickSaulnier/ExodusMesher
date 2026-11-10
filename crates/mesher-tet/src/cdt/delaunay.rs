@@ -620,8 +620,10 @@ impl ExactDelaunay {
 
     /// Insert a point without removing any edge `protected` accepts, or any
     /// face whose three sides it accepts: the cavity starts as the Delaunay
-    /// conflict region (reached across faces the point strictly sees) and
-    /// shrinks until every boundary face is strictly visible from the point
+    /// conflict region (reached across faces the point strictly sees), grows
+    /// across boundary faces the point does not strictly see (not protected
+    /// ones, within a bound), and shrinks until every boundary face is
+    /// strictly visible from the point
     /// and no protected edge or face and no vertex would be lost, keeping
     /// every tet whose closure contains the point (after Si's constrained
     /// Bowyer-Watson in TetGen). The result need not be Delaunay.
@@ -713,6 +715,32 @@ impl ExactDelaunay {
                     self.stamp[u as usize] = epoch;
                     cavity.push(u);
                 }
+            }
+        }
+        // Grow across boundary faces p does not strictly see, as unconstrained
+        // insertion does, but never across a protected face or into a ghost,
+        // and within a bound: a nearly flat tet beside p otherwise keeps
+        // whatever edge it holds. What p still does not see is shrunk away.
+        let bound = 4 * cavity.len() + 64;
+        let mut k = 0;
+        while k < cavity.len() && cavity.len() < bound {
+            let t = cavity[k];
+            k += 1;
+            if self.is_ghost(t) {
+                continue;
+            }
+            let v = self.tets[t as usize].v;
+            for j in 0..4 {
+                let u = self.tets[t as usize].n[j];
+                if self.stamp[u as usize] == epoch || self.is_ghost(u) || self.sees(t, j, &p) {
+                    continue;
+                }
+                let f = face(&v, j);
+                if (0..3).all(|q| protected(f[q], f[(q + 1) % 3])) {
+                    continue;
+                }
+                self.stamp[u as usize] = epoch;
+                cavity.push(u);
             }
         }
         drop(s);
