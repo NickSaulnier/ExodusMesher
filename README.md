@@ -88,7 +88,7 @@ Paths are relative to the project file. Options on the command line override the
 mesher-gui model.obj
 ```
 
-Open an OBJ or a project (or drop one on the window); pick parts in the list or by clicking them in the viewport; inspect diagnosis records, which highlight their faces and point to their OBJ lines; set the element size and policy; Run and export. The viewport orbits (drag), pans (right-drag), zooms (scroll) and fits (double-click); wireframe, defect overlay and a clipping plane are toggles in the toolbar.
+Open an OBJ or a project (or drop one on the window); pick parts in the list or by clicking them in the viewport; inspect diagnosis records, which highlight their faces and point to their OBJ lines; set the element size, policy and kernel (an "Exact kernel" switch tries the exact kernel first); Run and export. The viewport orbits (drag), pans (right-drag), zooms (scroll) and fits (double-click); wireframe, defect overlay and a clipping plane are toggles in the toolbar.
 
 ## The report
 

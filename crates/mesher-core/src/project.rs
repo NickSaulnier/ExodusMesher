@@ -157,10 +157,12 @@ mod tests {
             settings: JobConfig {
                 parts: vec!["lid".to_owned(), "body".to_owned()],
                 strict: true,
+                kernel: crate::report::KernelChoice::Exact,
                 ..JobConfig::default()
             },
         };
         let text = p.to_toml(base);
+        assert!(text.contains("kernel = \"exact\""), "{text}");
         assert!(text.contains("input = \"models/two.obj\""), "{text}");
         assert!(text.contains("output = \"out\""), "{text}");
         assert_eq!(Project::from_toml(&text, base).unwrap(), p);

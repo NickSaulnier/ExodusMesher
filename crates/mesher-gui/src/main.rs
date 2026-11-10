@@ -21,7 +21,7 @@ use std::time::Duration;
 use eframe::egui::{self, Color32, RichText};
 use mesher_core::project::Project;
 use mesher_core::protocol::{MESH_EXODUS_FILE, WorkerMessage};
-use mesher_core::{ExitStatus, Record, Severity};
+use mesher_core::{ExitStatus, KernelChoice, Record, Severity};
 use mesher_gui::camera::Camera;
 use mesher_gui::scene::{Scene, severity_slot};
 use mesher_gui::session::Session;
@@ -397,6 +397,21 @@ impl App {
                     ui.label("No remesh");
                     theme::switch(ui, &mut s.no_remesh);
                     ui.label(theme::dim("no remesh-and-retry before the fallback").small());
+                    ui.end_row();
+                    ui.label("Exact kernel").on_hover_text(
+                        "Tetrahedralize the surface exactly and round to f64, before the \
+                         conformal kernel and the fallback; no refinement yet, so the mesh \
+                         is coarse and may have thin tets",
+                    );
+                    let mut exact = s.kernel == KernelChoice::Exact;
+                    if theme::switch(ui, &mut exact).changed() {
+                        s.kernel = if exact {
+                            KernelChoice::Exact
+                        } else {
+                            KernelChoice::Conformal
+                        };
+                    }
+                    ui.label(theme::dim("exact surface, no refinement").small());
                     ui.end_row();
                 });
             ui.add_space(4.0);
