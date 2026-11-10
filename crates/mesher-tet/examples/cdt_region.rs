@@ -6,10 +6,10 @@
 //! ```
 //!
 //! Prints, per file: triangles, tets inside, boundary faces, Steiner points
-//! on segments and faces, seconds, and the inside tets' volume against the
-//! volume the surface encloses (relative difference); or the error. The OBJ
-//! is read naively (`v` and triangular `f` lines); use the welded OBJ files
-//! the Thingi10k harness writes.
+//! on segments and faces, seconds, the inside tets' volume against the
+//! volume the surface encloses (relative difference), and the facets
+//! gift-wrapped; or the error. The OBJ is read naively (`v` and triangular
+//! `f` lines); use the welded OBJ files the Thingi10k harness writes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -70,13 +70,14 @@ fn main() {
                     .map(|t| mesher_tet::quality::float_volume(t.map(at)))
                     .sum();
                 println!(
-                    "{path}	ok	{}	{}	{}	{}	{}	{seconds:.2}	volume off by {:.1e}",
+                    "{path}	ok	{}	{}	{}	{}	{}	{seconds:.2}	volume off by {:.1e}	{} gift-wrapped",
                     triangles.len(),
                     r.tets.len(),
                     r.boundary.len(),
                     r.recovered.steiner,
                     r.recovered.steiner_on_faces,
                     (volume - enclosed).abs() / enclosed,
+                    r.recovered.wrapped,
                 );
             }
             Err(e) => println!("{path}	failed	{}	{e}	{seconds:.2}", triangles.len()),

@@ -24,7 +24,7 @@ pub mod faces;
 pub mod regions;
 pub mod segments;
 
-pub use delaunay::{DelaunayError, ExactDelaunay, GHOST, Inserted};
+pub use delaunay::{DelaunayError, ExactDelaunay, GHOST, Inserted, Refill};
 pub use faces::{FaceError, RecoveredFaces, Subface, recover_faces};
 pub use regions::{Region, RegionError, mesh_region};
 pub use segments::{RecoveredSegments, SegmentError, recover_segments};

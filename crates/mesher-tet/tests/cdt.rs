@@ -475,6 +475,157 @@ fn an_untetrahedralizable_prism_is_recovered_with_steiner_points() {
     assert!(r.steiner + r.steiner_on_faces > 0);
 }
 
+/// A large tetrahedron with a twisted triangular prism hovering just above
+/// the middle of its base (a void) and one just below (mirrored, outside),
+/// placed by `rng`: the edges between them cross the base where flips
+/// cannot clear them.
+fn twisted_sandwich(rng: &mut Rng) -> Surface {
+    let mut p: Vec<Point3> = vec![
+        [-4.0, -4.0, 0.0],
+        [4.0, -4.0, 0.0],
+        [0.0, 4.0, 0.0],
+        [0.0, 0.0, 4.0],
+    ];
+    let mut f: Vec<[u32; 3]> = vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]];
+    for below in [false, true] {
+        let gap = 0.005 + 0.05 * rng.unit();
+        let h = 0.1 + 0.4 * rng.unit();
+        let turn = 0.3 + 0.4 * rng.unit();
+        let r = 0.2 + 0.2 * rng.unit();
+        let a0 = rng.unit() * std::f64::consts::TAU;
+        let (cx, cy) = (0.2 * rng.unit() - 0.1, 0.2 * rng.unit() - 0.1);
+        let z = |d: f64| if below { -(gap + d) } else { gap + d };
+        let base = p.len() as u32;
+        for (dz, tw) in [(0.0, 0.0), (h, turn)] {
+            for k in 0..3 {
+                let a = a0 + tw + f64::from(k) * std::f64::consts::TAU / 3.0;
+                p.push([cx + r * libm::cos(a), cy + r * libm::sin(a), z(dz)]);
+            }
+        }
+        let mut t = vec![[0u32, 2, 1], [3, 4, 5]];
+        for k in 0..3u32 {
+            let (a, b) = (k, (k + 1) % 3);
+            t.push([a, b, b + 3]);
+            t.push([a, b + 3, a + 3]);
+        }
+        // Reversed: above, a void; below, mirrored, so outward again.
+        f.extend(t.iter().map(|q| [q[0] + base, q[2] + base, q[1] + base]));
+    }
+    (p, f)
+}
+
+/// A star-shaped sphere: a UV sphere whose vertices sit at random radii
+/// between `lo` and 1.
+fn star_sphere(segments: u32, rings: u32, lo: f64, rng: &mut Rng) -> Surface {
+    let mut radius = || lo + (1.0 - lo) * rng.unit();
+    let mut p = vec![[0.0, 0.0, radius()]];
+    for i in 1..rings {
+        let t = f64::from(i) / f64::from(rings) * std::f64::consts::PI;
+        for j in 0..segments {
+            let a = f64::from(j) / f64::from(segments) * std::f64::consts::TAU;
+            let r = radius();
+            p.push([
+                r * libm::sin(t) * libm::cos(a),
+                r * libm::sin(t) * libm::sin(a),
+                r * libm::cos(t),
+            ]);
+        }
+    }
+    let south = p.len() as u32;
+    p.push([0.0, 0.0, -radius()]);
+    let ring = |i: u32, j: u32| 1 + i * segments + j % segments;
+    let mut f = Vec::new();
+    for j in 0..segments {
+        f.push([0, ring(0, j), ring(0, j + 1)]);
+    }
+    for i in 0..rings - 2 {
+        for j in 0..segments {
+            let (a, b) = (ring(i, j), ring(i, j + 1));
+            let (c, d) = (ring(i + 1, j), ring(i + 1, j + 1));
+            f.push([a, c, d]);
+            f.push([a, d, b]);
+        }
+    }
+    for j in 0..segments {
+        f.push([south, ring(rings - 2, j + 1), ring(rings - 2, j)]);
+    }
+    (p, f)
+}
+
+/// A large tetrahedron with spiky star-shaped voids hovering just above its
+/// base (a void) and just below it (outside).
+fn spiky_sandwich(rng: &mut Rng) -> Surface {
+    let mut p: Vec<Point3> = vec![
+        [-4.0, -4.0, 0.0],
+        [4.0, -4.0, 0.0],
+        [0.0, 4.0, 0.0],
+        [0.0, 0.0, 4.0],
+    ];
+    let mut f: Vec<[u32; 3]> = vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]];
+    for below in [false, true] {
+        let (q, t) = star_sphere(10, 7, 0.05, rng);
+        let gap = 0.002 + 0.02 * rng.unit();
+        let s = 0.3;
+        let (cx, cy) = (0.2 * rng.unit() - 0.1, 0.2 * rng.unit() - 0.1);
+        let base = p.len() as u32;
+        let zmin = q.iter().map(|v| v[2]).fold(f64::INFINITY, f64::min);
+        let zmax = q.iter().map(|v| v[2]).fold(f64::NEG_INFINITY, f64::max);
+        for v in &q {
+            let z = if below {
+                -gap - s * (zmax - v[2])
+            } else {
+                gap + s * (v[2] - zmin)
+            };
+            p.push([cx + s * v[0], cy + s * v[1], z]);
+        }
+        // Above, reversed: a void.
+        f.extend(t.iter().map(|q| {
+            let q = q.map(|v| v + base);
+            if below { q } else { [q[0], q[2], q[1]] }
+        }));
+    }
+    (p, f)
+}
+
+fn seeded(seed: u64) -> Rng {
+    Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1)
+}
+
+/// Facets flips cannot recover go to the cavity stage: refilled from
+/// Delaunay tetrahedralizations of its halves, or, where expanding the
+/// cavity fails, by gift-wrapping (with symbolic perturbation).
+#[test]
+fn facet_cavities_are_refilled() {
+    for seed in 1..=5 {
+        let s = twisted_sandwich(&mut seeded(seed));
+        let r = recover_faces(&s.0, &s.1, 0, 5).unwrap();
+        assert!(r.crossed[1] > 0, "seed {seed}: flips should leave the base");
+        assert_eq!(r.missing, Vec::<u32>::new(), "seed {seed}");
+        assert_eq!(r.steiner_on_faces, 0, "seed {seed}");
+        check_region(&format!("twisted sandwich {seed}"), &s);
+    }
+    let s = spiky_sandwich(&mut seeded(127));
+    let r = recover_faces(&s.0, &s.1, 0, 5).unwrap();
+    assert!(r.wrapped > 0, "a cavity should need gift-wrapping");
+    assert_eq!(r.missing, Vec::<u32>::new());
+    assert_eq!(r.steiner_on_faces, 0);
+    check_region("spiky sandwich", &s);
+}
+
+/// The disjoint-cavity case (Diazzi et al., Section 3.5): growing a facet
+/// cavity reaches a tet across the facet's plane, so the retetrahedralized
+/// parts above and below it would overlap, as TetGen's face recovery
+/// assumes they cannot. It is refused, and the facet is recovered another
+/// way, with the region still exactly the inside.
+#[test]
+fn a_cavity_reaching_across_its_plane_is_refused() {
+    let s = star_sphere(16, 10, 0.02, &mut seeded(123));
+    let r = recover_faces(&s.0, &s.1, 0, 5).unwrap();
+    assert!(r.across_plane > 0, "an expansion should reach across");
+    assert_eq!(r.missing, Vec::<u32>::new());
+    check_region("star sphere", &s);
+}
+
 /// A unit cube with a cube of side 0.4 removed from its middle (the inner
 /// shell faces inward).
 fn hollow_cube() -> Surface {

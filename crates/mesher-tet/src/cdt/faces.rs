@@ -20,12 +20,16 @@
 //!    again to fit the tetrahedralization as it is then.
 //! 2. The cavity of the tets crossing the facet, retetrahedralized above and
 //!    below it ([`ExactDelaunay::recover_facet_by_cavity`]); the cavity
-//!    chooses how the uncovered part is triangulated.
-//! 3. A Steiner point on the facet where an edge crosses it: the exact
+//!    chooses how the uncovered part is triangulated. Where growing the
+//!    cavity fails, it is filled by gift-wrapping instead.
+//! 3. Steiner points on the facet where edges cross it: the exact
 //!    line-plane intersection (an LPI point) when the edge's ends are
 //!    explicit, else a BPT point of the input triangle near it, exactly on
-//!    its plane. It goes in so that no protected edge or face is lost; then
-//!    the cavity again. Rounds repeat within the point budget.
+//!    its plane. They go in so that no protected edge or face is lost; then
+//!    the cavity again. Rounds repeat within the point budget, a facet
+//!    taking one point in its first round and twice as many each round it
+//!    is still crossed (up to eight), at edges sharing no vertex, so the
+//!    points spread over it.
 //!
 //! Every subsegment, and every side of a subface or of a face already on a
 //! facet, is protected, so nothing recovered is lost. A facet is recovered
@@ -37,7 +41,7 @@ use std::collections::BTreeSet;
 use mesher_geom::Point3;
 use mesher_geom::implicit::{self, Kind, Point};
 
-use super::delaunay::{ExactDelaunay, Inserted};
+use super::delaunay::{ExactDelaunay, Inserted, Refill};
 use super::segments::{SegmentError, Subsegment, recover_segments};
 
 /// A face of the tetrahedralization on an input triangle.
@@ -94,6 +98,11 @@ pub struct RecoveredFaces {
     /// Input triangles crossed after segment recovery, after flips, and
     /// after the first cavity retetrahedralizations.
     pub crossed: [usize; 3],
+    /// Facet cavities filled by gift-wrapping.
+    pub wrapped: usize,
+    /// Facet cavity expansions refused for reaching across the facet's
+    /// plane (see [`ExactDelaunay::expansions_across_plane`]).
+    pub across_plane: usize,
 }
 
 /// Flip steps per missing subface or diagonal in a pass.
@@ -105,8 +114,11 @@ const MAX_PASSES: usize = 8;
 /// Rounds of Steiner points on facets.
 const MAX_ROUNDS: usize = 64;
 
-/// Crossing edges tried per facet in a round for a new Steiner point.
-const TRIES: usize = 8;
+/// Steiner points inserted per facet in a round, at most: one at first,
+/// doubling each round the facet is still crossed, up to this; and the
+/// crossing edges tried for them.
+const PER_ROUND: usize = 8;
+const TRIES: usize = 4 * PER_ROUND;
 
 /// A facet: its input triangle, boundary polygon (with the sides each
 /// vertex is on) and the Steiner points inside it.
@@ -295,6 +307,9 @@ pub fn recover_faces(
     let crossed_after_flips = active.len();
     // 2. Cavities, then 3. Steiner points on what is left.
     let mut steiner_on_faces = 0;
+    let mut wrapped = 0;
+    // Rounds each facet has had Steiner points in.
+    let mut steiner_rounds = vec![0u32; facets.len()];
     let mut crossed_after_cavities = None;
     for _ in 0..MAX_ROUNDS {
         let mut left = Vec::new();
@@ -306,7 +321,11 @@ pub fn recover_faces(
             let is_protected = |x: u32, y: u32| protected.contains(&key(x, y));
             let f = &facets[ti];
             let _s = crate::prof::scope("cdt faces: cavity");
-            if dt.recover_facet_by_cavity(f.corners, &f.vertices(), &is_protected) {
+            let refill = dt.recover_facet_by_cavity(f.corners, &f.vertices(), &is_protected);
+            if refill == Refill::GiftWrapped {
+                wrapped += 1;
+            }
+            if refill.recovered() {
                 // The cavity chose how the uncovered part is triangulated:
                 // read it back, so the faces it made are protected.
                 if facets[ti].inside.is_empty() {
@@ -328,22 +347,40 @@ pub fn recover_faces(
             if dt.points().len() >= limit {
                 break;
             }
-            // Near the first crossing that gives a new vertex.
+            // At or near the first crossings that give new vertices.
             let crossings = dt.facet_crossings(facets[ti].corners, &facets[ti].vertices());
             let protected = protect(&dt, &facets);
             let is_protected = |x: u32, y: u32| protected.contains(&key(x, y));
             let _s = crate::prof::scope("cdt faces: steiner points");
-            let candidates: Vec<Point> = crossings
+            // Edges sharing no vertex first, so the points spread over the
+            // facet rather than along one fan of edges; the rest after.
+            let mut used: BTreeSet<u32> = BTreeSet::new();
+            let (spread, rest): (Vec<_>, Vec<_>) = crossings.iter().partition(|&&(x, y)| {
+                let fresh = !used.contains(&x) && !used.contains(&y);
+                if fresh {
+                    used.insert(x);
+                    used.insert(y);
+                }
+                fresh
+            });
+            let candidates: Vec<Point> = spread
                 .iter()
+                .chain(&rest)
                 .flat_map(|&(x, y)| crossing_point(&dt, points, facets[ti].corners, x, y))
                 .take(TRIES)
                 .collect();
+            let mut added = 0;
+            let most = PER_ROUND.min(1 << steiner_rounds[ti].min(8));
+            steiner_rounds[ti] += 1;
             for p in candidates {
+                if added == most || dt.points().len() >= limit {
+                    break;
+                }
                 if let Ok(Inserted::New(m)) = dt.insert_protected(p, &is_protected) {
                     facets[ti].inside.push(m);
                     steiner_on_faces += 1;
                     inserted = true;
-                    break;
+                    added += 1;
                 }
             }
         }
@@ -363,6 +400,7 @@ pub fn recover_faces(
             }));
         }
     }
+    let across_plane = dt.expansions_across_plane();
     Ok(RecoveredFaces {
         dt,
         subsegments: subs,
@@ -376,6 +414,8 @@ pub fn recover_faces(
             crossed_after_flips,
             crossed_after_cavities.unwrap_or(0),
         ],
+        wrapped,
+        across_plane,
     })
 }
 

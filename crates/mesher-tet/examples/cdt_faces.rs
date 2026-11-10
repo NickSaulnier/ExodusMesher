@@ -8,8 +8,9 @@
 //! Prints, per file: triangles, subfaces, Steiner points on segments,
 //! triangles still crossed, seconds, the subfaces missing after segment
 //! recovery, the triangles crossed after segment recovery, flips and the
-//! first cavities, and the Steiner points on faces; or the error. The OBJ is read naively (`v` and triangular `f` lines); use the
-//! welded OBJ files the Thingi10k harness writes.
+//! first cavities, the facets gift-wrapped, and the Steiner points on
+//! faces; or the error. The OBJ is read naively (`v` and triangular `f`
+//! lines); use the welded OBJ files the Thingi10k harness writes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -48,13 +49,14 @@ fn main() {
         let seconds = started.elapsed().as_secs_f64();
         match result {
             Ok(r) => println!(
-                "{path}	ok	{}	{}	{}	{}	{seconds:.2}	{} subfaces missing after segments; triangles crossed {:?}; {} Steiner points on faces",
+                "{path}	ok	{}	{}	{}	{}	{seconds:.2}	{} subfaces missing after segments; triangles crossed {:?}; {} gift-wrapped; {} Steiner points on faces",
                 triangles.len(),
                 r.subfaces.len(),
                 r.steiner,
                 r.missing.len(),
                 r.initially_missing,
                 r.crossed,
+                r.wrapped,
                 r.steiner_on_faces,
             ),
             Err(e) => println!("{path}	failed	{}	{e}	{seconds:.2}", triangles.len()),

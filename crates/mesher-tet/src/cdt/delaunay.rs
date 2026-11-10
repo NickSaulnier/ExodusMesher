@@ -19,6 +19,8 @@ use std::collections::BTreeSet;
 use mesher_geom::Sign;
 use mesher_geom::implicit::{self, Point};
 
+mod wrap;
+
 /// The vertex at infinity.
 pub const GHOST: u32 = u32::MAX;
 const NONE: u32 = u32::MAX;
@@ -44,7 +46,39 @@ enum Fill {
     Done(Vec<[u32; 4]>),
     /// Grow the cavity by these tets and try again.
     Grow(Vec<u32>),
+    /// The cavity reaches across the facet's plane, so its parts above and
+    /// below it would overlap (Diazzi et al., Section 3.5).
+    Across,
     Fail,
+}
+
+/// Why a facet cavity does not split into halves.
+enum Split {
+    /// A protected edge or face is inside.
+    Blocked,
+    /// A boundary face crosses the facet's plane.
+    Across,
+}
+
+/// How [`ExactDelaunay::recover_facet_by_cavity`] came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refill {
+    /// Nothing crossed the facet.
+    Covered,
+    /// Filled from Delaunay tetrahedralizations of the halves.
+    Delaunay,
+    /// Filled by gift-wrapping, after expansion failed.
+    GiftWrapped,
+    /// Nothing changed.
+    Failed,
+}
+
+impl Refill {
+    /// Is the facet a union of faces now?
+    #[must_use]
+    pub fn recovered(self) -> bool {
+        self != Refill::Failed
+    }
 }
 
 /// What a segment from a vertex first meets.
@@ -131,6 +165,8 @@ pub struct ExactDelaunay {
     duplicates: Vec<(u32, u32)>,
     /// A live tet holding each vertex (`NONE` for a point that is not one).
     vertex_tet: Vec<u32>,
+    /// Facet cavity expansions refused for reaching across the facet's plane.
+    across_plane: usize,
 }
 
 /// The face opposite local vertex `k`, outward for a positive tet.
@@ -166,6 +202,7 @@ impl ExactDelaunay {
             rng: seed | 1,
             duplicates: Vec::new(),
             vertex_tet: Vec::new(),
+            across_plane: 0,
         };
         d.vertex_tet = vec![NONE; d.points.len()];
         let first = d.initial_tet(&order)?;
@@ -207,6 +244,15 @@ impl ExactDelaunay {
     #[must_use]
     pub fn duplicates(&self) -> &[(u32, u32)] {
         &self.duplicates
+    }
+
+    /// How many facet cavity expansions were refused because the cavity
+    /// reached across the facet's plane, where its parts above and below
+    /// would overlap (the flaw Diazzi et al., Section 3.5, found in TetGen's
+    /// face recovery). Gift-wrapping, then Steiner points, take over there.
+    #[must_use]
+    pub fn expansions_across_plane(&self) -> usize {
+        self.across_plane
     }
 
     /// The real (finite) tets, in slot order.
@@ -1277,15 +1323,24 @@ impl ExactDelaunay {
     /// Does the edge `xy` cross the interior of triangle `f` at one point
     /// inside it? Exact.
     fn crosses_triangle(&self, x: u32, y: u32, f: [u32; 3]) -> bool {
-        let sx = self.orient4([f[0], f[1], f[2], x]);
-        let sy = self.orient4([f[0], f[1], f[2], y]);
+        self.crosses_triangle_by(&|v| self.orient4(v), x, y, f)
+    }
+
+    /// [`Self::crosses_triangle`] with orientations from `o`.
+    fn crosses_triangle_by(
+        &self,
+        o: &dyn Fn([u32; 4]) -> Sign,
+        x: u32,
+        y: u32,
+        f: [u32; 3],
+    ) -> bool {
+        let sx = o([f[0], f[1], f[2], x]);
+        let sy = o([f[0], f[1], f[2], y]);
         if sx == Sign::Zero || sy == Sign::Zero || sx == sy {
             return false;
         }
-        let s: Vec<Sign> = (0..3)
-            .map(|k| self.orient4([x, y, f[k], f[(k + 1) % 3]]))
-            .collect();
-        s[0] != Sign::Zero && s.iter().all(|&e| e == s[0])
+        let s0 = o([x, y, f[0], f[1]]);
+        s0 != Sign::Zero && o([x, y, f[1], f[2]]) == s0 && o([x, y, f[2], f[0]]) == s0
     }
 
     /// Does the edge `xy`, lying in the plane of triangle `f`, meet the
@@ -1322,12 +1377,17 @@ impl ExactDelaunay {
     /// Does the edge `xy` meet the interior of triangle `f`, crossing it or
     /// lying in its plane across it? Exact.
     fn meets_triangle(&self, x: u32, y: u32, f: [u32; 3]) -> bool {
-        let sx = self.orient4([f[0], f[1], f[2], x]);
-        let sy = self.orient4([f[0], f[1], f[2], y]);
+        self.meets_triangle_by(&|v| self.orient4(v), x, y, f)
+    }
+
+    /// [`Self::meets_triangle`] with orientations from `o`.
+    fn meets_triangle_by(&self, o: &dyn Fn([u32; 4]) -> Sign, x: u32, y: u32, f: [u32; 3]) -> bool {
+        let sx = o([f[0], f[1], f[2], x]);
+        let sy = o([f[0], f[1], f[2], y]);
         if sx == Sign::Zero && sy == Sign::Zero {
             self.lies_across_triangle(x, y, f)
         } else {
-            self.crosses_triangle(x, y, f)
+            self.crosses_triangle_by(o, x, y, f)
         }
     }
 
@@ -1456,7 +1516,7 @@ impl ExactDelaunay {
         corners: [u32; 3],
         on_facet: &[u32],
         protected: &dyn Fn(u32, u32) -> bool,
-    ) -> bool {
+    ) -> Refill {
         let side = |s: &Self, v: u32| s.orient4([corners[0], corners[1], corners[2], v]);
         // Edges crossing the triangle's interior, from the tets at its
         // vertices, then grown through their tets.
@@ -1485,12 +1545,13 @@ impl ExactDelaunay {
         }
         while let Some((x, y)) = queue.pop() {
             let Some(ring) = self.edge_ring(x, y) else {
-                return false;
+                self.unstamp(&cavity);
+                return Refill::Failed;
             };
             for t in ring {
                 if self.is_ghost(t) {
                     self.unstamp(&cavity);
-                    return false;
+                    return Refill::Failed;
                 }
                 if self.stamp[t as usize] != epoch {
                     self.stamp[t as usize] = epoch;
@@ -1500,42 +1561,72 @@ impl ExactDelaunay {
             }
         }
         if cavity.is_empty() {
-            return true;
+            return Refill::Covered;
         }
         // Grow the cavity across old boundary faces a half's fill lacks
         // (TetGen's cavity expansion).
+        // The cavity's size at each stage.
+        let mut stages = vec![cavity.len()];
         let mut result = None;
-        for _ in 0..MAX_EXPANSIONS {
+        'grow: for _ in 0..MAX_EXPANSIONS {
             match self.fill_facet_cavity(&cavity, protected, &side) {
                 Fill::Done(new) => {
                     result = Some(new);
                     break;
                 }
                 Fill::Grow(more) => {
+                    if more.iter().any(|&t| self.is_ghost(t)) {
+                        break 'grow;
+                    }
                     for t in more {
-                        if self.is_ghost(t) {
-                            self.unstamp(&cavity);
-                            return false;
-                        }
                         if self.stamp[t as usize] != epoch {
                             self.stamp[t as usize] = epoch;
                             cavity.push(t);
                         }
                     }
+                    stages.push(cavity.len());
+                }
+                Fill::Across => {
+                    self.across_plane += 1;
+                    break;
                 }
                 Fill::Fail => {
                     break;
                 }
             }
         }
-        self.unstamp(&cavity);
-        match result {
-            Some(new) => {
-                let _s = crate::prof::scope("cdt cavity: replace");
-                self.replace(&cavity, &new)
-            }
-            None => false,
+        if let Some(new) = result {
+            self.unstamp(&cavity);
+            let _s = crate::prof::scope("cdt cavity: replace");
+            return if self.keeps_vertices(&cavity, &new) && self.replace(&cavity, &new) {
+                Refill::Delaunay
+            } else {
+                Refill::Failed
+            };
         }
+        // Expansion failed: gift-wrap the cavity at each stage, largest
+        // first, where its halves lie on either side of the plane.
+        let _s = crate::prof::scope("cdt cavity: gift-wrapping");
+        for &len in stages.iter().rev() {
+            self.unstamp(&cavity[len..]);
+            cavity.truncate(len);
+            let new = self
+                .facet_halves(&cavity, protected, &side)
+                .ok()
+                .and_then(|halves| self.wrap_facet_cavity(&halves, &cavity, &side));
+            if let Some(new) = new {
+                if self.keeps_vertices(&cavity, &new) {
+                    self.unstamp(&cavity);
+                    return if self.replace(&cavity, &new) {
+                        Refill::GiftWrapped
+                    } else {
+                        Refill::Failed
+                    };
+                }
+            }
+        }
+        self.unstamp(&cavity);
+        Refill::Failed
     }
 
     fn unstamp(&mut self, tets: &[u32]) {
@@ -1555,8 +1646,10 @@ impl ExactDelaunay {
         let s = crate::prof::scope("cdt cavity: halves");
         let halves = self.facet_halves(cavity, protected, side);
         drop(s);
-        let Some(halves) = halves else {
-            return Fill::Fail;
+        let halves = match halves {
+            Ok(h) => h,
+            Err(Split::Blocked) => return Fill::Fail,
+            Err(Split::Across) => return Fill::Across,
         };
         let on_plane = |v: u32| side(self, v) == Sign::Zero;
         let mut grow = Vec::new();
@@ -1612,15 +1705,15 @@ impl ExactDelaunay {
     }
 
     /// The boundaries of a facet cavity's two halves, faces outward, each with
-    /// the tet beyond it, or `None` where a protected edge or face is inside
-    /// or a boundary face crosses the plane.
+    /// the tet beyond it; or why there are none: a protected edge or face is
+    /// inside, or a boundary face crosses the plane.
     #[allow(clippy::type_complexity)]
     fn facet_halves(
         &self,
         cavity: &[u32],
         protected: &dyn Fn(u32, u32) -> bool,
         side: &dyn Fn(&Self, u32) -> Sign,
-    ) -> Option<[Vec<([u32; 3], Option<u32>)>; 2]> {
+    ) -> Result<[Vec<([u32; 3], Option<u32>)>; 2], Split> {
         let epoch = self.epoch;
         let inside = |t: u32| self.stamp[t as usize] == epoch;
         // No protected edge or face may be inside the cavity.
@@ -1628,9 +1721,9 @@ impl ExactDelaunay {
             let v = self.tets[t as usize].v;
             for (i, j) in EDGES {
                 if protected(v[i], v[j]) {
-                    let ring = self.edge_ring(v[i], v[j])?;
+                    let ring = self.edge_ring(v[i], v[j]).ok_or(Split::Blocked)?;
                     if ring.iter().all(|&r| inside(r)) {
-                        return None;
+                        return Err(Split::Blocked);
                     }
                 }
             }
@@ -1639,7 +1732,7 @@ impl ExactDelaunay {
                 if inside(self.tets[t as usize].n[j])
                     && (0..3).all(|k| protected(f[k], f[(k + 1) % 3]))
                 {
-                    return None;
+                    return Err(Split::Blocked);
                 }
             }
         }
@@ -1662,11 +1755,11 @@ impl ExactDelaunay {
                 {
                     lower.push((f, Some(u)));
                 } else {
-                    return None;
+                    return Err(Split::Across);
                 }
             }
         }
-        Some([upper, lower])
+        Ok([upper, lower])
     }
 
     /// The tets of the Delaunay tetrahedralization of the vertices of a
