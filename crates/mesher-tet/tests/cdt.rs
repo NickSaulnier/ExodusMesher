@@ -5,7 +5,9 @@
 
 use mesher_geom::Point3;
 use mesher_geom::implicit::Point;
-use mesher_tet::cdt::{ExactDelaunay, Inserted, mesh_region, recover_faces, recover_segments};
+use mesher_tet::cdt::{
+    ExactDelaunay, Inserted, mesh_region, recover_faces, recover_segments, round_region,
+};
 use mesher_tet::delaunay;
 
 struct Rng(u64);
@@ -701,4 +703,71 @@ fn regions_are_the_inside_of_the_surface() {
     check_region("schonhardt", &schonhardt());
     check_region("sandwich", &sandwich());
     check_region("fine uv sphere", &uv_sphere(48, 24, [0.3, -0.2, 0.1], true));
+}
+
+/// Rounded to f64, every tet is strictly positive (exactly, on the rounded
+/// coordinates), the volume is the enclosed volume to rounding, and the
+/// boundary is one outward face per subface.
+fn check_rounded(name: &str, (p, f): &Surface) {
+    let region = mesh_region(p, f, 0, 5).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let subfaces = region.recovered.subfaces.len();
+    let m = round_region(region, p, f).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let explicit: Vec<Point> = m
+        .points
+        .iter()
+        .map(|&q| Point::explicit(q).unwrap())
+        .collect();
+    for t in &m.tets {
+        let [a, b, c, d] = t.map(|v| &explicit[v as usize]);
+        assert_eq!(
+            mesher_geom::implicit::orient3d(a, b, c, d),
+            mesher_geom::Sign::Positive,
+            "{name}: {t:?}"
+        );
+    }
+    let det = |a: Point3, b: Point3, c: Point3| {
+        a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0])
+    };
+    let enclosed: f64 = f
+        .iter()
+        .map(|t| det(p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]) / 6.0)
+        .sum::<f64>()
+        .abs();
+    let volume: f64 = m
+        .tets
+        .iter()
+        .map(|t| mesher_tet::quality::float_volume(t.map(|v| m.points[v as usize])))
+        .sum();
+    assert!(
+        (volume - enclosed).abs() <= 1e-9 * enclosed.max(1.0),
+        "{name}: {volume} against {enclosed}"
+    );
+    assert_eq!(m.boundary.len(), subfaces, "{name}");
+    eprintln!(
+        "{name:<20} {:>6} tets, {:>4} points rounded, {} turned over, {} fixes",
+        m.tets.len(),
+        m.rounded,
+        m.inverted_before,
+        m.untangles.len()
+    );
+}
+
+#[test]
+fn rounded_meshes_are_valid() {
+    check_rounded("cube", &cube());
+    check_rounded("hollow cube", &hollow_cube());
+    check_rounded(
+        "rounded uv sphere",
+        &uv_sphere(16, 10, [1.0, 1.0, 1.5], true),
+    );
+    check_rounded("sharp wedge", &sharp_wedge());
+    check_rounded("schonhardt", &schonhardt());
+    check_rounded("sandwich", &sandwich());
+    check_rounded("fine uv sphere", &uv_sphere(48, 24, [0.3, -0.2, 0.1], true));
+    check_rounded("spiky sandwich", &spiky_sandwich(&mut seeded(127)));
+    check_rounded("star sphere", &star_sphere(24, 14, 0.01, &mut seeded(161)));
+    for seed in 1..=5 {
+        check_rounded("twisted sandwich", &twisted_sandwich(&mut seeded(seed)));
+    }
 }

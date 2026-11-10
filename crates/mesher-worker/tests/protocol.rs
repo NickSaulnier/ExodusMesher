@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use mesher_core::protocol::{Job, PROTOCOL_VERSION, WorkerMessage};
-use mesher_core::{Action, DefectCode, JobConfig, Kernel, Outcome, Report, Severity, Stage};
+use mesher_core::{
+    Action, DefectCode, JobConfig, Kernel, KernelChoice, Outcome, Report, Severity, Stage,
+};
 
 fn fixture(name: &str) -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -321,6 +323,50 @@ fn repair_writes_a_gated_surface_and_no_repair_stops_after_selection() {
     assert!(report.parts[0].repair.is_none());
     assert!(report.records.iter().all(|r| r.stage != Stage::Repair));
     assert!(!out.join("repaired.obj").exists());
+}
+
+/// `--kernel exact`: the cube is tetrahedralized exactly, without
+/// refinement; cubes sharing an edge (touching at duplicated vertices after
+/// repair) are refused by it, and the rest of the ladder takes over, the
+/// exact kernel's failure becoming a warning.
+#[test]
+fn exact_kernel_meshes_a_cube_and_falls_back_where_it_cannot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cube.obj"), dir.path());
+    job.config.kernel = KernelChoice::Exact;
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 0);
+    let report = run.report_file.unwrap();
+    let mesh = report.parts[0].mesh.clone().unwrap();
+    assert!(mesh.accepted);
+    assert_eq!(mesh.kernel, Kernel::Exact);
+    // No refinement: a handful of tets, not thousands.
+    assert!(mesh.tets < 50, "{} tets", mesh.tets);
+    assert!((mesh.volume - 1.0).abs() < 1e-12, "volume {}", mesh.volume);
+    assert_eq!(report.attempts.len(), 1);
+    assert!(dir.path().join("mesh.exo").exists());
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cubes_sharing_edge.obj"), dir.path());
+    job.config.kernel = KernelChoice::Exact;
+    let run = run_job(&job, dir.path());
+    let report = run.report_file.unwrap();
+    assert_eq!(report.attempts[0].kernel, Kernel::Exact);
+    assert_eq!(
+        report.attempts[0].outcome,
+        mesher_core::AttemptOutcome::Failed
+    );
+    assert!(report.parts[0].mesh.as_ref().unwrap().accepted);
+    let exact = report
+        .records
+        .iter()
+        .find(|r| {
+            r.code == DefectCode::MeshRecoveryFailed
+                && r.measured.get("kernel").and_then(|k| k.as_str()) == Some("exact")
+        })
+        .unwrap();
+    assert_eq!(exact.severity, Severity::Warning);
+    assert_eq!(exact.outcome, Some(Outcome::Applied));
 }
 
 #[test]

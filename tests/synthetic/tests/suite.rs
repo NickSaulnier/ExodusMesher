@@ -10,7 +10,9 @@
 //!   accepted meshes are valid and match the enclosed volume;
 //! - the exact constrained kernel (Milestone 12): every repaired part of a
 //!   closed case that passes the surface gate has every segment and triangle
-//!   recovered in exact form, and its inside region has the enclosed volume.
+//!   recovered in exact form, and its inside region has the enclosed volume;
+//!   rounded to f64 (Milestone 13), every tet is positive, exactly and in
+//!   floating point, and the volume still the enclosed one.
 
 #![allow(
     clippy::unwrap_used,
@@ -539,8 +541,8 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
         }
         let (lo, hi) = match s.kernel {
             Kernel::Stuffing => (DIHEDRAL_MIN_DEGREES, DIHEDRAL_MAX_DEGREES),
-            Kernel::Delaunay if sliver_input => (0.0, 180.0),
-            Kernel::Delaunay => (10.0, 170.0),
+            Kernel::Delaunay | Kernel::Exact if sliver_input => (0.0, 180.0),
+            Kernel::Delaunay | Kernel::Exact => (10.0, 170.0),
         };
         if s.kernel == Kernel::Delaunay {
             tally.delaunay += 1;
@@ -570,7 +572,7 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
                 (s.volume - s.surface_volume).abs() / s.surface_volume.abs().max(f64::MIN_POSITIVE);
             let allowed = match s.kernel {
                 Kernel::Stuffing => 0.15,
-                Kernel::Delaunay => 1e-9,
+                Kernel::Delaunay | Kernel::Exact => 1e-9,
             };
             if error > allowed {
                 failures.push(format!(
@@ -624,13 +626,16 @@ struct ExactTally {
     steiner_faces: usize,
     wrapped: usize,
     seconds: f64,
+    /// Parts with a tet that rounding to f64 turned over or flattened.
+    rounding_invalid: u32,
+    untangles: usize,
 }
 
 /// Milestone 12: the exact kernel (`mesher_tet::cdt::mesh_region`) on every
 /// repaired part of a closed case that passes the surface gate (and whose
 /// shells do not touch at duplicated vertices, which no conformal kernel
 /// takes): every input triangle recovered, and the inside region exactly
-/// the enclosed volume.
+/// the enclosed volume; then (Milestone 13) rounded to f64 and untangled.
 fn check_exact(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>, t: &mut ExactTally) {
     if c.open || !c.gate_fails.is_empty() || c.conformal_fails {
         return;
@@ -681,6 +686,31 @@ fn check_exact(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>, t: 
         t.steiner_segments += region.recovered.steiner;
         t.steiner_faces += region.recovered.steiner_on_faces;
         t.wrapped += region.recovered.wrapped;
+        // Milestone 13: rounded to f64, every tet positive exactly and in
+        // floating point, the volume still the enclosed one.
+        match mesher_tet::cdt::round_region(region, &r.points, &r.faces) {
+            Ok(m) => {
+                if m.inverted_before + m.flat_before > 0 {
+                    t.rounding_invalid += 1;
+                }
+                t.untangles += m.untangles.len();
+                let volume: f64 = m
+                    .tets
+                    .iter()
+                    .map(|v| {
+                        mesher_tet::quality::float_volume(v.map(|x| rel(m.points[x as usize])))
+                    })
+                    .sum();
+                let error = (volume - enclosed).abs() / enclosed.max(f64::MIN_POSITIVE);
+                if error > 1e-9 {
+                    failures.push(format!(
+                        "{label}: part {} rounded volume off by {error:.3e}",
+                        r.name
+                    ));
+                }
+            }
+            Err(e) => failures.push(format!("{label}: part {} rounding: {e}", r.name)),
+        }
     }
 }
 
@@ -1114,6 +1144,12 @@ fn synthetic_suite() {
     eprintln!(
         "exact kernel: {} parts with every constraint recovered, {} Steiner points on segments, {} on faces, {} facets gift-wrapped, {:.2} s",
         exact.parts, exact.steiner_segments, exact.steiner_faces, exact.wrapped, exact.seconds
+    );
+    eprintln!(
+        "rounding to f64: {} of {} parts valid as rounded, all after {} untangles",
+        exact.parts - exact.rounding_invalid,
+        exact.parts,
+        exact.untangles
     );
 
     check_golden(&goldens, &mut failures);

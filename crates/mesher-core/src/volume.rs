@@ -2,7 +2,8 @@
 //!
 //! The fallback strategy of `PLAN.md`: a part whose repaired surface passed
 //! the surface gate is meshed first by the conforming Delaunay kernel
-//! (boundary-exact). If that fails (budget, recovery) or the surface did not
+//! (boundary-exact), or, with `--kernel exact`, by the exact constrained
+//! kernel rounded to f64, the conforming kernel following if that fails. If that fails (budget, recovery) or the surface did not
 //! pass the gate, isosurface stuffing on the winding-number field (`0.5 − w`)
 //! takes over, unless `--strict` forbids it. A failed conformal attempt is a
 //! warning when the fallback then succeeds, an error otherwise.
@@ -19,6 +20,9 @@ use std::collections::{BTreeMap, HashMap};
 use mesher_geom::predicates::orient3d;
 use mesher_geom::vec3::{cross, dot, sub};
 use mesher_geom::{Aabb, Bvh, FastWindingNumber, Point3, Sign, TriangleSoup};
+use mesher_tet::cdt::{
+    FaceError, RegionError, RoundingError, SegmentError, Untangle, mesh_region, round_region,
+};
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
 use mesher_tet::{
     ConformingError, ConformingParams, RemeshParams, SizeField, SizingParams, StuffingError,
@@ -30,8 +34,8 @@ use crate::mesh::{Block, SideSet, VolumeMesh, tet_side_nodes};
 use crate::model::SurfaceModel;
 use crate::repair::{RepairedPart, passes_gate};
 use crate::report::{
-    Action, Attempt, AttemptOutcome, DefectCode, JobConfig, Kernel, MeshSummary, Outcome, Record,
-    RecordLog, Severity, Stage,
+    Action, Attempt, AttemptOutcome, DefectCode, JobConfig, Kernel, KernelChoice, MeshSummary,
+    Outcome, Record, RecordLog, Severity, Stage,
 };
 
 /// Slivers below this dihedral angle in a conformal mesh earn a quality warning.
@@ -114,6 +118,57 @@ fn mesh_part(
         stderr: String::new(),
     };
 
+    // 0. With `--kernel exact`: the exact constrained kernel, rounded to f64.
+    let mut exact_failure: Option<Record> = None;
+    if config.kernel == KernelChoice::Exact && r.summary.gate_passed && !config.stuffing_only {
+        match exact(model, r, name) {
+            Ok((c, fixes)) => {
+                let (accepted, summary) =
+                    volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;
+                outcome.attempts.push(attempt(Kernel::Exact, accepted));
+                outcome.summaries.push((r.part, summary));
+                // Every untangle is a record, whether or not the mesh is kept.
+                for fix in fixes {
+                    log.push(fix);
+                }
+                if accepted {
+                    outcome.meshed.push(MeshedPart {
+                        part: r.part,
+                        name: name.to_owned(),
+                        kernel: Kernel::Exact,
+                        points: c.points,
+                        tets: c.tets,
+                        face_groups: c.face_groups,
+                    });
+                    return Ok(());
+                }
+                exact_failure = Some(
+                    Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
+                        .part(name)
+                        .measured("kernel", "exact")
+                        .hint("the exact mesh failed the volume gate"),
+                );
+            }
+            Err(record) => {
+                outcome.attempts.push(attempt(Kernel::Exact, false));
+                exact_failure = Some((*record).part(name));
+            }
+        }
+    }
+    // An exact failure is settled when the part is: a warning if a later
+    // kernel meshed it, an error if none did.
+    let settle = |log: &mut RecordLog, rec: Option<Record>, meshed: bool| {
+        if let Some(rec) = rec {
+            log.push(if meshed {
+                rec.severity(Severity::Warning)
+                    .action(Action::Fallback, Outcome::Applied)
+            } else {
+                rec.severity(Severity::Error)
+                    .action(Action::Fallback, Outcome::Failed)
+            });
+        }
+    };
+
     // 1. Direct: conforming Delaunay, for a surface that passed the gate.
     let mut conformal_failure: Option<Record> = None;
     if r.summary.gate_passed && !config.stuffing_only {
@@ -124,6 +179,7 @@ fn mesh_part(
                 outcome.attempts.push(attempt(Kernel::Delaunay, accepted));
                 outcome.summaries.push((r.part, summary));
                 if accepted {
+                    settle(log, exact_failure, true);
                     outcome.meshed.push(MeshedPart {
                         part: r.part,
                         name: name.to_owned(),
@@ -182,6 +238,7 @@ fn mesh_part(
                                 .action(Action::Remesh, Outcome::Applied),
                         );
                     }
+                    settle(log, exact_failure, true);
                     return Ok(());
                 }
                 conformal_failure = conformal_failure
@@ -199,6 +256,9 @@ fn mesh_part(
     }
 
     if config.strict {
+        if let Some(rec) = exact_failure {
+            log.push(rec.severity(Severity::Error));
+        }
         if let Some(rec) = conformal_failure {
             log.push(rec.severity(Severity::Error));
         }
@@ -300,6 +360,7 @@ fn mesh_part(
             });
         }
     }
+    settle(log, exact_failure, fallback_ok);
     if let Some(rec) = conformal_failure {
         log.push(if fallback_ok {
             rec.severity(Severity::Warning)
@@ -310,6 +371,139 @@ fn mesh_part(
         });
     }
     Ok(())
+}
+
+/// The exact constrained mesh of a part's repaired surface, rounded to f64,
+/// with a `MESH_ROUNDING_REPAIRED` record for each tet rounding turned over
+/// or flattened and untangling fixed; or the record explaining why not.
+/// No refinement: the tets join the surface's vertices and the Steiner
+/// points recovery needed (refinement is Milestone 14).
+fn exact(
+    model: &SurfaceModel,
+    r: &RepairedPart,
+    name: &str,
+) -> Result<(Candidate, Vec<Record>), Box<Record>> {
+    let recovery = |e: &dyn std::fmt::Display| {
+        Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
+            .measured("kernel", "exact")
+            .hint(format!("exact meshing failed: {e}"))
+    };
+    let region = mesh_region(&r.points, &r.faces, 0, 5).map_err(|e| {
+        Box::new(match &e {
+            RegionError::Faces(FaceError::Segments(SegmentError::Budget { points, limit })) => {
+                Record::new(DefectCode::MeshBudgetExceeded, Stage::VolumeMesh)
+                    .measured("kernel", "exact")
+                    .measured("points", *points as u64)
+                    .threshold("max_points", *limit as u64)
+            }
+            RegionError::Missing { triangles } => {
+                recovery(&e).measured("missing_faces", triangles.len() as u64)
+            }
+            _ => recovery(&e),
+        })
+    })?;
+    let steiner = (region.recovered.steiner + region.recovered.steiner_on_faces) as u64;
+    let m = round_region(region, &r.points, &r.faces).map_err(|e| {
+        let rec = Record::new(DefectCode::MeshRoundingFailed, Stage::VolumeMesh)
+            .hint(format!("{e}; the next kernel takes over"));
+        Box::new(match &e {
+            RoundingError::Inverted {
+                tets,
+                inverted_before,
+                untangles,
+            } => {
+                let first = tets
+                    .first()
+                    .map(|t| [0, 1, 2].map(|k| (t[0][k] + t[1][k] + t[2][k] + t[3][k]) / 4.0));
+                let rec = rec
+                    .measured("tets_left", tets.len() as u64)
+                    .measured("turned_over_before", *inverted_before as u64)
+                    .measured("fixes", *untangles as u64);
+                match first {
+                    Some(p) => rec.point(p),
+                    None => rec,
+                }
+            }
+            _ => rec,
+        })
+    })?;
+    // Where each fix was, in the rounded mesh.
+    let local: BTreeMap<u32, u32> = m
+        .origin
+        .iter()
+        .enumerate()
+        .map(|(i, &o)| (o, i as u32))
+        .collect();
+    let centroid = |t: &[u32; 4]| -> Option<Point3> {
+        let p: Vec<Point3> = t
+            .iter()
+            .map(|v| local.get(v).map(|&i| m.points[i as usize]))
+            .collect::<Option<_>>()?;
+        Some([0, 1, 2].map(|k| (p[0][k] + p[1][k] + p[2][k] + p[3][k]) / 4.0))
+    };
+    let records = m
+        .untangles
+        .iter()
+        .map(|u| {
+            let rec = Record::new(DefectCode::MeshRoundingRepaired, Stage::VolumeMesh)
+                .part(name)
+                .action(Action::Untangle, Outcome::Applied);
+            match u {
+                Untangle::Move { from, to, .. } => rec
+                    .measured("fix", "vertex_move")
+                    .measured(
+                        "moved",
+                        libm::sqrt(
+                            (0..3)
+                                .map(|k| (to[k] - from[k]) * (to[k] - from[k]))
+                                .sum::<f64>(),
+                        ),
+                    )
+                    .point(*to),
+                Untangle::Flip23 { tet, .. } => {
+                    let rec = rec.measured("fix", "flip_2_3");
+                    match centroid(tet) {
+                        Some(p) => rec.point(p),
+                        None => rec,
+                    }
+                }
+                Untangle::RemoveEdge { tet, .. } => {
+                    let rec = rec.measured("fix", "edge_removal");
+                    match centroid(tet) {
+                        Some(p) => rec.point(p),
+                        None => rec,
+                    }
+                }
+            }
+        })
+        .collect();
+    let group_of = |f: usize| -> Option<u32> {
+        r.face_origin
+            .get(f)
+            .copied()
+            .flatten()
+            .and_then(|t| model.polygon_of(t))
+            .and_then(|p| p.group)
+    };
+    let mut groups: BTreeMap<String, Vec<[u32; 3]>> = BTreeMap::new();
+    for &(face, o) in &m.boundary {
+        if let Some(g) = group_of(o as usize).and_then(|g| model.groups.get(g as usize)) {
+            groups.entry(g.clone()).or_default().push(face);
+        }
+    }
+    Ok((
+        Candidate {
+            kernel: Kernel::Exact,
+            points: m.points,
+            tets: m.tets,
+            dropped: 0,
+            steiner,
+            face_groups: groups.into_iter().collect(),
+            min_size: None,
+            remeshed: false,
+        },
+        records,
+    ))
 }
 
 /// The conforming Delaunay mesh of a repaired part, or the record explaining
@@ -493,7 +687,7 @@ fn volume_gate(
     }
     let (lo, hi) = match c.kernel {
         Kernel::Stuffing => (DIHEDRAL_MIN_DEGREES, DIHEDRAL_MAX_DEGREES),
-        Kernel::Delaunay => (SLIVER_DEGREES, 180.0 - SLIVER_DEGREES),
+        Kernel::Delaunay | Kernel::Exact => (SLIVER_DEGREES, 180.0 - SLIVER_DEGREES),
     };
     if !tets.is_empty() && (q.min_dihedral_degrees < lo || q.max_dihedral_degrees > hi) {
         log.push(

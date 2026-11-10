@@ -61,22 +61,31 @@
   "$defs": {
     "Action": {
       "description": "What was done about a finding.",
-      "type": "string",
-      "enum": [
-        "skip_line",
-        "drop_face",
-        "fan_triangulate",
-        "remesh",
-        "merge",
-        "remove",
-        "fill_hole",
-        "split_edge",
-        "duplicate_vertex",
-        "reorient",
-        "flip",
-        "truncate",
-        "fallback",
-        "abort"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "skip_line",
+            "drop_face",
+            "fan_triangulate",
+            "remesh",
+            "merge",
+            "remove",
+            "fill_hole",
+            "split_edge",
+            "duplicate_vertex",
+            "reorient",
+            "flip",
+            "truncate",
+            "fallback",
+            "abort"
+          ]
+        },
+        {
+          "description": "A tet rounding turned over, fixed by moving a constructed vertex\nwithin its rounding or by a flip.",
+          "type": "string",
+          "const": "untangle"
+        }
       ]
     },
     "Attempt": {
@@ -289,6 +298,16 @@
           "const": "MESH_WORKER_FAILED"
         },
         {
+          "description": "A tet that rounding to f64 turned over or flattened was untangled",
+          "type": "string",
+          "const": "MESH_ROUNDING_REPAIRED"
+        },
+        {
+          "description": "Tets that rounding to f64 turned over or flattened could not be untangled",
+          "type": "string",
+          "const": "MESH_ROUNDING_FAILED"
+        },
+        {
           "description": "Tetrahedron with non-positive volume",
           "type": "string",
           "const": "VOL_INVERTED_TET"
@@ -407,6 +426,10 @@
           "format": "double",
           "default": 0.03
         },
+        "kernel": {
+          "description": "The volume kernel tried first.",
+          "$ref": "#/$defs/KernelChoice"
+        },
         "max_deviation": {
           "description": "Largest acceptable fallback deviation, relative to the part's bounding-box diagonal.",
           "type": "number",
@@ -448,10 +471,34 @@
     },
     "Kernel": {
       "description": "Volume kernel used by a meshing attempt.",
-      "type": "string",
-      "enum": [
-        "delaunay",
-        "stuffing"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "delaunay",
+            "stuffing"
+          ]
+        },
+        {
+          "description": "The exact constrained Delaunay kernel, rounded to f64.",
+          "type": "string",
+          "const": "exact"
+        }
+      ]
+    },
+    "KernelChoice": {
+      "description": "The volume kernel tried first; the rest of the fallback ladder follows it.",
+      "oneOf": [
+        {
+          "description": "The conforming Delaunay kernel, refined to the element size.",
+          "type": "string",
+          "const": "conformal"
+        },
+        {
+          "description": "The exact constrained Delaunay kernel (`--kernel exact`): the input\nsurface tetrahedralized exactly, then rounded to f64, without\nrefinement; the conforming kernel and stuffing follow if it fails.",
+          "type": "string",
+          "const": "exact"
+        }
       ]
     },
     "Location": {

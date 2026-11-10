@@ -15,6 +15,6 @@ pub mod volume;
 pub use exit::ExitStatus;
 pub use report::{
     Action, Attempt, AttemptOutcome, DefectCode, InputInfo, InputStats, JobConfig, Kernel,
-    Location, MeshSummary, Outcome, PartSource, PartSummary, Record, RecordLog, RepairSummary,
-    Report, Severity, Stage, Summary,
+    KernelChoice, Location, MeshSummary, Outcome, PartSource, PartSummary, Record, RecordLog,
+    RepairSummary, Report, Severity, Stage, Summary,
 };

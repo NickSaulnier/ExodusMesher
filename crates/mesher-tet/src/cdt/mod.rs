@@ -12,19 +12,22 @@
 //!   that protects chosen edges.
 //! - [`segments`]: segment recovery by flips, then splitting with LNC
 //!   Steiner points.
-//! - [`faces`]: face recovery by flips, then cavity retetrahedralization,
-//!   then Steiner points on the faces.
+//! - [`faces`]: face recovery by flips, then cavity retetrahedralization
+//!   (gift-wrapping where expansion fails), then Steiner points on the
+//!   faces.
 //! - [`regions`]: the tets inside the surface, by a parity flood from the
 //!   hull.
-//!
-//! Rounding to f64 (Milestone 13) and the pipeline integration follow.
+//! - [`rounding`]: the mesh in f64 coordinates, with what rounding turned
+//!   over untangled (Milestone 13).
 
 pub mod delaunay;
 pub mod faces;
 pub mod regions;
+pub mod rounding;
 pub mod segments;
 
 pub use delaunay::{DelaunayError, ExactDelaunay, GHOST, Inserted, Refill};
 pub use faces::{FaceError, RecoveredFaces, Subface, recover_faces};
 pub use regions::{Region, RegionError, mesh_region};
+pub use rounding::{RoundedMesh, RoundingError, Untangle, round_region};
 pub use segments::{RecoveredSegments, SegmentError, recover_segments};

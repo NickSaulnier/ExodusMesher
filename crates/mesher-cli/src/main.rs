@@ -11,7 +11,8 @@ use clap::{Parser, Subcommand};
 use mesher_core::project::{Project, ProjectError};
 use mesher_core::protocol::{Job, REPORT_FILE};
 use mesher_core::{
-    Action, DefectCode, ExitStatus, JobConfig, Outcome, Record, RecordLog, Report, Severity, Stage,
+    Action, DefectCode, ExitStatus, JobConfig, KernelChoice, Outcome, Record, RecordLog, Report,
+    Severity, Stage,
 };
 
 #[derive(Parser)]
@@ -66,6 +67,12 @@ struct RunArgs {
     /// fallback instead of remeshing its surface and retrying.
     #[arg(long)]
     no_remesh: bool,
+    /// The volume kernel tried first: `conformal` (refined to the element
+    /// size), or `exact` (the input surface tetrahedralized exactly and
+    /// rounded to f64, without refinement; the conformal kernel and
+    /// stuffing follow if it fails) [default: conformal].
+    #[arg(long, value_enum)]
+    kernel: Option<KernelArg>,
     /// Kill the worker after this many seconds.
     #[arg(long, default_value_t = 3600.0, value_parser = positive)]
     timeout: f64,
@@ -75,6 +82,12 @@ struct RunArgs {
     /// Path to the mesher-worker binary [default: $MESHER_WORKER, else next to this executable].
     #[arg(long)]
     worker: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum KernelArg {
+    Conformal,
+    Exact,
 }
 
 fn main() -> ExitCode {
@@ -118,6 +131,12 @@ fn run(args: RunArgs) -> i32 {
     c.strict |= args.strict;
     c.uniform_size |= args.uniform_size;
     c.no_remesh |= args.no_remesh;
+    if let Some(k) = args.kernel {
+        c.kernel = match k {
+            KernelArg::Conformal => KernelChoice::Conformal,
+            KernelArg::Exact => KernelChoice::Exact,
+        };
+    }
     if let Some(d) = args.max_deviation {
         c.max_deviation = d;
     }

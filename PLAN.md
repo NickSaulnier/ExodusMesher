@@ -203,6 +203,8 @@ Every finding is a structured record with a stable code, a severity, a location 
 | `REPAIR_GUARD_EXCEEDED` | A repair changed the shell count or enclosed volume beyond its limit | Error |
 | `MESH_STRICT_UNMET` | `--strict` was given but no conformal mesh could be produced | Error |
 | `MESH_WORKER_FAILED` | Worker panicked, timed out or ran out of memory | Error, triggers fallback |
+| `MESH_ROUNDING_REPAIRED` | A tet that rounding to f64 turned over or flattened was untangled | Untangle, warning |
+| `MESH_ROUNDING_FAILED` | Tets that rounding to f64 turned over or flattened could not be untangled | Error, triggers fallback |
 | `VOL_INVERTED_TET` | Tetrahedron with non-positive volume | Error |
 | `VOL_LOW_QUALITY` | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
 | `VOL_BOUNDARY_DEVIATION` | Hausdorff distance to input over tolerance | Error |
@@ -577,10 +579,10 @@ Scope decisions (Nov 8, 2026, by the user):
 - [x] Profiling of the constrained kernel (`mesher_tet::prof`: timing scopes behind the `profile` feature, compiled out otherwise; `cargo run --release -p mesher-tet --features profile --example profile -- model.obj [--max-points N]`), and fixes for the hot spots, all leaving results bit-identical (golden reports unchanged; 43853 gives the same 92,009 tets): inside tests cached per tet; FxHash for the Delaunay core's constraint sets; the cavity loop keeps only the first tet to take out, keeps visibility, exclusion and conflict answers in flat per-slot arrays stamped by insertion, and updates its list of unseen boundary faces in place after a removal instead of rebuilding it. Kernel time on 43853 8.4 s to 5.5 s; 677341 to 8,000 points 26.4 s to 3.8 s (it now ends at its point budget in 97 s instead of timing out); end to end, 472020 and 135674 (failure, then remesh) about 50 s instead of 3 minutes
 - [x] Sliver repair by vertex smoothing (`mesher_tet::smooth`): after the constrained kernel, every vertex on no boundary face that belongs to a tet below 15° moves to the best of a few candidates (towards its neighbours' centroid, along a finite-difference gradient of the worst angle, away from the opposite face of its worst tet), kept only if every tet around it stays positive (exact `orient3d`) and the worst angle improves; four passes. Connectivity and boundary never change, so conformity and volume are exact. Cells below 1°: 43853 131 → 50, 45009 524 → 42, 113890 132 → 64; synthetic suite minimum dihedral up 2–5° on every conformal part (golden regenerated; mean non-orthogonality up by at most 0.6°). About 8% of kernel time (a one-`acos` minimum dihedral keeps it there)
 - [x] Golden reports for the synthetic suite (`tests/synthetic/golden.txt`, 98 runs): records by code, severity and action with counts, and each part's kernel and acceptance, must match exactly; tet count within 10%, minimum dihedral and mean non-orthogonality within 2°. `UPDATE_GOLDEN=1` regenerates it
-- [ ] GitHub Actions workflow (`.github/workflows/ci.yml`: fmt and clippy on Linux; `cargo test --workspace --release` on Linux and Windows); green on GitHub still to be confirmed
+- [x] GitHub Actions workflow (`.github/workflows/ci.yml`: fmt and clippy on Linux; `cargo test --workspace --release` on Linux and Windows); green on GitHub (confirmed by the user, Nov 10, 2026)
 - [x] Documentation: README (install, CLI, GUI, project files, exit codes, report, benchmark table) and the report reference (`docs/report.md`: every field, defect code, meshing measurement, quality metric and output file; a test in `mesher-core/tests/schema.rs` keeps its code table in step with `DefectCode`)
 - [x] Stratified benchmark run (Nov 8, 2026, at the user's request): the outcome table by path against TetGen is below. The run found three bugs, fixed before 315 affected models were rerun: errors that the fallback worked around still exited 30; a tet flat in floating point made the volume ratio infinite, which JSON writes as `null`, so the client could not read the result and reported a dead worker; and the harness counted TetGen's empty meshes as meshed
-- [ ] Exit criterion: published outcome table by path, against TetGen (done, below), with CI green (still to be confirmed on GitHub)
+- [x] Exit criterion: published outcome table by path, against TetGen (done, below), with CI green (confirmed Nov 10, 2026)
 
 **Stratified Thingi10k benchmark (Nov 8, 2026, 1,000 models, default settings, release build).** 685 models from the first run and 315 rerun after the fixes above. 12 meshing jobs at a time on the first run and 8 on the rerun. Each worker run is limited to 600 s (a timeout is retried once with stuffing only) and 3 GiB of memory; TetGen (`pzAfq`, same size) runs in a child process limited to 120 s.
 
@@ -729,15 +731,17 @@ Decisions (Nov 9, 2026, by the user):
 
 **Milestone 13: Rounding to f64.**
 
-- [ ] Round every implicit point; check the exact `orient3d` of every tet on the rounded coordinates
-- [ ] Untangle what flipped: moves within the point's rounding box, flips and extra explicit points, each recorded
-- [ ] Re-check boundary conformity after rounding
-- [ ] Codes `MESH_ROUNDING_REPAIRED` (warning) and `MESH_ROUNDING_FAILED` (error, which triggers the next fallback)
-- [ ] `--kernel exact` in the pipeline, behind the volume gate, with the current kernel and stuffing behind it
-- [ ] Exit criterion:
-  - rounding validity before and after untangling reported on the clean subset and the synthetic suite
-  - no non-positive tet written
-  - every untangle a record
+Started Nov 10, 2026.
+
+- [x] Round every implicit point; check the exact `orient3d` of every tet on the rounded coordinates (`cdt::round_region`, `cdt/rounding.rs`). Each constructed point becomes the f64 point its construction approximates; input points are f64 already. A tet counts as usable when it is positive exactly and has positive volume in floating point (as a finite-volume solver computes it, and as the volume gate's `flat_in_float` checks), from the best of its 12 orientation-preserving vertex orders, which is the order written: a tet nearly flat to rounding can come out zero from one corner and positive from another (the synthetic torus's quads, coplanar in exact arithmetic but not in f64, made the only flat tets; reordering fixed every one).
+- [x] Untangle what flipped (`cdt/delaunay/untangle.rs`): a constructed vertex of the bad tet moves to the nearest f64 point within 2 ulps per coordinate of its rounding that leaves no inside tet around it unusable and no more outside ones; else a 2-3 flip across a face that is not a boundary face, or edge removal of an edge that is not protected (subsegments and subface sides); while untangling, flips must give tets usable in floating point too. Up to 8 passes. Each fix is returned. Extra explicit points were not needed on the subset or the suite, so they are not implemented; a mesh still tangled is `MESH_ROUNDING_FAILED`.
+- [x] Re-check boundary conformity after rounding: every inside tet usable, the boundary faces exactly the recovered subfaces, each once, and each input triangle's area covered by its subfaces to 1e-9 of its area plus 1e-12 of the squared bounding-box diagonal (the boundary moves by rounding only).
+- [x] Codes `MESH_ROUNDING_REPAIRED` (warning, one record per fix: `fix` is `vertex_move` with `moved`, `flip_2_3` or `edge_removal`, at `location.point`; action `untangle`, a new `Action`) and `MESH_ROUNDING_FAILED` (error with `tets_left`, `turned_over_before` and `fixes`, which triggers the next fallback). Report schema, `docs/report.md` and the taxonomy table updated.
+- [x] `--kernel exact` in the pipeline (`JobConfig::kernel`, `KernelChoice::{Conformal, Exact}`, `Kernel::Exact` in attempts and summaries): for a part that passed the surface gate, the exact kernel and rounding run first, without refinement (the tets join the surface's vertices and the Steiner points recovery needed; refinement is Milestone 14), judged by the volume gate with the conforming kernel's dihedral bounds; then the conforming kernel, the remesh retry and stuffing as before. An exact failure (`MESH_RECOVERY_FAILED` or `MESH_BUDGET_EXCEEDED` with `kernel: exact`, or `MESH_ROUNDING_FAILED`) becomes a warning with `fallback` / `applied` when a later kernel meshes the part, an error otherwise. Boundary faces carry their input triangle, so OBJ groups become side sets as for the conforming kernel. Test: `exact_kernel_meshes_a_cube_and_falls_back_where_it_cannot` (worker protocol). The GUI has no switch for it yet.
+- [x] Exit criterion (met Nov 10, 2026):
+  - rounding validity before and after untangling reported on the clean subset and the synthetic suite. Subset (`cdt_round` example): of the 99 models whose exact mesh finishes within 300 s (101548, 1,500 to 2,000 s, not measured; 135674 alone), 91 round validly as they are (92 %; the review's figure is 93.2 %) and all 99 after untangling. The other 8 had 47 inside tets turned over (36 in 87721), fixed by 24 vertex moves and one edge removal; none was flat in floating point once tets are written in their best vertex order (before that, 27 were, in 4 models). Rounding takes under 0.3 s a model. Synthetic suite (`check_exact`): all 86 parts valid as rounded, the volume still within 1e-9.
+  - no non-positive tet written: `round_region` returns a mesh only when every tet is usable, and the volume gate checks again
+  - every untangle a record (`MESH_ROUNDING_REPAIRED`)
 
 **Milestone 14: Chamfer-and-refine.**
 

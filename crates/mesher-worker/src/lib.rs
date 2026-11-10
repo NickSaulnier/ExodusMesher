@@ -201,6 +201,7 @@ fn write_mesh_exodus(
         let kernel = match p.kernel {
             mesher_core::Kernel::Delaunay => "conforming Delaunay",
             mesher_core::Kernel::Stuffing => "isosurface stuffing",
+            mesher_core::Kernel::Exact => "exact constrained Delaunay",
         };
         format!("block {}: {} tets ({kernel})", p.name, p.tets.len())
     }));

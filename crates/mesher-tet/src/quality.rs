@@ -81,6 +81,37 @@ pub fn float_volume(p: [Point3; 4]) -> f64 {
     dot(sub(p[1], p[0]), cross(sub(p[2], p[0]), sub(p[3], p[0]))) / 6.0
 }
 
+/// The vertex order of tet `v` (an even permutation, so the orientation is
+/// kept) whose floating-point volume is largest, and that volume. A tet
+/// nearly flat to rounding can come out zero from one corner and positive
+/// from another; the order stored is the one a solver computes from.
+#[must_use]
+pub fn best_float_order(v: [u32; 4], at: &dyn Fn(u32) -> Point3) -> ([u32; 4], f64) {
+    const EVEN: [[usize; 4]; 12] = [
+        [0, 1, 2, 3],
+        [0, 2, 3, 1],
+        [0, 3, 1, 2],
+        [1, 0, 3, 2],
+        [1, 2, 0, 3],
+        [1, 3, 2, 0],
+        [2, 0, 1, 3],
+        [2, 1, 3, 0],
+        [2, 3, 0, 1],
+        [3, 0, 2, 1],
+        [3, 1, 0, 2],
+        [3, 2, 1, 0],
+    ];
+    let mut best = (v, float_volume(v.map(at)));
+    for e in &EVEN[1..] {
+        let w = e.map(|k| v[k]);
+        let vol = float_volume(w.map(at));
+        if vol > best.1 {
+            best = (w, vol);
+        }
+    }
+    best
+}
+
 /// Faces of a positive tet, outward.
 const OUTWARD: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
 

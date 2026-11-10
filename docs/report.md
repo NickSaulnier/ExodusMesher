@@ -80,7 +80,7 @@ A record is one finding:
 | `part` | The part, once parts exist |
 | `location` | Where it is: `vertices` (0-based indices into the parsed vertex list), `faces` (0-based indices into the triangulated face list; a polygon of n corners becomes n − 2 consecutive triangles), `obj_lines` (1-based lines of the input file), `point` (a position, when one stands for the finding). Each list holds at most 256 entries; a longer one keeps its full length in `measured` as `vertices_total`, `faces_total` or `obj_lines_total` |
 | `measured`, `threshold` | What was measured, and the limit it was held against, by name |
-| `action`, `outcome` | What was done (`skip_line`, `drop_face`, `fan_triangulate`, `remesh`, `merge`, `remove`, `fill_hole`, `split_edge`, `duplicate_vertex`, `reorient`, `flip`, `truncate`, `fallback`, `abort`) and whether it was `applied`, `failed` or `deferred` to a later stage |
+| `action`, `outcome` | What was done (`skip_line`, `drop_face`, `fan_triangulate`, `remesh`, `merge`, `remove`, `fill_hole`, `split_edge`, `duplicate_vertex`, `reorient`, `flip`, `truncate`, `fallback`, `abort`, `untangle`) and whether it was `applied`, `failed` or `deferred` to a later stage |
 | `hint` | A sentence on what it means or what to try |
 
 At most 100 records are kept per code; `summary.by_code` still counts every occurrence. A finding is never repaired without a record.
@@ -96,6 +96,8 @@ These carry the measurements most often needed to act on them:
 | `MESH_RECOVERY_FAILED` | `missing_faces`; after a remesh retry, `remeshed_triangles` (it succeeded: the record is then a warning with `remesh` / `applied`) or `remesh_retry` (why the retry did not help) |
 | `MESH_BUDGET_EXCEEDED` | `points` against `max_points`, `work_steps` against `max_work_steps` (the constrained kernel), or `lattice_vertices` against `max_lattice_vertices` (stuffing) |
 | `MESH_WORKER_FAILED` | `reason`: `timeout` (with `timeout_seconds`), `out_of_memory` (with `memory_limit_bytes`), `cancelled`, `spawn_failed` (with `io_error`), `died` (with `exit_status`) or `unreadable_result` (the worker finished but its result line did not parse, with `parse_error`; a bug, exit 70); `stderr_tail`. After a timeout or out-of-memory, the client retries with stuffing only and the record becomes a warning with `fallback` / `applied` if that produced a mesh |
+| `MESH_ROUNDING_REPAIRED` | One record per fix of the exact kernel's rounding (`--kernel exact`): `fix` is `vertex_move` (a constructed point moved within a few ulps of its exact position, by `moved`), `flip_2_3` or `edge_removal`; `location.point` is where. Action `untangle` / `applied` |
+| `MESH_ROUNDING_FAILED` | `tets_left` still turned over or flat in floating point after untangling, `turned_over_before`, `fixes`; `location.point` is the first one. The conformal kernel and stuffing follow |
 | `VOL_LOW_QUALITY` | `min_dihedral_degrees` and `max_dihedral_degrees` against the kernel's bounds (10° and 170° for the constrained Delaunay kernel; 10.7° and 164.8°, the proven bounds, for stuffing), and `max_non_orthogonality_degrees` |
 | `VOL_BOUNDARY_DEVIATION` | `hausdorff` and `hausdorff_relative` against `max_deviation_relative` |
 | `VOL_INVERTED_TET` | `tets` not positive by the exact predicate (a kernel bug), or `flat_in_float`: tets positive by the exact predicate but with no positive volume when computed in floating point, as a solver computes it (flat to rounding). Either rejects the candidate mesh, and the next step of the fallback ladder runs |
@@ -135,6 +137,8 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `REPAIR_GUARD_EXCEEDED` | error | A repair changed the shell count or enclosed volume beyond its limit | Error |
 | `MESH_STRICT_UNMET` | error | --strict was given but no conformal mesh could be produced | Error |
 | `MESH_WORKER_FAILED` | error | Worker panicked, timed out or ran out of memory | Error, triggers fallback |
+| `MESH_ROUNDING_REPAIRED` | warning | A tet that rounding to f64 turned over or flattened was untangled | Untangle, warning |
+| `MESH_ROUNDING_FAILED` | error | Tets that rounding to f64 turned over or flattened could not be untangled | Error, triggers fallback |
 | `VOL_INVERTED_TET` | error | Tetrahedron with non-positive volume | Error |
 | `VOL_LOW_QUALITY` | warning | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
 | `VOL_BOUNDARY_DEVIATION` | error | Hausdorff distance to input over tolerance | Error |

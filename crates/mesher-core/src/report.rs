@@ -106,6 +106,8 @@ defect_codes! {
     RepairGuardExceeded = "REPAIR_GUARD_EXCEEDED", Error, "A repair changed the shell count or enclosed volume beyond its limit";
     MeshStrictUnmet = "MESH_STRICT_UNMET", Error, "--strict was given but no conformal mesh could be produced";
     MeshWorkerFailed = "MESH_WORKER_FAILED", Error, "Worker panicked, timed out or ran out of memory";
+    MeshRoundingRepaired = "MESH_ROUNDING_REPAIRED", Warning, "A tet that rounding to f64 turned over or flattened was untangled";
+    MeshRoundingFailed = "MESH_ROUNDING_FAILED", Error, "Tets that rounding to f64 turned over or flattened could not be untangled";
     VolInvertedTet = "VOL_INVERTED_TET", Error, "Tetrahedron with non-positive volume";
     VolLowQuality = "VOL_LOW_QUALITY", Warning, "Non-orthogonality, skewness or volume ratio out of bounds";
     VolBoundaryDeviation = "VOL_BOUNDARY_DEVIATION", Error, "Hausdorff distance to input over tolerance";
@@ -151,6 +153,9 @@ pub enum Action {
     Truncate,
     Fallback,
     Abort,
+    /// A tet rounding turned over, fixed by moving a constructed vertex
+    /// within its rounding or by a flip.
+    Untangle,
 }
 
 /// Result of the action.
@@ -500,6 +505,29 @@ pub struct JobConfig {
     /// and retry before the stuffing fallback.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub no_remesh: bool,
+    /// The volume kernel tried first.
+    #[serde(default, skip_serializing_if = "KernelChoice::is_default")]
+    pub kernel: KernelChoice,
+}
+
+/// The volume kernel tried first; the rest of the fallback ladder follows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum KernelChoice {
+    /// The conforming Delaunay kernel, refined to the element size.
+    #[default]
+    Conformal,
+    /// The exact constrained Delaunay kernel (`--kernel exact`): the input
+    /// surface tetrahedralized exactly, then rounded to f64, without
+    /// refinement; the conforming kernel and stuffing follow if it fails.
+    Exact,
+}
+
+impl KernelChoice {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == KernelChoice::Conformal
+    }
 }
 
 impl Default for JobConfig {
@@ -513,6 +541,7 @@ impl Default for JobConfig {
             stuffing_only: false,
             uniform_size: false,
             no_remesh: false,
+            kernel: KernelChoice::Conformal,
         }
     }
 }
@@ -523,6 +552,8 @@ impl Default for JobConfig {
 pub enum Kernel {
     Delaunay,
     Stuffing,
+    /// The exact constrained Delaunay kernel, rounded to f64.
+    Exact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

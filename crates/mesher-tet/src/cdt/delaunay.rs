@@ -19,7 +19,10 @@ use std::collections::BTreeSet;
 use mesher_geom::Sign;
 use mesher_geom::implicit::{self, Point};
 
+mod untangle;
 mod wrap;
+
+pub use untangle::Untangle;
 
 /// The vertex at infinity.
 pub const GHOST: u32 = u32::MAX;
@@ -167,6 +170,9 @@ pub struct ExactDelaunay {
     vertex_tet: Vec<u32>,
     /// Facet cavity expansions refused for reaching across the facet's plane.
     across_plane: usize,
+    /// While untangling a rounded mesh: local replacements must also give
+    /// tets with positive volume in floating point.
+    float_positive: bool,
 }
 
 /// The face opposite local vertex `k`, outward for a positive tet.
@@ -203,6 +209,7 @@ impl ExactDelaunay {
             duplicates: Vec::new(),
             vertex_tet: Vec::new(),
             across_plane: 0,
+            float_positive: false,
         };
         d.vertex_tet = vec![NONE; d.points.len()];
         let first = d.initial_tet(&order)?;
@@ -920,6 +927,14 @@ impl ExactDelaunay {
         if new
             .iter()
             .any(|&v| v[3] != GHOST && self.orient4(v) != Sign::Positive)
+        {
+            return false;
+        }
+        if self.float_positive
+            && new.iter().any(|&v| {
+                v[3] != GHOST
+                    && crate::quality::best_float_order(v, &|x| self.pt(x).approx()).1 <= 0.0
+            })
         {
             return false;
         }
