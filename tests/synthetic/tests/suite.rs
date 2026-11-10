@@ -7,7 +7,10 @@
 //!   fully explained by the repair records;
 //! - stuffing (Milestone 6): every repaired part of a closed or nearly closed
 //!   case is meshed with positive tets inside the proven dihedral bounds, and
-//!   accepted meshes are valid and match the enclosed volume.
+//!   accepted meshes are valid and match the enclosed volume;
+//! - the exact constrained kernel (Milestone 12): every repaired part of a
+//!   closed case that passes the surface gate has every segment and triangle
+//!   recovered in exact form, and its inside region has the enclosed volume.
 
 #![allow(
     clippy::unwrap_used,
@@ -613,6 +616,74 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
     tally
 }
 
+/// The exact constrained kernel's totals over the suite.
+#[derive(Default)]
+struct ExactTally {
+    parts: u32,
+    steiner_segments: usize,
+    steiner_faces: usize,
+    wrapped: usize,
+    seconds: f64,
+}
+
+/// Milestone 12: the exact kernel (`mesher_tet::cdt::mesh_region`) on every
+/// repaired part of a closed case that passes the surface gate (and whose
+/// shells do not touch at duplicated vertices, which no conformal kernel
+/// takes): every input triangle recovered, and the inside region exactly
+/// the enclosed volume.
+fn check_exact(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>, t: &mut ExactTally) {
+    if c.open || !c.gate_fails.is_empty() || c.conformal_fails {
+        return;
+    }
+    for r in &run.repaired {
+        let started = std::time::Instant::now();
+        let region = match mesher_tet::cdt::mesh_region(&r.points, &r.faces, 0, 5) {
+            Ok(region) => region,
+            Err(e) => {
+                failures.push(format!("{label}: part {} exact kernel: {e}", r.name));
+                continue;
+            }
+        };
+        t.seconds += started.elapsed().as_secs_f64();
+        let det = |a: [f64; 3], b: [f64; 3], c: [f64; 3]| {
+            a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0])
+        };
+        // Relative to a corner, so large offsets do not swamp the volume.
+        let o = r.points.first().copied().unwrap_or([0.0; 3]);
+        let rel = |p: [f64; 3]| [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
+        let enclosed: f64 = r
+            .faces
+            .iter()
+            .map(|f| {
+                det(
+                    rel(r.points[f[0] as usize]),
+                    rel(r.points[f[1] as usize]),
+                    rel(r.points[f[2] as usize]),
+                ) / 6.0
+            })
+            .sum::<f64>()
+            .abs();
+        let at = |v: u32| rel(region.dt().points()[v as usize].approx());
+        let volume: f64 = region
+            .tets
+            .iter()
+            .map(|v| mesher_tet::quality::float_volume(v.map(at)))
+            .sum();
+        let error = (volume - enclosed).abs() / enclosed.max(f64::MIN_POSITIVE);
+        if error > 1e-9 {
+            failures.push(format!(
+                "{label}: part {} exact kernel volume off by {error:.3e}",
+                r.name
+            ));
+        }
+        t.parts += 1;
+        t.steiner_segments += region.recovered.steiner;
+        t.steiner_faces += region.recovered.steiner_on_faces;
+        t.wrapped += region.recovered.wrapped;
+    }
+}
+
 /// How the suite compares locations for each repairable code.
 fn repair_key(code: DefectCode, r: &Record) -> Option<Key> {
     use DefectCode::*;
@@ -929,6 +1000,7 @@ fn synthetic_suite() {
     let mut goldens: Vec<(String, Golden)> = Vec::new();
     let mut failures = Vec::new();
     let (mut meshed_parts, mut accepted_parts, mut delaunay_parts) = (0u32, 0u32, 0u32);
+    let mut exact = ExactTally::default();
     let variants = [(1.0, 0.0), (1e-3, 1e3), (1e4, -5e4)];
 
     for c in cases() {
@@ -955,6 +1027,7 @@ fn synthetic_suite() {
             meshed_parts += t.meshed;
             accepted_parts += t.accepted;
             delaunay_parts += t.delaunay;
+            check_exact(&c, &outcome, &label, &mut failures, &mut exact);
             let mut detected: BTreeMap<DefectCode, Vec<&Record>> = BTreeMap::new();
             for r in outcome
                 .records
@@ -1037,6 +1110,10 @@ fn synthetic_suite() {
 
     eprintln!(
         "\nvolume: {meshed_parts} parts meshed ({delaunay_parts} conformal Delaunay, the rest stuffing), {accepted_parts} accepted by the volume gate"
+    );
+    eprintln!(
+        "exact kernel: {} parts with every constraint recovered, {} Steiner points on segments, {} on faces, {} facets gift-wrapped, {:.2} s",
+        exact.parts, exact.steiner_segments, exact.steiner_faces, exact.wrapped, exact.seconds
     );
 
     check_golden(&goldens, &mut failures);
