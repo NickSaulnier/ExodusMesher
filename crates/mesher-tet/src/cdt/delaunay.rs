@@ -27,6 +27,13 @@ const FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
 /// The six edges of a tet, as local vertex pairs.
 const EDGES: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 
+/// The most tets around an edge that edge removal triangulates in one flip;
+/// beyond it, greedy 2-3 flips shrink the ring first.
+const MAX_RING: usize = 20;
+
+/// How deep edge removal recurses into removing the edges around an edge.
+const REMOVE_DEPTH: usize = 1;
+
 /// What a segment from a vertex first meets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Crossing {
@@ -553,7 +560,8 @@ impl ExactDelaunay {
     }
 
     /// Insert a point without removing any edge `protected` accepts: the
-    /// cavity starts as the Delaunay conflict region and shrinks until every
+    /// cavity starts as the Delaunay conflict region (reached across faces the
+    /// point strictly sees) and shrinks until every
     /// boundary face is strictly visible from the point, no protected edge
     /// and no vertex would be lost, keeping every tet whose closure contains
     /// the point (after Si's constrained Bowyer-Watson in TetGen). The result
@@ -623,7 +631,10 @@ impl ExactDelaunay {
                 }
             }
         }
-        // Start from the conflict region around them.
+        // Start from the conflict region around them, grown only across faces
+        // p strictly sees: the final cavity is star-shaped from p, so the
+        // segment from p to any point of it crosses only such faces, and
+        // nothing else could stay in it.
         let epoch = self.next_epoch();
         for &t in &must {
             self.stamp[t as usize] = epoch;
@@ -635,7 +646,10 @@ impl ExactDelaunay {
             k += 1;
             for j in 0..4 {
                 let u = self.tets[t as usize].n[j];
-                if self.stamp[u as usize] != epoch && self.conflict(u, &p) {
+                if self.stamp[u as usize] != epoch
+                    && (self.is_ghost(t) || self.sees(t, j, &p))
+                    && self.conflict(u, &p)
+                {
                     self.stamp[u as usize] = epoch;
                     cavity.push(u);
                 }
@@ -932,11 +946,156 @@ impl ExactDelaunay {
         self.replace(ring, &new)
     }
 
-    /// Remove edge `xy` by flips: 2-3 flips of faces around it shrink its
-    /// ring to three tets, then a 3-2 flip removes it. Greedy, so it can fail
-    /// part way (the tetrahedralization stays valid). Never removes an edge
-    /// `protected` accepts.
-    fn remove_edge(&mut self, x: u32, y: u32, protected: &dyn Fn(u32, u32) -> bool) -> bool {
+    /// Remove edge `xy` by one flip: triangulate the polygon of vertices
+    /// around it and join every triangle to `x` and to `y` (an n-to-2(n−2)
+    /// flip; Shewchuk's edge removal). A dynamic program over the polygon's
+    /// triangulations keeps the one whose worst tet is best, among those whose
+    /// every tet is positive, so it finds one whenever one exists. A hull edge
+    /// is removed only where its two hull faces are coplanar; the polygon's
+    /// closing edge then becomes a hull edge. Returns whether it was removed;
+    /// nothing changes otherwise.
+    // The dynamic program indexes two rows of `best` by the same loop variable.
+    #[allow(clippy::needless_range_loop)]
+    fn remove_edge_by_triangulation(&mut self, x: u32, y: u32, ring: &[u32]) -> bool {
+        let n = ring.len();
+        if !(3..=MAX_RING).contains(&n) {
+            return false;
+        }
+        // q[i]: the vertex shared by ring[i] and ring[i + 1] besides x and y.
+        let mut q = Vec::with_capacity(n);
+        for i in 0..n {
+            let (s, t) = (
+                self.tets[ring[i] as usize].v,
+                self.tets[ring[(i + 1) % n] as usize].v,
+            );
+            let Some(&v) = s.iter().find(|&&v| v != x && v != y && t.contains(&v)) else {
+                return false;
+            };
+            q.push(v);
+        }
+        let hull = q.contains(&GHOST);
+        if hull {
+            let Some(g) = q.iter().position(|&v| v == GHOST) else {
+                return false;
+            };
+            if q.iter().filter(|&&v| v == GHOST).count() != 1 {
+                return false;
+            }
+            q.rotate_left(g + 1);
+            q.pop();
+            if q.len() < 3 || self.orient4([x, y, q[0], q[q.len() - 1]]) != Sign::Zero {
+                return false;
+            }
+        }
+        // The ring's direction: whether the face opposite y of the tet
+        // holding q[0] and q[1] runs q[0], q[1], x.
+        let Some(&t0) = ring.iter().find(|&&t| {
+            let v = self.tets[t as usize].v;
+            v.contains(&q[0]) && v.contains(&q[1])
+        }) else {
+            return false;
+        };
+        let v0 = self.tets[t0 as usize].v;
+        let Some(k) = v0.iter().position(|&v| v == y) else {
+            return false;
+        };
+        let forward = rotated(face(&v0, k)) == rotated([q[0], q[1], x]);
+        let tets_of = |i: usize, m: usize, j: usize| {
+            let (a, b) = if forward { (q[i], q[m]) } else { (q[m], q[i]) };
+            [[a, b, q[j], x], [b, a, q[j], y]]
+        };
+        // best[i][j]: the best worst quality of a triangulation of the chain
+        // q[i..=j] closed by the edge q[j] q[i], with its middle vertex.
+        let k = q.len();
+        let mut best = vec![vec![(f64::INFINITY, usize::MAX); k]; k];
+        for len in 2..k {
+            for i in 0..k - len {
+                let j = i + len;
+                let mut cell = (f64::NEG_INFINITY, usize::MAX);
+                for m in i + 1..j {
+                    let worst = best[i][m].0.min(best[m][j].0);
+                    if worst <= cell.0 {
+                        continue;
+                    }
+                    let [t1, t2] = tets_of(i, m, j);
+                    if self.orient4(t1) != Sign::Positive || self.orient4(t2) != Sign::Positive {
+                        continue;
+                    }
+                    let quality = self.approx_quality(t1).min(self.approx_quality(t2));
+                    let worst = worst.min(quality);
+                    if worst > cell.0 {
+                        cell = (worst, m);
+                    }
+                }
+                best[i][j] = cell;
+            }
+        }
+        if best[0][k - 1].1 == usize::MAX {
+            return false;
+        }
+        let mut new = Vec::with_capacity(2 * k);
+        let mut stack = vec![(0, k - 1)];
+        while let Some((i, j)) = stack.pop() {
+            if j < i + 2 {
+                continue;
+            }
+            let m = best[i][j].1;
+            if m == usize::MAX {
+                return false;
+            }
+            for t in tets_of(i, m, j) {
+                if hull && i == 0 && j == k - 1 {
+                    // The face through the closing edge is on the hull.
+                    let Some(at) = t.iter().position(|&v| v == q[m]) else {
+                        return false;
+                    };
+                    let f = face(&t, at);
+                    new.push([f[0], f[1], f[2], GHOST]);
+                }
+                new.push(t);
+            }
+            stack.push((i, m));
+            stack.push((m, j));
+        }
+        self.replace(ring, &new)
+    }
+
+    /// A cheap shape measure of a tet from approximate positions: volume over
+    /// the cube of the root mean square edge length (larger is better). It
+    /// only ranks valid choices; validity is exact.
+    fn approx_quality(&self, v: [u32; 4]) -> f64 {
+        let p = v.map(|x| self.pt(x).approx());
+        let d = |a: usize, b: usize| [0, 1, 2].map(|k| p[b][k] - p[a][k]);
+        let (e1, e2, e3) = (d(0, 1), d(0, 2), d(0, 3));
+        let volume = (e1[0] * (e2[1] * e3[2] - e2[2] * e3[1])
+            - e1[1] * (e2[0] * e3[2] - e2[2] * e3[0])
+            + e1[2] * (e2[0] * e3[1] - e2[1] * e3[0]))
+            .abs();
+        let sum: f64 = EDGES
+            .iter()
+            .map(|&(a, b)| d(a, b).iter().map(|c| c * c).sum::<f64>())
+            .sum();
+        let rms = (sum / 6.0).sqrt();
+        let q = volume / (rms * rms * rms);
+        if q.is_finite() { q } else { 0.0 }
+    }
+
+    /// Remove edge `xy` by flips, never one `protected` accepts. Up to
+    /// [`MAX_RING`] tets around it, one flip that triangulates its ring
+    /// (which changes nothing if it fails); beyond, greedy 2-3 flips shrink
+    /// the ring first, and can fail part way (the tetrahedralization stays
+    /// valid). Returns whether `xy` is no longer an edge.
+    pub fn remove_edge(&mut self, x: u32, y: u32, protected: &dyn Fn(u32, u32) -> bool) -> bool {
+        self.remove_edge_within(x, y, protected, REMOVE_DEPTH)
+    }
+
+    fn remove_edge_within(
+        &mut self,
+        x: u32,
+        y: u32,
+        protected: &dyn Fn(u32, u32) -> bool,
+        depth: usize,
+    ) -> bool {
         if protected(x, y) {
             return false;
         }
@@ -944,6 +1103,41 @@ impl ExactDelaunay {
             let Some(mut ring) = self.edge_ring(x, y) else {
                 return true;
             };
+            if ring.len() <= MAX_RING {
+                if self.remove_edge_by_triangulation(x, y, &ring) {
+                    return true;
+                }
+                if depth == 0 {
+                    return false;
+                }
+                // No triangulation of the ring is valid: remove an edge from
+                // either end to a vertex around it, which changes the ring,
+                // and try again (after TetGen's n-to-m flips).
+                let mut around: Vec<u32> = ring
+                    .iter()
+                    .flat_map(|&t| self.tets[t as usize].v)
+                    .filter(|&v| v != x && v != y && v != GHOST)
+                    .collect();
+                around.sort_unstable();
+                around.dedup();
+                for v in around {
+                    for (a, b) in [(x, v), (y, v)] {
+                        if !self.has_edge(a, b)
+                            || !self.remove_edge_within(a, b, protected, depth - 1)
+                        {
+                            continue;
+                        }
+                        let Some(ring) = self.edge_ring(x, y) else {
+                            return true;
+                        };
+                        if ring.len() <= MAX_RING && self.remove_edge_by_triangulation(x, y, &ring)
+                        {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
             if ring.iter().any(|&t| self.is_ghost(t)) {
                 // A hull edge: its ring is two adjacent ghosts and real tets.
                 // Start at the ghost a real tet follows, shrink the real part

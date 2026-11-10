@@ -20,11 +20,10 @@
 //! longer Delaunay. Rounds repeat until every subsegment is an edge, within a
 //! point budget.
 //!
-//! On the 100-model clean subset this recovers 92 models at a median of
-//! about 420 Steiner points; splitting alone recovered 77 at a median of
-//! about 4,000. Long segments through densely packed vertices still need
-//! many splits: halving only succeeds once pieces are as short as the local
-//! spacing.
+//! On the 100-model clean subset this recovers 97 models at a median of
+//! 130 Steiner points; splitting alone recovered 77 at a median of about
+//! 4,000. Segments meeting at well under a degree away from an input vertex
+//! still split until a piece is too short.
 
 use std::collections::BTreeSet;
 

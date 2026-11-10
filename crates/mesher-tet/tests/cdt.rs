@@ -242,9 +242,9 @@ fn check_recovered(name: &str, (p, f): &Surface) -> usize {
 #[test]
 fn segments_are_recovered_exactly() {
     // The cube's corners are cospherical: the Delaunay tetrahedralization may
-    // choose the other diagonal of a face. Hull 2-2 flips recover most; two
-    // need an edge removal greedy flips do not find, and are split.
-    assert!(check_recovered("cube", &cube()) <= 2);
+    // choose the other diagonal of a face. Hull edge removal recovers them,
+    // some only after removing an edge around them first.
+    assert_eq!(check_recovered("cube", &cube()), 0);
     // Flips recover every sphere segment without a point.
     assert_eq!(
         check_recovered("uv sphere", &uv_sphere(16, 10, [0.0; 3], false)),
@@ -295,4 +295,55 @@ fn protected_insertion_keeps_protected_edges() {
     // A point outside the hull is refused.
     let outside = d.insert_protected(Point::explicit([2.0, 2.0, 2.0]).unwrap(), &is);
     assert!(outside.is_err());
+}
+
+#[test]
+fn edge_removal_keeps_the_tetrahedralization_valid() {
+    let never = |_: u32, _: u32| false;
+    // Interior edges of a random tetrahedralization.
+    let mut rng = Rng(0x1405_7b7e_f767_814f);
+    let p: Vec<Point3> = (0..200).map(|_| rng.point()).collect();
+    let mut d = ExactDelaunay::new(explicit(&p), 13).unwrap();
+    let mut removed = 0;
+    for _ in 0..300 {
+        let x = (rng.next() % 200) as u32;
+        let n = d.neighbours(x);
+        let y = n[(rng.next() % n.len() as u64) as usize];
+        if d.remove_edge(x, y, &never) {
+            assert!(!d.has_edge(x, y));
+            removed += 1;
+        }
+        d.check().unwrap();
+    }
+    assert!(removed > 50, "{removed} of 300 removed");
+    // A grid's hull: every face diagonal lies in a hull plane, and removing
+    // it flips the square's other diagonal in. Many points around it are
+    // coplanar, so some need longer flip sequences than removal tries.
+    let mut g = Vec::new();
+    for x in 0..3 {
+        for y in 0..3 {
+            for z in 0..3 {
+                g.push([f64::from(x), f64::from(y), f64::from(z)]);
+            }
+        }
+    }
+    let mut d = ExactDelaunay::new(explicit(&g), 3).unwrap();
+    let at = |x: u32, y: u32, z: u32| 9 * x + 3 * y + z;
+    let mut flipped = 0;
+    for a in 0..2 {
+        for b in 0..2 {
+            for (u, v) in [
+                (at(0, a, b), at(0, a + 1, b + 1)),
+                (at(0, a + 1, b), at(0, a, b + 1)),
+            ] {
+                if d.has_edge(u, v) {
+                    let removed = d.remove_edge(u, v, &never);
+                    assert_eq!(removed, !d.has_edge(u, v));
+                    flipped += usize::from(removed);
+                    d.check().unwrap();
+                }
+            }
+        }
+    }
+    assert!(flipped >= 1, "{flipped} of 4 removed");
 }

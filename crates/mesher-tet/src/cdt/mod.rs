@@ -8,7 +8,8 @@
 //! facet merging by tolerance: every input triangle is a constraint.
 //!
 //! - [`delaunay`]: the exact incremental Delaunay tetrahedralization, with
-//!   flips, edge removal and insertion that protects chosen edges.
+//!   flips, edge removal by retriangulating an edge's ring, and insertion
+//!   that protects chosen edges.
 //! - [`segments`]: segment recovery by flips, then splitting with LNC
 //!   Steiner points.
 //!
