@@ -231,6 +231,303 @@ pub fn classify(points: &[Point3], triangles: &[[u32; 3]]) -> Result<Acute, Cham
     })
 }
 
+/// A vertex of the chamfered surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChamferVertex {
+    /// An input vertex, kept.
+    Input(u32),
+    /// On input edge `edge` (lower vertex first), cut at distance `epsilon`
+    /// from its end `from`, an acute vertex.
+    OnEdge {
+        edge: (u32, u32),
+        from: u32,
+        epsilon: f64,
+    },
+    /// Inside input triangle `triangle`: a bridge point.
+    InFace { triangle: u32 },
+}
+
+/// One face of the chamfered surface: what is left of an input triangle,
+/// a polygon in the triangle's orientation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChamferedFace {
+    pub triangle: u32,
+    /// Vertex indices, in order around the face.
+    pub polygon: Vec<u32>,
+}
+
+/// The chamfered surface: every acute vertex and edge cut away, so no two
+/// of its constraints sharing a vertex meet at an acute angle. It is open:
+/// the cuts leave holes, bounded by the bridges.
+#[derive(Debug, Clone)]
+pub struct Chamfered {
+    pub vertices: Vec<ChamferVertex>,
+    /// Each vertex's exact position: input vertices explicit, cuts on edges
+    /// LNC points, bridge points BPT points of their triangle.
+    pub points: Vec<Point>,
+    pub faces: Vec<ChamferedFace>,
+    /// How far each input vertex was chamfered (zero if it was not).
+    pub epsilon: Vec<f64>,
+}
+
+fn sub3(a: Point3, b: Point3) -> Point3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot3(a: Point3, b: Point3) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn norm3(a: Point3) -> f64 {
+    dot3(a, a).sqrt()
+}
+
+fn scale3(a: Point3, s: f64) -> Point3 {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+fn add3(a: Point3, b: Point3) -> Point3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn unit(a: Point3) -> Option<Point3> {
+    let n = norm3(a);
+    (n > 0.0 && n.is_finite()).then(|| scale3(a, 1.0 / n))
+}
+
+fn cross3(a: Point3, b: Point3) -> Point3 {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// The unit vector in the plane of `u` and `w`, perpendicular to `u`, on
+/// `w`'s side: `(u × w) × u`, by cross products, which stay accurate for a
+/// needle (nearly parallel `u` and `w`) where subtracting projections
+/// cancels.
+fn perpendicular(u: Point3, w: Point3) -> Option<Point3> {
+    unit(cross3(cross3(u, w), u))
+}
+
+/// The length `L` of a bridge's three edges: the legs from the cuts `U`,
+/// `V` (at distance `e` along unit `a`, `b` from the corner) along the unit
+/// perpendiculars `na`, `nb`, and the edge between their ends, all equal:
+/// `|e(a − b) + L(na − nb)| = L`, the smaller positive root.
+fn bridge_length(e: f64, a: Point3, b: Point3, na: Point3, nb: Point3) -> Option<f64> {
+    let d = scale3(sub3(a, b), e);
+    let f = sub3(na, nb);
+    let (qa, qb, qc) = (dot3(f, f) - 1.0, 2.0 * dot3(d, f), dot3(d, d));
+    let roots: Vec<f64> = if qa.abs() < 1e-12 {
+        if qb == 0.0 {
+            Vec::new()
+        } else {
+            vec![-qc / qb]
+        }
+    } else {
+        let disc = qb * qb - 4.0 * qa * qc;
+        if disc < 0.0 {
+            Vec::new()
+        } else {
+            let s = disc.sqrt();
+            vec![(-qb - s) / (2.0 * qa), (-qb + s) / (2.0 * qa)]
+        }
+    };
+    roots
+        .into_iter()
+        .filter(|l| *l > 0.0 && l.is_finite())
+        .min_by(f64::total_cmp)
+}
+
+/// Barycentric weights of `p` in triangle `t` (assumed in its plane), kept
+/// inside it: negative weights are clamped and the rest renormalized.
+fn barycentric(p: Point3, t: [Point3; 3]) -> [f64; 3] {
+    let n = cross3(sub3(t[1], t[0]), sub3(t[2], t[0]));
+    let area = |a: Point3, b: Point3, c: Point3| dot3(n, cross3(sub3(b, a), sub3(c, a)));
+    let whole = area(t[0], t[1], t[2]);
+    let w = [
+        area(p, t[1], t[2]) / whole,
+        area(t[0], p, t[2]) / whole,
+        area(t[0], t[1], p) / whole,
+    ]
+    .map(|x| if x.is_finite() { x.max(0.0) } else { 0.0 });
+    let sum: f64 = w.iter().sum();
+    if sum > 0.0 {
+        w.map(|x| x / sum)
+    } else {
+        [1.0 / 3.0; 3]
+    }
+}
+
+/// A bridge leg: from a cut on an input edge (at `base`), the unit direction
+/// into the triangle, its length, and the bridge point at its end (a vertex
+/// index).
+#[derive(Debug, Clone, Copy)]
+struct Leg {
+    base: Point3,
+    direction: Point3,
+    length: f64,
+    end: u32,
+}
+
+/// Chamfer a classified surface (see [`classify`]): every acute vertex `P`
+/// is cut at `ε = lfs(P) / 3` on its edges, each triangle at `P` taking a
+/// bridge of three equal edges whose legs are perpendicular to its edges
+/// (so no new acute angle appears), and every acute edge is then cut along
+/// its length: in each triangle at it, the bridge legs are shortened to the
+/// shortest one and the rectangle between the edge and the legs' ends
+/// removed.
+///
+/// # Errors
+/// [`ChamferError::Degenerate`] where a bridge cannot be built (a triangle
+/// with collinear corners).
+pub fn chamfer(
+    points: &[Point3],
+    triangles: &[[u32; 3]],
+    acute: &Acute,
+) -> Result<Chamfered, ChamferError> {
+    let n = points.len();
+    let epsilon: Vec<f64> = (0..n)
+        .map(|v| {
+            if acute.vertices[v] {
+                acute.vertex_lfs[v] / 3.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let mut vertices: Vec<ChamferVertex> = (0..n as u32).map(ChamferVertex::Input).collect();
+    let mut exact: Vec<Point> = points
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| Point::explicit(p).map_err(|_| ChamferError::NonFinite { vertex: i as u32 }))
+        .collect::<Result<_, _>>()?;
+    let mut approx: Vec<Point3> = points.to_vec();
+    // Cuts on edges, shared by the two triangles at the edge.
+    let mut cuts: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    let mut cut = |from: u32,
+                   to: u32,
+                   vertices: &mut Vec<ChamferVertex>,
+                   exact: &mut Vec<Point>,
+                   approx: &mut Vec<Point3>|
+     -> Result<u32, ChamferError> {
+        if let Some(&c) = cuts.get(&(from, to)) {
+            return Ok(c);
+        }
+        let (p, x) = (points[from as usize], points[to as usize]);
+        let length = norm3(sub3(x, p));
+        let e = epsilon[from as usize];
+        let t = 1.0 - e / length;
+        let point = Point::lnc(p, x, t).map_err(|_| ChamferError::NonFinite { vertex: from })?;
+        let id = vertices.len() as u32;
+        vertices.push(ChamferVertex::OnEdge {
+            edge: (from.min(to), from.max(to)),
+            from,
+            epsilon: e,
+        });
+        approx.push(point.approx());
+        exact.push(point);
+        cuts.insert((from, to), id);
+        Ok(id)
+    };
+    let mut faces = Vec::with_capacity(triangles.len());
+    for (ti, t) in triangles.iter().enumerate() {
+        let tri = t.map(|v| points[v as usize]);
+        let mut polygon: Vec<u32> = Vec::new();
+        let mut legs: Vec<Leg> = Vec::new();
+        for k in 0..3 {
+            let (p, next, prev) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+            if !acute.vertices[p as usize] {
+                polygon.push(p);
+                continue;
+            }
+            // Corner p, between prev and next: replaced by the cut on p-prev,
+            // its bridge point, the other bridge point, the cut on p-next.
+            let at = points[p as usize];
+            let (a, b) = (
+                sub3(points[next as usize], at),
+                sub3(points[prev as usize], at),
+            );
+            let degenerate = ChamferError::Degenerate {
+                triangle: ti as u32,
+            };
+            let (ua, ub) = (
+                unit(a).ok_or(degenerate.clone())?,
+                unit(b).ok_or(degenerate.clone())?,
+            );
+            let na = perpendicular(a, b).ok_or(degenerate.clone())?;
+            let nb = perpendicular(b, a).ok_or(degenerate.clone())?;
+            let e = epsilon[p as usize];
+            let length = bridge_length(e, ua, ub, na, nb).ok_or(degenerate)?;
+            let u = cut(p, next, &mut vertices, &mut exact, &mut approx)?;
+            let v = cut(p, prev, &mut vertices, &mut exact, &mut approx)?;
+            let (u_base, v_base) = (approx[u as usize], approx[v as usize]);
+            let mut leg = |base: Point3, direction: Point3| {
+                let id = vertices.len() as u32;
+                vertices.push(ChamferVertex::InFace {
+                    triangle: ti as u32,
+                });
+                exact.push(Point::from(base));
+                approx.push(base);
+                legs.push(Leg {
+                    base,
+                    direction,
+                    length,
+                    end: id,
+                });
+                id
+            };
+            let v_end = leg(v_base, nb);
+            let u_end = leg(u_base, na);
+            polygon.extend([v, v_end, u_end, u]);
+        }
+        // Edge chamfers: legs shortened to the shortest, then each acute
+        // edge's cuts dropped from the face (the rectangle between them and
+        // their legs' ends goes).
+        let has_acute_edge = (0..3).any(|k| {
+            let (u, v) = (t[k], t[(k + 1) % 3]);
+            acute
+                .edges
+                .get(&(u.min(v), u.max(v)))
+                .is_some_and(|e| e.acute)
+        });
+        if has_acute_edge {
+            let shortest = legs.iter().map(|l| l.length).fold(f64::INFINITY, f64::min);
+            for l in &mut legs {
+                l.length = shortest;
+            }
+            let on_acute_edge = |c: u32| match vertices[c as usize] {
+                ChamferVertex::OnEdge { edge, .. } => {
+                    acute.edges.get(&edge).is_some_and(|e| e.acute)
+                }
+                _ => false,
+            };
+            polygon.retain(|&c| !on_acute_edge(c));
+        }
+        // Bridge points: the legs' ends, exactly on the triangle.
+        for l in &legs {
+            let end = add3(l.base, scale3(l.direction, l.length));
+            let w = barycentric(end, tri);
+            let p = Point::bpt(tri, w).map_err(|_| ChamferError::Degenerate {
+                triangle: ti as u32,
+            })?;
+            approx[l.end as usize] = p.approx();
+            exact[l.end as usize] = p;
+        }
+        faces.push(ChamferedFace {
+            triangle: ti as u32,
+            polygon,
+        });
+    }
+    Ok(Chamfered {
+        vertices,
+        points: exact,
+        faces,
+        epsilon,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -343,6 +640,108 @@ mod tests {
         let a = classify(&p, &f).unwrap();
         assert!(a.vertices[4], "the apex");
         assert!(a.vertices[2], "the far corner");
+    }
+
+    /// Chamfer and check: every face vertex on its own triangle, every face
+    /// polygon a proper polygon covering less than its triangle, and at every
+    /// new vertex the two face edges there not acute (to rounding: bridge
+    /// points are rounded onto their triangle). Returns the faces' vertex
+    /// counts.
+    fn check_chamfer(name: &str, p: &[Point3], f: &[[u32; 3]]) -> Vec<usize> {
+        let a = classify(p, f).unwrap();
+        let c = chamfer(p, f, &a).unwrap();
+        let at = |v: u32| c.points[v as usize].approx();
+        for face in &c.faces {
+            let t = f[face.triangle as usize];
+            assert!(face.polygon.len() >= 3, "{name}: {face:?}");
+            for &v in &face.polygon {
+                match c.vertices[v as usize] {
+                    ChamferVertex::Input(x) => assert!(t.contains(&x), "{name}"),
+                    ChamferVertex::OnEdge { edge, .. } => {
+                        assert!(t.contains(&edge.0) && t.contains(&edge.1), "{name}");
+                    }
+                    ChamferVertex::InFace { triangle } => {
+                        assert_eq!(triangle, face.triangle, "{name}");
+                    }
+                }
+            }
+            let k = face.polygon.len();
+            for i in 0..k {
+                let v = face.polygon[i];
+                if matches!(c.vertices[v as usize], ChamferVertex::Input(_)) {
+                    continue;
+                }
+                let prev = at(face.polygon[(i + k - 1) % k]);
+                let next = at(face.polygon[(i + 1) % k]);
+                let here = at(v);
+                let (u, w) = (sub3(prev, here), sub3(next, here));
+                let cos = dot3(u, w) / (norm3(u) * norm3(w));
+                assert!(cos <= 1e-6, "{name}: acute at {v} ({cos}) in {face:?}");
+            }
+            // Area: positive, and under the triangle's.
+            let tri = t.map(|v| p[v as usize]);
+            let normal = {
+                let u = sub3(tri[1], tri[0]);
+                let w = sub3(tri[2], tri[0]);
+                [
+                    u[1] * w[2] - u[2] * w[1],
+                    u[2] * w[0] - u[0] * w[2],
+                    u[0] * w[1] - u[1] * w[0],
+                ]
+            };
+            let mut area = 0.0;
+            for i in 0..k {
+                let (q, r) = (at(face.polygon[i]), at(face.polygon[(i + 1) % k]));
+                let (q, r) = (sub3(q, tri[0]), sub3(r, tri[0]));
+                area += dot3(
+                    normal,
+                    [
+                        q[1] * r[2] - q[2] * r[1],
+                        q[2] * r[0] - q[0] * r[2],
+                        q[0] * r[1] - q[1] * r[0],
+                    ],
+                );
+            }
+            let whole = dot3(normal, normal);
+            assert!(
+                area > 0.0 && area <= whole * (1.0 + 1e-12),
+                "{name}: area {area} of {whole}"
+            );
+        }
+        c.faces.iter().map(|f| f.polygon.len()).collect()
+    }
+
+    #[test]
+    fn chamfering_cuts_acute_corners_and_edges() {
+        // A cube: nothing to cut.
+        let (p, f) = cube();
+        assert!(check_chamfer("cube", &p, &f).iter().all(|&n| n == 3));
+        // A regular tetrahedron: every corner and edge cut, leaving each face
+        // a hexagon of bridge points.
+        let p = vec![
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+        ];
+        let f = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+        assert!(check_chamfer("tetrahedron", &p, &f).iter().all(|&n| n == 6));
+        // A wedge prism: its lengthwise edges cut, its end caps' corners too.
+        let mut p = Vec::new();
+        for z in [0.0, 1.0] {
+            p.extend([[0.0, 0.0, z], [1.0, 0.0, z], [0.5, 3.0, z]]);
+        }
+        let f = vec![
+            [0, 2, 1],
+            [3, 4, 5],
+            [0, 1, 4],
+            [0, 4, 3],
+            [1, 2, 5],
+            [1, 5, 4],
+            [2, 0, 3],
+            [2, 3, 5],
+        ];
+        check_chamfer("wedge", &p, &f);
     }
 
     #[test]
