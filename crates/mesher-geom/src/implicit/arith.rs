@@ -148,6 +148,25 @@ impl Interval {
             Interval::WHOLE
         }
     }
+
+    /// Bounds `[lo, hi]` certainly holding `o + x / w` for every `x` in
+    /// `self` and `w` in `w`, rounded outwards; `None` where `w` may be zero
+    /// or a bound is not finite.
+    pub(crate) fn offset_quotient(&self, w: &Interval, o: f64) -> Option<[f64; 2]> {
+        if !(w.lo > 0.0 || w.hi < 0.0) {
+            return None;
+        }
+        let q = [
+            self.lo / w.lo,
+            self.lo / w.hi,
+            self.hi / w.lo,
+            self.hi / w.hi,
+        ];
+        let lo = next_down(q.iter().copied().fold(f64::INFINITY, f64::min));
+        let hi = next_up(q.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+        let (lo, hi) = (next_down(o + lo), next_up(o + hi));
+        (lo.is_finite() && hi.is_finite()).then_some([lo, hi])
+    }
 }
 
 impl Ring for Interval {

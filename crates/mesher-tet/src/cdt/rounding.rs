@@ -220,15 +220,23 @@ pub fn round_region(
         },
     );
     let diagonal2: f64 = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum();
+    // By facet (merged flat triangles together).
+    let facet_of = &recovered.facet_of;
+    let facet = |t: usize| facet_of.get(t).copied().unwrap_or(t as u32) as usize;
     let mut covered = vec![0.0f64; triangles.len()];
+    let mut whole = vec![0.0f64; triangles.len()];
     for &(f, t) in &boundary {
-        if let Some(c) = covered.get_mut(t as usize) {
+        if let Some(c) = covered.get_mut(facet(t as usize)) {
             *c += area(f.map(at));
         }
     }
     for (t, tri) in triangles.iter().enumerate() {
-        let whole = area(tri.map(|v| points[v as usize]));
-        if (covered[t] - whole).abs() > 1e-9 * whole + 1e-12 * diagonal2 {
+        if let Some(w) = whole.get_mut(facet(t)) {
+            *w += area(tri.map(|v| points[v as usize]));
+        }
+    }
+    for t in 0..triangles.len() {
+        if facet(t) == t && (covered[t] - whole[t]).abs() > 1e-9 * whole[t] + 1e-12 * diagonal2 {
             return Err(RoundingError::Boundary { triangle: t as u32 });
         }
     }

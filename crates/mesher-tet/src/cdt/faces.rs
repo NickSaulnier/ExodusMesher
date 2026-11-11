@@ -36,13 +36,14 @@
 //! when no edge crosses it; its subfaces are then read off the
 //! tetrahedralization. What is left is reported, not repaired.
 
-use std::collections::BTreeSet;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 
-use mesher_geom::Point3;
 use mesher_geom::implicit::{self, Kind, Point};
+use mesher_geom::{Point3, Sign};
 
 use super::delaunay::{ExactDelaunay, Inserted, Refill};
-use super::segments::{SegmentError, Subsegment, recover_segments};
+use super::segments::{SegmentError, Subsegment, recover_segments_with};
 
 /// A face of the tetrahedralization on an input triangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +104,9 @@ pub struct RecoveredFaces {
     /// Facet cavity expansions refused for reaching across the facet's
     /// plane (see [`ExactDelaunay::expansions_across_plane`]).
     pub across_plane: usize,
+    /// Each input triangle's facet, by its first triangle (itself unless
+    /// flat triangles were merged).
+    pub facet_of: Vec<u32>,
 }
 
 /// Flip steps per missing subface or diagonal in a pass.
@@ -120,14 +124,27 @@ const MAX_ROUNDS: usize = 64;
 const PER_ROUND: usize = 8;
 const TRIES: usize = 4 * PER_ROUND;
 
+/// With `merge_flat`, the longest polygon a lone triangle is triangulated
+/// into subfaces for; a longer one is a planar region instead.
+const SUBFACE_POLYGON: usize = 512;
+
 /// A facet: its input triangle, boundary polygon (with the sides each
 /// vertex is on) and the Steiner points inside it.
 struct Facet {
+    /// Its input triangle (for a merged facet, its first).
+    triangle: u32,
     corners: [u32; 3],
     polygon: Vec<(u32, [bool; 3])>,
     inside: Vec<u32>,
     /// The subfaces flips work towards, while there are no points inside.
     subfaces: Vec<[u32; 3]>,
+    /// A merged facet's triangles, with their flat sides (empty for one
+    /// input triangle): `polygon` then holds every vertex on it, boundary
+    /// and inside.
+    tris: Vec<([u32; 3], [bool; 3])>,
+    /// A merged facet's boundary pieces, each in the direction that has the
+    /// facet on its left.
+    boundary: Vec<(u32, u32)>,
 }
 
 impl Facet {
@@ -138,6 +155,136 @@ impl Facet {
             .chain(self.inside.iter().copied())
             .collect()
     }
+}
+
+/// The edges between two coplanar input triangles that fold out flat (each
+/// side of the edge has one triangle, in opposite directions, and their far
+/// corners lie on opposite sides of it in their plane). Exact.
+fn flat_edges(points: &[Point], triangles: &[[u32; 3]]) -> BTreeSet<(u32, u32)> {
+    // Each edge's sides: (from, to, far corner) in its triangles.
+    type Sides = Vec<(u32, u32, u32)>;
+    let mut by_edge: std::collections::BTreeMap<(u32, u32), Sides> =
+        std::collections::BTreeMap::new();
+    for t in triangles {
+        for k in 0..3 {
+            let (u, v, w) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+            by_edge.entry(key(u, v)).or_default().push((u, v, w));
+        }
+    }
+    let pt = |v: u32| &points[v as usize];
+    let mut out = BTreeSet::new();
+    for (e, sides) in by_edge {
+        let &[(u, v, a), (u2, v2, b)] = sides.as_slice() else {
+            continue;
+        };
+        if (u2, v2) != (v, u) || implicit::orient3d(pt(u), pt(v), pt(a), pt(b)) != Sign::Zero {
+            continue;
+        }
+        let Some(axis) =
+            (0..3).find(|&k| implicit::orient2d_projected(pt(u), pt(v), pt(a), k) != Sign::Zero)
+        else {
+            continue;
+        };
+        let sa = implicit::orient2d_projected(pt(u), pt(v), pt(a), axis);
+        let sb = implicit::orient2d_projected(pt(u), pt(v), pt(b), axis);
+        if sb != Sign::Zero && sb != sa {
+            out.insert(e);
+        }
+    }
+    out
+}
+
+/// The faces of a merged facet: those with every vertex on it, flooded from
+/// the inner side of its boundary pieces without crossing one (faces with
+/// their vertices on it can span a notch outside it).
+fn region_faces(dt: &ExactDelaunay, f: &Facet) -> Vec<[u32; 3]> {
+    region_flood(dt, f).0
+}
+
+/// [`region_faces`], and whether they cover the facet: every boundary piece
+/// has one of them on its inner side and every other edge of theirs two of
+/// them. Then they form a patch whose boundary is exactly the facet's, so
+/// they cover it (faces of a tetrahedralization do not overlap); where a
+/// part is uncovered, the faces around it have an edge with one of them.
+/// Exact and combinatorial.
+fn region_flood(dt: &ExactDelaunay, f: &Facet) -> (Vec<[u32; 3]>, bool) {
+    let _s = crate::prof::scope("cdt faces: region faces");
+    let candidates = faces_on(dt, &f.vertices());
+    let Some(&(t0, _)) = f.tris.first() else {
+        return (candidates, false);
+    };
+    let pt = |v: u32| &dt.points()[v as usize];
+    let Some(axis) = (0..3)
+        .find(|&k| implicit::orient2d_projected(pt(t0[0]), pt(t0[1]), pt(t0[2]), k) != Sign::Zero)
+    else {
+        return (Vec::new(), false);
+    };
+    let up = implicit::orient2d_projected(pt(t0[0]), pt(t0[1]), pt(t0[2]), axis);
+    let mut by_edge: std::collections::BTreeMap<(u32, u32), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, c) in candidates.iter().enumerate() {
+        for k in 0..3 {
+            by_edge
+                .entry(key(c[k], c[(k + 1) % 3]))
+                .or_default()
+                .push(i);
+        }
+    }
+    let walls: BTreeSet<(u32, u32)> = f.boundary.iter().map(|&(a, b)| key(a, b)).collect();
+    let mut inside = vec![false; candidates.len()];
+    let mut stack = Vec::new();
+    let mut covered = true;
+    for &(a, b) in &f.boundary {
+        let mut inner = 0;
+        for &i in by_edge.get(&key(a, b)).map_or(&[][..], |v| v.as_slice()) {
+            let c = candidates[i];
+            let Some(&w) = c.iter().find(|&&x| x != a && x != b) else {
+                continue;
+            };
+            if implicit::orient2d_projected(pt(a), pt(b), pt(w), axis) == up {
+                inner += 1;
+                if !inside[i] {
+                    inside[i] = true;
+                    stack.push(i);
+                }
+            }
+        }
+        covered &= inner == 1;
+    }
+    while let Some(i) = stack.pop() {
+        let c = candidates[i];
+        for k in 0..3 {
+            let e = key(c[k], c[(k + 1) % 3]);
+            if walls.contains(&e) {
+                continue;
+            }
+            for &j in by_edge.get(&e).map_or(&[][..], |v| v.as_slice()) {
+                if !inside[j] {
+                    inside[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+    }
+    let faces: Vec<[u32; 3]> = candidates
+        .into_iter()
+        .zip(inside)
+        .filter(|&(_, i)| i)
+        .map(|(c, _)| c)
+        .collect();
+    if covered {
+        let mut count: std::collections::BTreeMap<(u32, u32), u32> =
+            std::collections::BTreeMap::new();
+        for c in &faces {
+            for k in 0..3 {
+                *count.entry(key(c[k], c[(k + 1) % 3])).or_default() += 1;
+            }
+        }
+        covered = count
+            .iter()
+            .all(|(e, &n)| n == if walls.contains(e) { 1 } else { 2 });
+    }
+    (faces, covered)
 }
 
 /// The faces of `dt` with every vertex in `on` (the vertices of one input
@@ -158,6 +305,123 @@ fn key(u: u32, v: u32) -> (u32, u32) {
     (u.min(v), u.max(v))
 }
 
+/// Is facet `f` not yet a union of faces? A facet with no points inside
+/// whose subfaces are all faces is covered; otherwise look for an edge
+/// meeting it (for a merged facet, see [`region_flood`]).
+fn crossed_now(dt: &ExactDelaunay, f: &Facet) -> bool {
+    let _s = crate::prof::scope("cdt faces: crossed");
+    if !f.tris.is_empty() {
+        return !region_flood(dt, f).1;
+    }
+    !(f.inside.is_empty() && f.subfaces.iter().all(|&s| dt.has_face(s)))
+        && !dt.facet_crossings(f.corners, &f.vertices()).is_empty()
+}
+
+/// The edges face recovery must not remove: the subsegments, and the sides
+/// of each facet's faces (its subfaces while it has no points inside, the
+/// faces on it otherwise). Kept up to date facet by facet: a facet's faces
+/// change only where the tetrahedralization made tets at one of its
+/// vertices (see [`ExactDelaunay::log_touched`]), or where its own subfaces
+/// or points change (marked dirty).
+struct Protected {
+    segments: BTreeSet<(u32, u32)>,
+    /// The edges each facet gives.
+    by_facet: Vec<Vec<(u32, u32)>>,
+    /// How many facets give each edge.
+    count: BTreeMap<(u32, u32), u32>,
+    /// The facets at each vertex.
+    at: BTreeMap<u32, Vec<usize>>,
+    /// Facets to read again at the next refresh.
+    dirty: BTreeSet<usize>,
+    /// Whether each merged facet's faces cover it (see [`region_flood`]).
+    covered: Vec<bool>,
+}
+
+impl Protected {
+    /// Every facet's edges; `dt` logs from here on.
+    fn new(dt: &mut ExactDelaunay, facets: &[Facet], segments: BTreeSet<(u32, u32)>) -> Self {
+        dt.log_touched(true);
+        let mut p = Protected {
+            segments,
+            by_facet: vec![Vec::new(); facets.len()],
+            count: BTreeMap::new(),
+            at: BTreeMap::new(),
+            dirty: (0..facets.len()).collect(),
+            covered: vec![false; facets.len()],
+        };
+        for (i, f) in facets.iter().enumerate() {
+            for v in f.vertices() {
+                p.at.entry(v).or_default().push(i);
+            }
+        }
+        p.refresh(dt, facets);
+        p
+    }
+
+    /// A facet's edges, and for a merged facet whether its faces cover it.
+    fn facet_edges(dt: &ExactDelaunay, f: &Facet) -> (Vec<(u32, u32)>, bool) {
+        let (faces, covered) = if !f.tris.is_empty() {
+            region_flood(dt, f)
+        } else if f.inside.is_empty() {
+            (f.subfaces.clone(), false)
+        } else {
+            (faces_on(dt, &f.vertices()), false)
+        };
+        let mut edges: Vec<(u32, u32)> = faces
+            .iter()
+            .flat_map(|s| (0..3).map(move |k| key(s[k], s[(k + 1) % 3])))
+            .collect();
+        edges.sort_unstable();
+        edges.dedup();
+        (edges, covered)
+    }
+
+    /// Facet `i` gained vertex `v` (a Steiner point on it).
+    fn add_vertex(&mut self, i: usize, v: u32) {
+        self.at.entry(v).or_default().push(i);
+        self.dirty.insert(i);
+    }
+
+    /// Read again the facets at the vertices `dt` logged and the dirty ones.
+    fn refresh(&mut self, dt: &mut ExactDelaunay, facets: &[Facet]) {
+        let _s = crate::prof::scope("cdt faces: protect");
+        for v in dt.take_touched() {
+            if let Some(fs) = self.at.get(&v) {
+                self.dirty.extend(fs.iter().copied());
+            }
+        }
+        for i in std::mem::take(&mut self.dirty) {
+            let (new, covered) = Self::facet_edges(dt, &facets[i]);
+            self.covered[i] = covered;
+            for e in std::mem::replace(&mut self.by_facet[i], new) {
+                if let Entry::Occupied(mut c) = self.count.entry(e) {
+                    *c.get_mut() -= 1;
+                    if *c.get() == 0 {
+                        c.remove();
+                    }
+                }
+            }
+            for &e in &self.by_facet[i] {
+                *self.count.entry(e).or_default() += 1;
+            }
+        }
+        // Debug builds check the facets left alone against reading them all.
+        #[cfg(debug_assertions)]
+        for (i, f) in facets.iter().enumerate() {
+            debug_assert_eq!(
+                (self.by_facet[i].clone(), self.covered[i]),
+                Self::facet_edges(dt, f),
+                "facet {i}"
+            );
+        }
+    }
+
+    fn contains(&self, x: u32, y: u32) -> bool {
+        let e = key(x, y);
+        self.segments.contains(&e) || self.count.contains_key(&e)
+    }
+}
+
 /// Recover every segment of `triangles` (see [`recover_segments`]), then
 /// make every input triangle a union of faces, by flips, cavity
 /// retetrahedralization and Steiner points on it. `max_points` bounds the
@@ -171,9 +435,40 @@ pub fn recover_faces(
     max_points: usize,
     seed: u64,
 ) -> Result<RecoveredFaces, FaceError> {
-    let segments = recover_segments(points, triangles, max_points, seed)?;
+    recover_faces_with(points, &[], triangles, false, max_points, seed)
+}
+
+/// [`recover_faces`] with `extra` points too (see
+/// [`super::segments::recover_segments_with`]): those exactly inside an
+/// input triangle start as vertices inside its facet, so its subfaces have
+/// them as corners. With `merge_flat`, coplanar triangles across flat edges
+/// are one facet, and the flat edges are not segments; its subfaces carry
+/// its first triangle. A triangle with points inside, or whose polygon is
+/// longer than 512 vertices, is such a planar-region facet too.
+///
+/// # Errors
+/// See [`FaceError`].
+pub fn recover_faces_with(
+    points: &[Point3],
+    extra: &[Point],
+    triangles: &[[u32; 3]],
+    merge_flat: bool,
+    max_points: usize,
+    seed: u64,
+) -> Result<RecoveredFaces, FaceError> {
+    let setup = crate::prof::scope("cdt faces: flat edges");
+    let flat = if merge_flat {
+        let explicit: Vec<Point> = points.iter().map(|&p| Point::from(p)).collect();
+        flat_edges(&explicit, triangles)
+    } else {
+        BTreeSet::new()
+    };
+    drop(setup);
+    let mut segments = recover_segments_with(points, extra, triangles, &flat, max_points, seed)?;
+    let setup = crate::prof::scope("cdt faces: setup");
+    let mut inside_of = std::mem::take(&mut segments.inside);
     let limit = if max_points == 0 {
-        20 * points.len() + 10_000
+        20 * points.len() + extra.len() + 10_000
     } else {
         max_points
     };
@@ -223,13 +518,36 @@ pub fn recover_faces(
                 c.1[(k + 2) % 3] = true;
             }
         }
-        let subfaces = triangulate(&dt, &polygon).ok_or(FaceError::Degenerate { triangle: ti })?;
+        let inside = inside_of
+            .get_mut(ti as usize)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        // Flips work towards subfaces only where nothing is inside. With
+        // `merge_flat`, only on a triangle with no flat side and a short
+        // polygon (triangulating one is cubic in its length); the rest
+        // become planar regions.
+        let alone = !(0..3).any(|k| flat.contains(&key(t[k], t[(k + 1) % 3])));
+        let subfaces =
+            if inside.is_empty() && (!merge_flat || (alone && polygon.len() <= SUBFACE_POLYGON)) {
+                triangulate(&dt, &polygon).ok_or(FaceError::Degenerate { triangle: ti })?
+            } else {
+                Vec::new()
+            };
         facets.push(Facet {
+            triangle: ti,
             corners: *t,
             polygon,
-            inside: Vec::new(),
             subfaces,
+            inside,
+            tris: Vec::new(),
+            boundary: Vec::new(),
         });
+    }
+    let mut facet_of: Vec<u32> = (0..triangles.len() as u32).collect();
+    drop(setup);
+    if merge_flat {
+        let _s = crate::prof::scope("cdt faces: merge");
+        facets = merge_facets(facets, triangles, &flat, &chains, &mut facet_of);
     }
     let initially_missing = facets
         .iter()
@@ -240,42 +558,36 @@ pub fn recover_faces(
         subs.iter().map(|s| key(s.ends[0], s.ends[1])).collect();
     // Subsegments, the subfaces' sides, and the sides of faces already on
     // a facet with points inside.
-    let protect = |dt: &ExactDelaunay, facets: &[Facet]| {
-        let mut p = segment_edges.clone();
-        for f in facets {
-            let faces = if f.inside.is_empty() {
-                f.subfaces.clone()
-            } else {
-                faces_on(dt, &f.vertices())
-            };
-            for s in faces {
-                for k in 0..3 {
-                    p.insert(key(s[k], s[(k + 1) % 3]));
-                }
-            }
-        }
-        p
-    };
+    let mut protected = Protected::new(&mut dt, &facets, segment_edges);
     // A facet with no points inside whose subfaces are all faces is covered;
     // otherwise look for an edge meeting it.
-    let crossed = |dt: &ExactDelaunay, f: &Facet| {
-        !(f.inside.is_empty() && f.subfaces.iter().all(|&s| dt.has_face(s)))
-            && !dt.facet_crossings(f.corners, &f.vertices()).is_empty()
-    };
-    let crossed_before = facets.iter().filter(|f| crossed(&dt, f)).count();
+    // A merged facet's answer comes with its protected edges, kept up to
+    // date.
+    let crossed =
+        |dt: &mut ExactDelaunay, protected: &mut Protected, facets: &[Facet], ti: usize| {
+            if !facets[ti].tris.is_empty() {
+                protected.refresh(dt, facets);
+                return !protected.covered[ti];
+            }
+            crossed_now(dt, &facets[ti])
+        };
+    let crossed_before = (0..facets.len())
+        .filter(|&ti| crossed(&mut dt, &mut protected, &facets, ti))
+        .count();
     // 1. Flips.
     for pass in 0..MAX_PASSES {
         if pass > 0 {
-            for f in &mut facets {
-                if f.subfaces.iter().any(|&s| !dt.has_face(s)) {
+            for (i, f) in facets.iter_mut().enumerate() {
+                if f.tris.is_empty() && f.subfaces.iter().any(|&s| !dt.has_face(s)) {
                     if let Some(s) = triangulate(&dt, &f.polygon) {
                         f.subfaces = s;
+                        protected.dirty.insert(i);
                     }
                 }
             }
         }
-        let protected = protect(&dt, &facets);
-        let is_protected = |x: u32, y: u32| protected.contains(&key(x, y));
+        protected.refresh(&mut dt, &facets);
+        let is_protected = |x: u32, y: u32| protected.contains(x, y);
         let mut progress = false;
         for f in facets.iter().flat_map(|f| f.subfaces.iter()) {
             if dt.has_face(*f) {
@@ -302,7 +614,7 @@ pub fn recover_faces(
     // A recovered facet stays recovered, its faces protected, so only these
     // are checked again (every facet is, at the end).
     let mut active: Vec<usize> = (0..facets.len())
-        .filter(|&ti| crossed(&dt, &facets[ti]))
+        .filter(|&ti| crossed(&mut dt, &mut protected, &facets, ti))
         .collect();
     let crossed_after_flips = active.len();
     // 2. Cavities, then 3. Steiner points on what is left.
@@ -314,23 +626,28 @@ pub fn recover_faces(
     for _ in 0..MAX_ROUNDS {
         let mut left = Vec::new();
         for &ti in &active {
-            if !crossed(&dt, &facets[ti]) {
+            if !crossed(&mut dt, &mut protected, &facets, ti) {
                 continue;
             }
-            let protected = protect(&dt, &facets);
-            let is_protected = |x: u32, y: u32| protected.contains(&key(x, y));
+            protected.refresh(&mut dt, &facets);
+            let is_protected = |x: u32, y: u32| protected.contains(x, y);
             let f = &facets[ti];
             let _s = crate::prof::scope("cdt faces: cavity");
-            let refill = dt.recover_facet_by_cavity(f.corners, &f.vertices(), &is_protected);
+            let refill = if f.tris.is_empty() {
+                dt.recover_facet_by_cavity(f.corners, &f.vertices(), &is_protected)
+            } else {
+                dt.recover_region_by_cavity(&f.tris, &f.vertices(), &is_protected)
+            };
             if refill == Refill::GiftWrapped {
                 wrapped += 1;
             }
             if refill.recovered() {
                 // The cavity chose how the uncovered part is triangulated:
                 // read it back, so the faces it made are protected.
-                if facets[ti].inside.is_empty() {
+                if facets[ti].inside.is_empty() && facets[ti].tris.is_empty() {
                     if let Some(s) = triangulate(&dt, &facets[ti].polygon) {
                         facets[ti].subfaces = s;
+                        protected.dirty.insert(ti);
                     }
                 }
             } else {
@@ -348,9 +665,13 @@ pub fn recover_faces(
                 break;
             }
             // At or near the first crossings that give new vertices.
-            let crossings = dt.facet_crossings(facets[ti].corners, &facets[ti].vertices());
-            let protected = protect(&dt, &facets);
-            let is_protected = |x: u32, y: u32| protected.contains(&key(x, y));
+            let crossings = if facets[ti].tris.is_empty() {
+                dt.facet_crossings(facets[ti].corners, &facets[ti].vertices())
+            } else {
+                dt.region_crossings(&facets[ti].tris, &facets[ti].vertices())
+            };
+            protected.refresh(&mut dt, &facets);
+            let is_protected = |x: u32, y: u32| protected.contains(x, y);
             let _s = crate::prof::scope("cdt faces: steiner points");
             // Edges sharing no vertex first, so the points spread over the
             // facet rather than along one fan of edges; the rest after.
@@ -366,10 +687,20 @@ pub fn recover_faces(
             let candidates: Vec<Point> = spread
                 .iter()
                 .chain(&rest)
-                .flat_map(|&(x, y)| crossing_point(&dt, points, facets[ti].corners, x, y))
+                .flat_map(|&(x, y)| {
+                    // On the triangle of a merged facet the edge crosses.
+                    let f = &facets[ti];
+                    let corners = f
+                        .tris
+                        .iter()
+                        .find(|t| dt.crosses_region(x, y, std::slice::from_ref(*t)))
+                        .map_or(f.corners, |t| t.0);
+                    crossing_point(&dt, points, corners, x, y)
+                })
                 .take(TRIES)
                 .collect();
             let mut added = 0;
+            let mut gained = Vec::new();
             let most = PER_ROUND.min(1 << steiner_rounds[ti].min(8));
             steiner_rounds[ti] += 1;
             for p in candidates {
@@ -378,24 +709,35 @@ pub fn recover_faces(
                 }
                 if let Ok(Inserted::New(m)) = dt.insert_protected(p, &is_protected) {
                     facets[ti].inside.push(m);
+                    gained.push(m);
                     steiner_on_faces += 1;
                     inserted = true;
                     added += 1;
                 }
+            }
+            for m in gained {
+                protected.add_vertex(ti, m);
             }
         }
         if !inserted {
             break;
         }
     }
+    dt.log_touched(false);
+    let _s = crate::prof::scope("cdt faces: final");
     let mut missing = Vec::new();
     let mut subfaces = Vec::new();
-    for (ti, f) in facets.iter().enumerate() {
-        if crossed(&dt, f) {
-            missing.push(ti as u32);
+    for f in &facets {
+        if crossed_now(&dt, f) {
+            missing.push(f.triangle);
         } else {
-            subfaces.extend(faces_on(&dt, &f.vertices()).into_iter().map(|v| Subface {
-                triangle: ti as u32,
+            let faces = if f.tris.is_empty() {
+                faces_on(&dt, &f.vertices())
+            } else {
+                region_faces(&dt, f)
+            };
+            subfaces.extend(faces.into_iter().map(|v| Subface {
+                triangle: f.triangle,
                 v,
             }));
         }
@@ -416,7 +758,116 @@ pub fn recover_faces(
         ],
         wrapped,
         across_plane,
+        facet_of,
     })
+}
+
+/// Merge the facets of coplanar triangles across `flat` edges: one facet
+/// each, holding its triangles, every vertex on it and its boundary pieces;
+/// a triangle with no flat side keeps its own facet. `facet_of` gets each
+/// triangle's facet's first triangle.
+fn merge_facets(
+    facets: Vec<Facet>,
+    triangles: &[[u32; 3]],
+    flat: &BTreeSet<(u32, u32)>,
+    chains: &std::collections::BTreeMap<(u32, u32), Vec<u32>>,
+    facet_of: &mut [u32],
+) -> Vec<Facet> {
+    fn find(root: &mut [u32], x: u32) -> u32 {
+        let mut r = x;
+        while root[r as usize] != r {
+            r = root[r as usize];
+        }
+        let mut y = x;
+        while root[y as usize] != r {
+            let next = root[y as usize];
+            root[y as usize] = r;
+            y = next;
+        }
+        r
+    }
+    let n = triangles.len();
+    let mut root: Vec<u32> = (0..n as u32).collect();
+    let mut by_edge: std::collections::BTreeMap<(u32, u32), Vec<u32>> =
+        std::collections::BTreeMap::new();
+    for (ti, t) in triangles.iter().enumerate() {
+        for k in 0..3 {
+            by_edge
+                .entry(key(t[k], t[(k + 1) % 3]))
+                .or_default()
+                .push(ti as u32);
+        }
+    }
+    for e in flat {
+        if let Some(&[a, b]) = by_edge.get(e).map(Vec::as_slice) {
+            let (ra, rb) = (find(&mut root, a), find(&mut root, b));
+            if ra != rb {
+                root[ra.max(rb) as usize] = ra.min(rb);
+            }
+        }
+    }
+    let mut groups: std::collections::BTreeMap<u32, Vec<u32>> = std::collections::BTreeMap::new();
+    for ti in 0..n as u32 {
+        let r = find(&mut root, ti);
+        groups.entry(r).or_default().push(ti);
+    }
+    let mut old: Vec<Option<Facet>> = facets.into_iter().map(Some).collect();
+    let mut out = Vec::with_capacity(groups.len());
+    for (_, group) in groups {
+        let first = group[0];
+        for &ti in &group {
+            facet_of[ti as usize] = first;
+        }
+        let sides = |t: [u32; 3]| [0, 1, 2].map(|k| flat.contains(&key(t[k], t[(k + 1) % 3])));
+        // A lone triangle with subfaces keeps its facet.
+        if group.len() == 1
+            && old[first as usize]
+                .as_ref()
+                .is_some_and(|f| !f.subfaces.is_empty())
+        {
+            if let Some(f) = old[first as usize].take() {
+                out.push(f);
+            }
+            continue;
+        }
+        let mut vertices: BTreeSet<u32> = BTreeSet::new();
+        let mut tris = Vec::new();
+        let mut boundary = Vec::new();
+        for &ti in &group {
+            let t = triangles[ti as usize];
+            let flats = sides(t);
+            tris.push((t, flats));
+            vertices.extend(t);
+            if let Some(f) = old[ti as usize].take() {
+                vertices.extend(f.inside);
+            }
+            for k in 0..3 {
+                if flats[k] {
+                    continue;
+                }
+                let (u, v) = (t[k], t[(k + 1) % 3]);
+                let mut chain = chains
+                    .get(&key(u, v))
+                    .cloned()
+                    .unwrap_or_else(|| vec![u, v]);
+                if chain.first() != Some(&u) {
+                    chain.reverse();
+                }
+                vertices.extend(&chain);
+                boundary.extend(chain.windows(2).map(|w| (w[0], w[1])));
+            }
+        }
+        out.push(Facet {
+            triangle: first,
+            corners: triangles[first as usize],
+            polygon: vertices.into_iter().map(|v| (v, [false; 3])).collect(),
+            inside: Vec::new(),
+            subfaces: Vec::new(),
+            tris,
+            boundary,
+        });
+    }
+    out
 }
 
 /// A point exactly on input triangle `corners` where the edge `xy` crosses

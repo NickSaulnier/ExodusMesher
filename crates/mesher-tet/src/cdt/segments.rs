@@ -27,8 +27,8 @@
 
 use std::collections::BTreeSet;
 
-use mesher_geom::Point3;
-use mesher_geom::implicit::Point;
+use mesher_geom::implicit::{self, Point};
+use mesher_geom::{Point3, Sign};
 
 use super::delaunay::{DelaunayError, ExactDelaunay, Inserted};
 
@@ -112,6 +112,11 @@ pub struct RecoveredSegments {
     pub initially_missing: usize,
     /// Rounds of splitting.
     pub rounds: usize,
+    /// Each input triangle's extra points strictly inside it (see
+    /// [`recover_segments_with`]).
+    pub inside: Vec<Vec<u32>>,
+    /// Extra points left out for equalling a vertex.
+    pub left_out: usize,
 }
 
 /// The unique edges of `triangles`, lower vertex first, sorted.
@@ -129,12 +134,17 @@ pub fn segments_of(triangles: &[[u32; 3]]) -> Vec<(u32, u32)> {
 /// Flip steps tried per missing subsegment before splitting it.
 const FLIP_STEPS: usize = 64;
 
+fn key(u: u32, v: u32) -> (u32, u32) {
+    (u.min(v), u.max(v))
+}
+
 fn distance(a: Point3, b: Point3) -> f64 {
     (0..3).map(|k| (a[k] - b[k]).powi(2)).sum::<f64>().sqrt()
 }
 
 /// Tetrahedralize `points` and recover every edge of `triangles`. `max_points`
-/// bounds the vertex count (0: 20 × the inputs + 10,000).
+/// bounds the vertex count (0: 20 × the inputs + any extra points +
+/// 10,000).
 ///
 /// # Errors
 /// See [`SegmentError`].
@@ -144,21 +154,74 @@ pub fn recover_segments(
     max_points: usize,
     seed: u64,
 ) -> Result<RecoveredSegments, SegmentError> {
+    recover_segments_with(points, &[], triangles, &BTreeSet::new(), max_points, seed)
+}
+
+/// [`recover_segments`] with `extra` points too (vertices from
+/// `points.len()` on): one exactly on a segment starts as a vertex of its
+/// chain, one exactly inside an input triangle is listed in
+/// [`RecoveredSegments::inside`], and one equal to a vertex is left out (so
+/// later extra points move down). The edges in `skip` (flat edges inside a
+/// merged facet) are not segments: points on them are listed inside a
+/// triangle beside them.
+///
+/// # Errors
+/// See [`SegmentError`].
+pub fn recover_segments_with(
+    points: &[Point3],
+    extra: &[Point],
+    triangles: &[[u32; 3]],
+    skip: &BTreeSet<(u32, u32)>,
+    max_points: usize,
+    seed: u64,
+) -> Result<RecoveredSegments, SegmentError> {
     let explicit: Vec<Point> = points
         .iter()
         .enumerate()
         .map(|(i, &p)| Point::explicit(p).map_err(|_| SegmentError::NonFinite { vertex: i as u32 }))
         .collect::<Result<_, _>>()?;
-    let mut dt = ExactDelaunay::new(explicit, seed)?;
-    if let Some(&(v, _)) = dt.duplicates().first() {
-        // A duplicate input vertex would make segments ambiguous.
-        return Err(SegmentError::VertexOnSegment {
-            segment: (v, v),
-            vertex: v,
-        });
-    }
+    let inputs = points.len() as u32;
+    // Extra points equal to a vertex go (found on the surface, or by the
+    // tetrahedralization), and the rest are placed again.
+    let mut extra: Vec<Point> = extra.to_vec();
+    let mut left_out = 0;
+    let (mut dt, mut found) = loop {
+        let mut all = explicit.clone();
+        all.extend_from_slice(&extra);
+        let found = super::locate::locate(points, triangles, &all, inputs);
+        let mut gone: BTreeSet<u32> = found.coincident.iter().map(|&x| x - inputs).collect();
+        let dt = if gone.is_empty() {
+            let _s = crate::prof::scope("cdt tetrahedralize");
+            let dt = ExactDelaunay::new(all, seed)?;
+            for &(i, v) in dt.duplicates() {
+                if i < inputs && v < inputs {
+                    // A duplicate input vertex would make segments ambiguous.
+                    return Err(SegmentError::VertexOnSegment {
+                        segment: (i, i),
+                        vertex: i,
+                    });
+                }
+                gone.insert(i.max(v) - inputs);
+            }
+            Some(dt)
+        } else {
+            None
+        };
+        match dt {
+            Some(dt) if gone.is_empty() => break (dt, found),
+            _ => {
+                left_out += gone.len();
+                let mut k = 0u32;
+                extra.retain(|_| {
+                    k += 1;
+                    !gone.contains(&(k - 1))
+                });
+            }
+        }
+    };
+    let setup = crate::prof::scope("cdt segments: setup");
     let limit = if max_points == 0 {
-        20 * points.len() + 10_000
+        20 * points.len() + extra.len() + 10_000
     } else {
         max_points
     };
@@ -178,23 +241,57 @@ pub fn recover_segments(
     } else {
         1.0
     };
-    let inputs = points.len() as u32;
-    let mut subs: Vec<Subsegment> = segments_of(triangles)
-        .into_iter()
-        .map(|s| Subsegment {
-            segment: s,
-            ends: [s.0, s.1],
-            t: [1.0, 0.0],
-        })
-        .collect();
+    // Each segment a chain through the extra points on it, with their
+    // parameters (approximate: they only choose where to split).
+    let mut subs: Vec<Subsegment> = Vec::new();
+    for (ti, t) in triangles.iter().enumerate() {
+        for k in 0..3 {
+            let e = key(t[k], t[(k + 1) % 3]);
+            if skip.contains(&e) {
+                if let Some(on) = found.on_segment.remove(&e) {
+                    found.inside[ti].extend(on);
+                }
+            }
+        }
+    }
+    for s in segments_of(triangles) {
+        if skip.contains(&s) {
+            continue;
+        }
+        let (a, b) = (points[s.0 as usize], points[s.1 as usize]);
+        let ab = [0, 1, 2].map(|k| a[k] - b[k]);
+        let ab2: f64 = ab.iter().map(|x| x * x).sum();
+        let param = |w: u32| {
+            if w == s.0 {
+                1.0
+            } else if w == s.1 {
+                0.0
+            } else {
+                let q = dt.points()[w as usize].approx();
+                (0..3).map(|k| (q[k] - b[k]) * ab[k]).sum::<f64>() / ab2
+            }
+        };
+        let mut chain = vec![s.0];
+        if let Some(on) = found.on_segment.get(&s) {
+            chain.extend_from_slice(on);
+        }
+        chain.push(s.1);
+        for w in chain.windows(2) {
+            subs.push(Subsegment {
+                segment: s,
+                ends: [w[0], w[1]],
+                t: [param(w[0]), param(w[1])],
+            });
+        }
+    }
     // Whether each subsegment is known to be an edge: recovered ones are
     // protected, so they stay edges and need no checking again.
+    drop(setup);
     let mut done: Vec<bool> = vec![false; subs.len()];
     let mut steiner = 0usize;
     let mut by_flips = 0usize;
     let mut initially_missing = None;
     let mut rounds = 0usize;
-    let key = |u: u32, v: u32| (u.min(v), u.max(v));
     loop {
         let missing: Vec<usize> = {
             let _s = crate::prof::scope("cdt segments: find missing");
@@ -253,6 +350,17 @@ pub fn recover_segments(
             }
             let p =
                 Point::lnc(a, b, t).map_err(|_| SegmentError::TooShort { segment: s.segment })?;
+            // Between an extra point's approximate parameter and the other
+            // end is not exactly between them: check.
+            if (s.ends[0] >= inputs || s.ends[1] >= inputs)
+                && implicit::dot_sign(
+                    &dt.points()[s.ends[0] as usize],
+                    &p,
+                    &dt.points()[s.ends[1] as usize],
+                ) != Sign::Negative
+            {
+                return Err(SegmentError::TooShort { segment: s.segment });
+            }
             let _s = crate::prof::scope("cdt segments: protected insertion");
             let m = match dt.insert_protected(p, &|x, y| protected.contains(&key(x, y)))? {
                 Inserted::New(m) => m,
@@ -296,6 +404,8 @@ pub fn recover_segments(
         by_flips,
         initially_missing: initially_missing.unwrap_or(0),
         rounds,
+        inside: found.inside,
+        left_out,
     })
 }
 

@@ -18,20 +18,39 @@ use std::collections::{BTreeMap, BTreeSet};
 use mesher_geom::Sign;
 use mesher_geom::implicit;
 
-use super::{ExactDelaunay, face, rotated, sorted3};
+use super::{Bounds, ExactDelaunay, apart_boxes, face, join, rotated, sorted3};
 use crate::fxhash::FxHashMap;
 
 /// Tets per cavity tet and vertex a fill may make before it is abandoned.
 const WRAP_STEPS: usize = 16;
 
 /// Orientations of vertex quadruples, remembered: a fill asks the same ones
-/// of many candidate tets.
+/// of many candidate tets. Also each cavity vertex's box
+/// ([`mesher_geom::implicit::Point::bounds`]), to pass over vertices and
+/// front faces that certainly miss a candidate tet.
 struct Orients<'a> {
     dt: &'a ExactDelaunay,
     seen: RefCell<FxHashMap<[u32; 4], Sign>>,
+    /// The cavity's vertices, sorted, and their boxes.
+    verts: Vec<u32>,
+    boxes: Vec<Bounds>,
 }
 
 impl Orients<'_> {
+    fn bounds(&self, v: u32) -> Bounds {
+        match self.verts.binary_search(&v) {
+            Ok(k) => self.boxes[k],
+            Err(_) => self.dt.pt(v).bounds(),
+        }
+    }
+
+    fn bounds_of(&self, vs: &[u32]) -> Bounds {
+        vs.iter()
+            .map(|&v| self.bounds(v))
+            .reduce(|a, b| join(&a, &b))
+            .unwrap_or([[f64::NEG_INFINITY, f64::INFINITY]; 3])
+    }
+
     fn orient(&self, v: [u32; 4]) -> Sign {
         // Sort, counting swaps: an odd permutation flips the sign.
         let mut k = v;
@@ -118,38 +137,34 @@ impl ExactDelaunay {
     ) -> bool {
         let _p = crate::prof::scope("cdt wrap: fits");
         let faces = [0, 1, 2, 3].map(|k| face(&t, k));
+        let tet_box = o4.bounds_of(&t);
         // Each vertex's side of the tet's four face planes (outward); the
         // last, the front face's, is `below` (reversed: the tet is on its
-        // negative side). Only vertices beyond the front face can be inside.
-        let signs: Vec<Option<[Sign; 4]>> = verts
-            .iter()
-            .zip(below)
-            .map(|(&x, &s)| {
-                (s == Sign::Negative).then(|| {
-                    let [a, b, c] = [0, 1, 2].map(|k| {
-                        let f = faces[k];
-                        o4.orient([f[0], f[1], f[2], x])
-                    });
-                    [a, b, c, s]
-                })
-            })
-            .collect();
+        // negative side). Only vertices beyond the front face can be inside,
+        // and only those whose box meets the tet's.
+        let beyond = |x: u32, s: Sign| {
+            let [a, b, c] = [0, 1, 2].map(|k| {
+                let f = faces[k];
+                o4.orient([f[0], f[1], f[2], x])
+            });
+            [a, b, c, s]
+        };
         for (k, &x) in verts.iter().enumerate() {
-            if let Some(s) = signs[k] {
-                if !t.contains(&x) && s.iter().all(|&s| s != Sign::Positive) {
-                    return false;
-                }
+            if below[k] == Sign::Negative
+                && !t.contains(&x)
+                && !apart_boxes(&o4.bounds(x), &tet_box)
+                && beyond(x, below[k]).iter().all(|&s| s != Sign::Positive)
+            {
+                return false;
             }
         }
         let sign = |x: u32| match verts.binary_search(&x) {
-            Ok(k) => signs[k].unwrap_or_else(|| {
-                if below[k] == Sign::Positive {
-                    // Outside the front face's plane: nothing else matters.
-                    [Sign::Zero, Sign::Zero, Sign::Zero, Sign::Positive]
-                } else {
-                    faces.map(|f| o4.orient([f[0], f[1], f[2], x]))
-                }
-            }),
+            Ok(k) => match below[k] {
+                Sign::Negative => beyond(x, below[k]),
+                // Outside the front face's plane: nothing else matters.
+                Sign::Positive => [Sign::Zero, Sign::Zero, Sign::Zero, Sign::Positive],
+                Sign::Zero => faces.map(|f| o4.orient([f[0], f[1], f[2], x])),
+            },
             Err(_) => faces.map(|f| o4.orient([f[0], f[1], f[2], x])),
         };
         // Points all strictly outside one face plane miss the tet.
@@ -163,6 +178,10 @@ impl ExactDelaunay {
                 if k != 3 && rotated(faces[k]) != rotated(tau) {
                     return false;
                 }
+                continue;
+            }
+            // A face whose box misses the tet's meets nothing of it.
+            if apart_boxes(&o4.bounds_of(&tau), &tet_box) {
                 continue;
             }
             let st = tau.map(sign);
@@ -318,9 +337,12 @@ impl ExactDelaunay {
                 .is_ok_and(|k| signs[k] == Sign::Zero)
         };
         let sides = [&upper, &lower];
+        let boxes = verts.iter().map(|&v| self.pt(v).bounds()).collect();
         let o4 = Orients {
             dt: self,
             seen: RefCell::new(FxHashMap::default()),
+            verts: verts.clone(),
+            boxes,
         };
         for (open, closed) in [(0, 1), (1, 0)] {
             let faces: Vec<[u32; 3]> = halves[open].iter().map(|&(f, _)| f).collect();

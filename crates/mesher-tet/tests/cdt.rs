@@ -6,7 +6,8 @@
 use mesher_geom::Point3;
 use mesher_geom::implicit::Point;
 use mesher_tet::cdt::{
-    ExactDelaunay, Inserted, mesh_region, recover_faces, recover_segments, round_region,
+    ExactDelaunay, Inserted, mesh_region, mesh_region_with, recover_faces, recover_segments,
+    round_region,
 };
 use mesher_tet::delaunay;
 
@@ -770,4 +771,46 @@ fn rounded_meshes_are_valid() {
     for seed in 1..=5 {
         check_rounded("twisted sandwich", &twisted_sandwich(&mut seeded(seed)));
     }
+}
+
+/// Extra points, some implicit, on a cube's flat diagonals, its edges, inside
+/// its faces and inside it: with flat triangles merged, each face is one
+/// facet holding its points, no Steiner point is needed, and the mesh
+/// rounds to the cube with each face covered.
+#[test]
+fn extra_points_and_merged_flat_facets() {
+    let (p, f) = cube();
+    let mut extra = vec![
+        // Centres of the faces z = 0 and z = 1, on their diagonals.
+        Point::from([0.5, 0.5, 0.0]),
+        Point::lnc([1.0, 1.0, 1.0], [0.0, 0.0, 1.0], 0.5).unwrap(),
+        // On edges, inside faces, inside the cube.
+        Point::lnc([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.3).unwrap(),
+        Point::bpt(
+            [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 1.0]],
+            [3.0, 2.0, 1.0],
+        )
+        .unwrap(),
+        Point::from([0.4, 0.6, 0.5]),
+        // A copy of a corner, left out.
+        Point::from([1.0, 1.0, 1.0]),
+    ];
+    let mut rng = seeded(7);
+    for _ in 0..40 {
+        extra.push(Point::from(rng.point()));
+    }
+    let region = mesh_region_with(&p, &extra, &f, true, 0, 3).unwrap();
+    let recovered = &region.recovered;
+    assert_eq!(recovered.steiner + recovered.steiner_on_faces, 0);
+    assert_eq!(recovered.dt.points().len(), p.len() + extra.len() - 1);
+    // Each face is one facet: its two triangles share their first.
+    let facets: std::collections::BTreeSet<u32> = recovered.facet_of.iter().copied().collect();
+    assert_eq!(facets.len(), 6);
+    let m = round_region(region, &p, &f).unwrap();
+    let volume: f64 = m
+        .tets
+        .iter()
+        .map(|t| mesher_tet::quality::float_volume(t.map(|v| m.points[v as usize])))
+        .sum();
+    assert!((volume - 1.0).abs() < 1e-12, "{volume}");
 }

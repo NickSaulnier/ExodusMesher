@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use mesher_geom::Point3;
 
 use super::delaunay::ExactDelaunay;
-use super::faces::{FaceError, RecoveredFaces, recover_faces};
+use super::faces::{FaceError, RecoveredFaces, recover_faces_with};
 
 /// Local faces of a positive tet, outward.
 const FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
@@ -90,12 +90,30 @@ pub fn mesh_region(
     max_points: usize,
     seed: u64,
 ) -> Result<Region, RegionError> {
-    let recovered = recover_faces(points, triangles, max_points, seed)?;
+    mesh_region_with(points, &[], triangles, false, max_points, seed)
+}
+
+/// [`mesh_region`] with `extra` points too, and with coplanar triangles
+/// merged across flat edges if `merge_flat` (see
+/// [`super::faces::recover_faces_with`]).
+///
+/// # Errors
+/// See [`RegionError`].
+pub fn mesh_region_with(
+    points: &[Point3],
+    extra: &[mesher_geom::implicit::Point],
+    triangles: &[[u32; 3]],
+    merge_flat: bool,
+    max_points: usize,
+    seed: u64,
+) -> Result<Region, RegionError> {
+    let recovered = recover_faces_with(points, extra, triangles, merge_flat, max_points, seed)?;
     if !recovered.missing.is_empty() {
         return Err(RegionError::Missing {
             triangles: recovered.missing.clone(),
         });
     }
+    let _s = crate::prof::scope("cdt region: mark");
     let walls: BTreeMap<[u32; 3], u32> = recovered
         .subfaces
         .iter()

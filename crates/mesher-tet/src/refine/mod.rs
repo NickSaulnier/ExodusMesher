@@ -43,7 +43,10 @@ use mesher_geom::{Point3, Sign};
 use crate::cdt::{DelaunayError, ExactDelaunay, GHOST, Inserted};
 use crate::chamfer::{ChamferVertex, FilteredChamfer};
 
+mod enriched;
 mod plane;
+
+pub use enriched::{Enriched, enriched_cdt};
 
 use plane::PlaneDelaunay;
 
@@ -365,6 +368,10 @@ pub struct Refined {
     pub steiner_tets: usize,
     /// Bad tets whose fix added no point, left as they are.
     pub stuck_tets: usize,
+    /// The split points inside segments that lie in an input triangle's
+    /// plane rather than on a line (bridges): exactly on the triangle, but
+    /// only near their segment.
+    pub on_bridges: Vec<u32>,
 }
 
 /// Refinement under way.
@@ -1047,9 +1054,13 @@ impl Refiner {
 
     fn finish(self, vertex_of: Vec<Option<u32>>, box_corners: [u32; 8]) -> Refined {
         let mut subsegments = Vec::new();
+        let mut on_bridges = Vec::new();
         for c in &self.chains {
             for w in c.verts.windows(2) {
                 subsegments.push([w[0], w[1]]);
+            }
+            if matches!(c.carrier, Carrier::Triangle { .. }) && c.verts.len() > 2 {
+                on_bridges.extend_from_slice(&c.verts[1..c.verts.len() - 1]);
             }
         }
         let mut subfaces = Vec::new();
@@ -1069,6 +1080,7 @@ impl Refiner {
             stuck_subfaces: self.stuck.len(),
             steiner_tets: self.steiner_tets,
             stuck_tets: self.stuck_tets.len(),
+            on_bridges,
         }
     }
 }
@@ -1576,5 +1588,47 @@ mod tests {
         check("cube", &p, &f, true);
         let (p, f) = tetrahedron();
         check("tetrahedron", &p, &f, true);
+    }
+
+    /// The enriched CDT of the refined mesh conforms to the input exactly:
+    /// it rounds with every tet positive and every input triangle covered,
+    /// and fills the enclosed volume. The cube has nothing acute, so it keeps
+    /// the refined quality (radius-edge 2: face angles of 14.48° or more).
+    #[test]
+    fn enriched_cdt_of_a_cube_and_a_chamfered_tetrahedron() {
+        let volume = |p: &[Point3], f: &[[u32; 3]]| {
+            f.iter()
+                .map(|t| {
+                    let [a, b, c] = t.map(|v| p[v as usize]);
+                    dot(a, cross(b, c)) / 6.0
+                })
+                .sum::<f64>()
+        };
+        for (name, (p, f)) in [("cube", cube()), ("tetrahedron", tetrahedron())] {
+            let surface = chamfer_filtered(&p, &f, 1e-6).unwrap();
+            let refined = refine_conforming(&surface, &p, &f, 0.2, 500_000, 2.0).unwrap();
+            let e = enriched_cdt(&refined, &surface, &p, &f, 1e-6, 0, 7).unwrap();
+            assert!(e.kept > 0, "{name}");
+            let mesh = crate::cdt::round_region(e.region, &p, &f).unwrap();
+            let filled: f64 = mesh
+                .tets
+                .iter()
+                .map(|t| crate::quality::float_volume(t.map(|v| mesh.points[v as usize])))
+                .sum();
+            let whole = volume(&p, &f).abs();
+            assert!(
+                (filled - whole).abs() < 1e-9 * whole,
+                "{name}: {filled} of {whole}"
+            );
+            if name == "cube" {
+                let worst = mesh
+                    .tets
+                    .iter()
+                    .filter_map(|t| tet_quality(t.map(|v| mesh.points[v as usize])))
+                    .map(|(_, q)| q)
+                    .fold(0.0f64, f64::max);
+                assert!(worst <= 2.0 + 1e-9, "cube: radius-edge {worst}");
+            }
+        }
     }
 }

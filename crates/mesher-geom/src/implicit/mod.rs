@@ -216,6 +216,22 @@ impl Point {
         let w = h[3].value();
         [0, 1, 2].map(|k| o[k] + h[k].value() / w)
     }
+
+    /// A box certainly holding the point: `[lo, hi]` per axis, from interval
+    /// arithmetic rounded outwards (unbounded where the intervals are too
+    /// wide to say). For spatial filters that must never miss the point.
+    #[must_use]
+    pub fn bounds(&self) -> [[f64; 2]; 3] {
+        if let Kind::Explicit(p) = self.kind {
+            return p.map(|c| [c, c]);
+        }
+        let o = self.kind.origin();
+        let h = homog::<Interval>(&self.kind, o);
+        [0, 1, 2].map(|k| {
+            h[k].offset_quotient(&h[3], o[k])
+                .unwrap_or([f64::NEG_INFINITY, f64::INFINITY])
+        })
+    }
 }
 
 impl From<Point3> for Point {

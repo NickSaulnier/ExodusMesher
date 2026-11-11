@@ -751,6 +751,45 @@ fn approximate_positions_are_close() {
     }
 }
 
+/// Every point lies in its box: random points, and nearly degenerate line
+/// and plane intersections, whose boxes may be loose but never miss.
+#[test]
+fn boxes_hold_the_exact_point() {
+    let mut rng = Rng(0x6a09_e667_f3bc_c908);
+    let mut bounded = 0;
+    for i in 0..cases() {
+        let (c, size) = centre(&mut rng);
+        let p = if i % 4 == 0 {
+            // A line nearly parallel to the plane.
+            let a = rng.point(c, size);
+            let b = rng.point(c, size);
+            let r = rng.point(c, size);
+            let tilt = [0.0, 0.0, size * 1e-12 * rng.unit()];
+            let line = [a, [0, 1, 2].map(|k| a[k] + (b[k] - r[k]) + tilt[k])];
+            match Point::lpi(line, [r, b, [r[0], r[1] + size, r[2]]]) {
+                Ok(p) => p,
+                Err(_) => continue,
+            }
+        } else {
+            random_point(&mut rng, c, size)
+        };
+        let x = exact(&p);
+        let b = p.bounds();
+        for k in 0..3 {
+            let [lo, hi] = b[k];
+            if lo.is_finite() {
+                assert!(Q::from_float(lo).unwrap() <= x[k], "{p:?}: {b:?}");
+            }
+            if hi.is_finite() {
+                assert!(x[k] <= Q::from_float(hi).unwrap(), "{p:?}: {b:?}");
+            }
+        }
+        bounded += usize::from(b.iter().flatten().all(|c| c.is_finite()));
+    }
+    // Random points have finite boxes.
+    assert!(bounded * 2 > cases(), "{bounded} bounded");
+}
+
 /// Milestone 14's angle predicates against the rational reference: random
 /// queries (with the filter rate), and exactly right angles and right
 /// dihedrals built on an integer lattice, with the points in implicit forms.

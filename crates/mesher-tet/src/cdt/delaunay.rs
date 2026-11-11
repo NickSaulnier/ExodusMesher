@@ -14,7 +14,7 @@
 //! or constructed (LNC, BPT, LPI, TPI) and are never rounded. f64
 //! approximations are used only to order insertions.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mesher_geom::Sign;
 use mesher_geom::implicit::{self, Point};
@@ -177,11 +177,27 @@ pub struct ExactDelaunay {
     /// While untangling a rounded mesh: local replacements must also give
     /// tets with positive volume in floating point.
     float_positive: bool,
+    /// While logging (see [`ExactDelaunay::log_touched`]): the vertices of
+    /// every tet made since, with repeats.
+    touched: Option<Vec<u32>>,
 }
 
 /// The face opposite local vertex `k`, outward for a positive tet.
 fn face(v: &[u32; 4], k: usize) -> [u32; 3] {
     FACES[k].map(|i| v[i])
+}
+
+/// A box certainly holding a point or a set of points: `[lo, hi]` per axis
+/// (see [`mesher_geom::implicit::Point::bounds`]).
+type Bounds = [[f64; 2]; 3];
+
+fn join(a: &Bounds, b: &Bounds) -> Bounds {
+    [0, 1, 2].map(|k| [a[k][0].min(b[k][0]), a[k][1].max(b[k][1])])
+}
+
+/// Do the boxes miss each other? Then so do the points in them.
+fn apart_boxes(a: &Bounds, b: &Bounds) -> bool {
+    (0..3).any(|k| a[k][1] < b[k][0] || b[k][1] < a[k][0])
 }
 
 fn sorted3(mut f: [u32; 3]) -> [u32; 3] {
@@ -214,6 +230,7 @@ impl ExactDelaunay {
             vertex_tet: Vec::new(),
             across_plane: 0,
             float_positive: false,
+            touched: None,
         };
         d.vertex_tet = vec![NONE; d.points.len()];
         let first = d.initial_tet(&order)?;
@@ -414,7 +431,32 @@ impl ExactDelaunay {
                 *slot = id;
             }
         }
+        if let Some(log) = &mut self.touched {
+            log.extend(v.into_iter().filter(|&x| x != GHOST));
+        }
         id
+    }
+
+    /// Start (or stop) logging the vertices of the tets made from now on.
+    /// Every change (insertion, flip, local replacement keeping its
+    /// vertices) makes its new tets, and a face or edge it makes or removes
+    /// has its vertices on them, so the faces and edges among vertices that
+    /// are not logged stay as they were.
+    pub fn log_touched(&mut self, on: bool) {
+        self.touched = on.then(Vec::new);
+    }
+
+    /// The vertices logged since the last call (or [`Self::log_touched`]),
+    /// sorted without repeats; logging goes on.
+    pub fn take_touched(&mut self) -> Vec<u32> {
+        let mut out = self
+            .touched
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     fn kill(&mut self, t: u32) {
@@ -1106,6 +1148,36 @@ impl ExactDelaunay {
         if matched != boundary.len() {
             return false;
         }
+        // While untangling, positions can be tangled, so positive new tets
+        // need not tile the old region alone: a new inner face or edge that
+        // exists outside `old` would be shared with tets beyond it.
+        if self.float_positive {
+            let mut old_faces: BTreeSet<[u32; 3]> = BTreeSet::new();
+            let mut old_edges: BTreeSet<(u32, u32)> = BTreeSet::new();
+            for &t in old {
+                let v = self.tets[t as usize].v;
+                for j in 0..4 {
+                    old_faces.insert(sorted3(face(&v, j)));
+                }
+                for (i, j) in EDGES {
+                    old_edges.insert((v[i].min(v[j]), v[i].max(v[j])));
+                }
+            }
+            for v in new {
+                for j in 0..4 {
+                    let f = sorted3(face(v, j));
+                    if !old_faces.contains(&f) && !f.contains(&GHOST) && self.has_face(f) {
+                        return false;
+                    }
+                }
+                for (i, j) in EDGES {
+                    let e = (v[i].min(v[j]), v[i].max(v[j]));
+                    if !old_edges.contains(&e) && e.1 != GHOST && self.has_edge(e.0, e.1) {
+                        return false;
+                    }
+                }
+            }
+        }
         for &t in old {
             self.kill(t);
         }
@@ -1556,6 +1628,93 @@ impl ExactDelaunay {
         !(sides.iter().all(|&s| s != Sign::Negative) || sides.iter().all(|&s| s != Sign::Positive))
     }
 
+    /// Does the edge `xy` cross a planar region, the union of coplanar
+    /// triangles `tris` (each with which of its sides, 0: v0 v1, 1: v1 v2,
+    /// 2: v2 v0, are flat edges inside the region), at one point inside it?
+    /// Through a triangle's interior, or through the inside of a flat side
+    /// (a zero there). Exact. Through a vertex cannot happen: that vertex
+    /// would be inside the edge.
+    pub fn crosses_region(&self, x: u32, y: u32, tris: &[([u32; 3], [bool; 3])]) -> bool {
+        let o = |v: [u32; 4]| self.orient4(v);
+        // The triangles are coplanar, so whether x and y lie strictly on
+        // either side of the plane is one test, whatever each one's winding.
+        let Some(&(f, _)) = tris.first() else {
+            return false;
+        };
+        let sx = o([f[0], f[1], f[2], x]);
+        let sy = o([f[0], f[1], f[2], y]);
+        if sx == Sign::Zero || sy == Sign::Zero || sx == sy {
+            return false;
+        }
+        tris.iter().any(|&(f, flat)| {
+            // Every side's sign agrees with the others' (a zero allowed on
+            // at most one, flat, side), stopping at the first that cannot.
+            let mut common = Sign::Zero;
+            let mut zeros = 0;
+            for k in 0..3 {
+                match o([x, y, f[k], f[(k + 1) % 3]]) {
+                    Sign::Zero => {
+                        zeros += 1;
+                        if !flat[k] || zeros > 1 {
+                            return false;
+                        }
+                    }
+                    s if common == Sign::Zero => common = s,
+                    s if s != common => return false,
+                    _ => {}
+                }
+            }
+            common != Sign::Zero
+        })
+    }
+
+    /// Does the edge `xy` meet the region `tris` (see
+    /// [`Self::crosses_region`]): crossing it, or lying in its plane across
+    /// one of its triangles?
+    pub fn meets_region(&self, x: u32, y: u32, tris: &[([u32; 3], [bool; 3])]) -> bool {
+        let Some(&(f, _)) = tris.first() else {
+            return false;
+        };
+        let o = |v: [u32; 4]| self.orient4(v);
+        if o([f[0], f[1], f[2], x]) == Sign::Zero && o([f[0], f[1], f[2], y]) == Sign::Zero {
+            tris.iter()
+                .any(|&(t, _)| self.lies_across_triangle(x, y, t))
+        } else {
+            self.crosses_region(x, y, tris)
+        }
+    }
+
+    /// [`Self::facet_crossings`] for a planar region (see
+    /// [`Self::crosses_region`]), from the tets at `on_facet` (every vertex
+    /// on it).
+    #[must_use]
+    pub fn region_crossings(
+        &self,
+        tris: &[([u32; 3], [bool; 3])],
+        on_facet: &[u32],
+    ) -> Vec<(u32, u32)> {
+        let mut on: Vec<u32> = on_facet.to_vec();
+        on.sort_unstable();
+        let mut seen = BTreeSet::new();
+        let mut out = BTreeSet::new();
+        for &v in on_facet {
+            for t in self.star(v) {
+                if self.is_ghost(t) {
+                    continue;
+                }
+                let w = self.tets[t as usize].v;
+                for (i, j) in EDGES {
+                    let (x, y) = (w[i].min(w[j]), w[i].max(w[j]));
+                    let own = on.binary_search(&x).is_ok() && on.binary_search(&y).is_ok();
+                    if !own && seen.insert((x, y)) && self.meets_region(x, y, tris) {
+                        out.insert((x, y));
+                    }
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// Does the edge `xy` meet the interior of triangle `f`, crossing it or
     /// lying in its plane across it? Exact.
     fn meets_triangle(&self, x: u32, y: u32, f: [u32; 3]) -> bool {
@@ -1699,13 +1858,76 @@ impl ExactDelaunay {
         on_facet: &[u32],
         protected: &dyn Fn(u32, u32) -> bool,
     ) -> Refill {
-        let side = |s: &Self, v: u32| s.orient4([corners[0], corners[1], corners[2], v]);
+        self.recover_by_cavity(
+            corners,
+            &|s: &Self, x, y| s.crosses_triangle(x, y, corners),
+            on_facet,
+            protected,
+        )
+    }
+
+    /// [`Self::recover_facet_by_cavity`] for a planar region, the union of
+    /// coplanar triangles `tris` (see [`Self::crosses_region`]), whose
+    /// boundary is chains of edges: the tets crossing it meet the plane only
+    /// inside it, as for one triangle.
+    pub fn recover_region_by_cavity(
+        &mut self,
+        tris: &[([u32; 3], [bool; 3])],
+        on_facet: &[u32],
+        protected: &dyn Fn(u32, u32) -> bool,
+    ) -> Refill {
+        let Some(&(plane, _)) = tris.first() else {
+            return Refill::Failed;
+        };
+        // Only the triangles whose boxes meet the edge's can be crossed.
+        let boxes: Vec<Bounds> = tris
+            .iter()
+            .map(|(f, _)| {
+                let [a, b, c] = f.map(|v| self.pt(v).bounds());
+                join(&join(&a, &b), &c)
+            })
+            .collect();
+        let crosses = |s: &Self, x: u32, y: u32| {
+            let edge = join(&s.pt(x).bounds(), &s.pt(y).bounds());
+            let near: Vec<([u32; 3], [bool; 3])> = tris
+                .iter()
+                .zip(&boxes)
+                .filter(|(_, b)| !apart_boxes(b, &edge))
+                .map(|(t, _)| *t)
+                .collect();
+            s.crosses_region(x, y, &near)
+        };
+        self.recover_by_cavity(plane, &crosses, on_facet, protected)
+    }
+
+    /// The cavity recovery of a facet on the plane of `plane`, whose
+    /// crossing edges `crosses` tells.
+    fn recover_by_cavity(
+        &mut self,
+        plane: [u32; 3],
+        crosses: &dyn Fn(&Self, u32, u32) -> bool,
+        on_facet: &[u32],
+        protected: &dyn Fn(u32, u32) -> bool,
+    ) -> Refill {
+        let corners = plane;
+        // Each vertex's side of the plane, remembered: the cavity asks it of
+        // the same vertices many times.
+        let sides: std::cell::RefCell<BTreeMap<u32, Sign>> = std::cell::RefCell::default();
+        let side = |s: &Self, v: u32| {
+            if let Some(&known) = sides.borrow().get(&v) {
+                return known;
+            }
+            let o = s.orient4([corners[0], corners[1], corners[2], v]);
+            sides.borrow_mut().insert(v, o);
+            o
+        };
         // Edges crossing the triangle's interior, from the tets at its
         // vertices, then grown through their tets.
         let mut seen_edges: BTreeSet<(u32, u32)> = BTreeSet::new();
         let mut queue: Vec<(u32, u32)> = Vec::new();
         let mut cavity: Vec<u32> = Vec::new();
         let epoch = self.next_epoch();
+        let collect = crate::prof::scope("cdt cavity: collect");
         let mut consider = |s: &mut Self, t: u32, queue: &mut Vec<(u32, u32)>| {
             let v = s.tets[t as usize].v;
             for (i, j) in EDGES {
@@ -1713,7 +1935,12 @@ impl ExactDelaunay {
                 if y == GHOST || !seen_edges.insert((x, y)) {
                     continue;
                 }
-                if s.crosses_triangle(x, y, corners) {
+                // Crossing needs ends strictly on either side of the plane.
+                let (sx, sy) = (side(s, x), side(s, y));
+                if sx == Sign::Zero || sy == Sign::Zero || sx == sy {
+                    continue;
+                }
+                if crosses(s, x, y) {
                     queue.push((x, y));
                 }
             }
@@ -1742,6 +1969,7 @@ impl ExactDelaunay {
                 }
             }
         }
+        drop(collect);
         if cavity.is_empty() {
             return Refill::Covered;
         }

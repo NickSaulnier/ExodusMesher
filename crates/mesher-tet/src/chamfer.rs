@@ -288,6 +288,13 @@ pub struct Chamfered {
     pub faces: Vec<ChamferedFace>,
     /// How far each input vertex was chamfered (zero if it was not).
     pub epsilon: Vec<f64>,
+    /// Around each chamfered input vertex, the radius of a ball holding
+    /// what was cut away at it: its farthest bridge point (zero if it was
+    /// not chamfered). Bridge simplification only gives area back.
+    pub radius: Vec<f64>,
+    /// Along each acute edge (lower vertex first), the widest strip cut
+    /// away beside it in its triangles.
+    pub strips: BTreeMap<(u32, u32), f64>,
 }
 
 fn sub3(a: Point3, b: Point3) -> Point3 {
@@ -389,6 +396,8 @@ struct Leg {
     direction: Point3,
     length: f64,
     end: u32,
+    /// The chamfered vertex it was cut for.
+    corner: u32,
 }
 
 /// Chamfer a classified surface (see [`classify`]): every acute vertex `P`
@@ -452,6 +461,8 @@ pub fn chamfer(
         Ok(id)
     };
     let mut faces = Vec::with_capacity(triangles.len());
+    let mut radius = vec![0.0f64; n];
+    let mut strips: BTreeMap<(u32, u32), f64> = BTreeMap::new();
     for (ti, t) in triangles.iter().enumerate() {
         let tri = t.map(|v| points[v as usize]);
         let mut polygon: Vec<u32> = Vec::new();
@@ -495,6 +506,7 @@ pub fn chamfer(
                     direction,
                     length,
                     end: id,
+                    corner: p,
                 });
                 id
             };
@@ -517,6 +529,14 @@ pub fn chamfer(
             for l in &mut legs {
                 l.length = shortest;
             }
+            for k in 0..3 {
+                let (u, v) = (t[k], t[(k + 1) % 3]);
+                let e = (u.min(v), u.max(v));
+                if acute.edges.get(&e).is_some_and(|x| x.acute) && shortest.is_finite() {
+                    let w = strips.entry(e).or_insert(0.0);
+                    *w = w.max(shortest);
+                }
+            }
             let on_acute_edge = |c: u32| match vertices[c as usize] {
                 ChamferVertex::OnEdge { edge, .. } => {
                     acute.edges.get(&edge).is_some_and(|e| e.acute)
@@ -534,6 +554,8 @@ pub fn chamfer(
             })?;
             approx[l.end as usize] = p.approx();
             exact[l.end as usize] = p;
+            let r = norm3(sub3(approx[l.end as usize], points[l.corner as usize]));
+            radius[l.corner as usize] = radius[l.corner as usize].max(r);
         }
         faces.push(ChamferedFace {
             triangle: ti as u32,
@@ -545,6 +567,8 @@ pub fn chamfer(
         points: exact,
         faces,
         epsilon,
+        radius,
+        strips,
     })
 }
 

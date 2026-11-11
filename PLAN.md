@@ -772,7 +772,61 @@ Tasks, in order:
       - 104738 and 225958 still time out in the face stage.
     - Locating plane insertions from a nearby vertex would halve the walk but changes slot order, and so results, and gained little overall; not done.
     - Slivers are not removed yet (optional in the paper).
-- [ ] Marking the tets inside the input, then the enriched CDT through `cdt::recover_faces` (which then has to take implicit input vertices, as the paper's Appendix C does) and `cdt::round_region`
+- [x] Marking the tets inside the input, then the enriched CDT through the exact kernel and `cdt::round_region` (`refine::enriched_cdt`, Nov 11, 2026; `--example enriched` runs the whole chain).
+  - **Constraints:**
+    - The constraints are the input triangles themselves, not the paper's refined faces plus cut-away pieces.
+    - Every refined point on the chamfered surface lies exactly on an input edge or triangle:
+      - cuts and edge splits are LNC points of the input edge;
+      - bridge and face points are BPT points of an input triangle;
+      - snapped points lie exactly on their axis-aligned plane.
+    - `cdt::recover_faces_with` takes them as extra points. `cdt::locate` places each one exactly on the segment or triangle it lies on: a grid of triangle boxes and f64 plane distances pick candidates, then `orient3d` and projected orientations decide, and `dot_sign` orders points along a segment. A copy of an input vertex is left out.
+    - So every point the kernel adds is built from the input's explicit vertices, and no implicit point is built on another: the paper's Appendix C (cascaded implicit points) is not needed.
+  - **Merged facets:**
+    - Coplanar triangles across flat edges are one facet (`merge_flat`), as refinement's planar regions are, and flat edges are not segments.
+    - Without this, every flat diagonal had to be recovered with Steiner points: the cube's smallest face angle was 6°, against 23° with merging, and 40179's was 0.36°, against 5.4°.
+    - A merged facet's crossings, cavity and Steiner points work on its triangles (`ExactDelaunay::crosses_region`, `recover_region_by_cavity`). An edge through a flat edge's inside counts as crossing.
+    - Its subfaces come from a flood from the inner side of its boundary pieces, since faces with vertices on it can span a notch outside it.
+    - It is covered exactly when that flood reaches every boundary piece once and pairs every other edge. This exact, combinatorial check replaced listing crossings: on 40179 the kernel went from 11.1 s to 0.74 s.
+    - Rounding checks coverage by facet (`RecoveredFaces::facet_of`).
+    - The existing exact-kernel path is unchanged; the synthetic golden reports match.
+  - **Refined points left out:**
+    - Points off the surface are left out where refinement could not see the input:
+      - in a chamfered vertex's ball, of radius its farthest bridge point (`Chamfered::radius`);
+      - in an acute edge's strip (`Chamfered::strips`);
+      - within τ of a filtered triangle.
+    - So are the split points inside bridge segments (`Refined::on_bridges`). They lie exactly on their triangle but only near the bridge (BPT points at averaged weights), so a chain of them zig-zags at the rounding level. With the bridge no constraint here, the kernel's facet takes faces across three of them, at 0° face angles.
+    - Leaving them out took 128915, 74494 and 73154 from 61 to 136 tets under 1° to none, at about 1° minimum, and rounding there from up to 115 tets turned over to at most 1.
+  - **Untangling fix:** while untangling, `replace` now refuses a new inner face or edge that already exists outside the tets it replaces. Rounded positions can be tangled, so positive new tets need not tile the old region alone; a duplicated face had broken the inside labels in 3 models.
+  - **Test:** `enriched_cdt_of_a_cube_and_a_chamfered_tetrahedron`. The cube keeps radius-edge 2, and both round to their enclosed volume. Also `extra_points_and_merged_flat_facets` in `tests/cdt.rs`.
+  - **On the clean subset** (`enriched` example, eight runs sharing the machine, 900 s each): 82 of 100 mesh, conform exactly and round.
+    - Failures and timeouts:
+      - 16 time out: 104738 and 225958 in refinement; most others in the kernel, whose median is 38 s against refinement's 10 s.
+      - 500113 leaves one input triangle unrecovered.
+      - 1501546 keeps one tet turned over after rounding.
+    - Kernel Steiner points: segment Steiner points in 70 models (median 186, at most 16,306), for input edges in the cleared balls and strips and filtered features.
+    - Rounding: 18 models had tets to untangle (27 at most).
+    - Face angles: only 18 of the 82 inputs have no angle under 1° (median smallest input angle 0.06°), and a conforming mesh cannot beat its input's needles.
+      - For those 18, the smallest face angle has a median of 1.0°, against the paper's 1.3° to 3.6°.
+      - 591216 still has a tet at 0°.
+      - 33 of the 82 meshes have no face angle below their input's smallest.
+    - Median 87,500 tets (1.1 million at most).
+  - **Kernel speed** (Nov 11, 2026). Profiled on 332810, 42936, 112922 and 472175, whose kernels took 140 to 855 s. The first five changes leave every mesh identical (checked on those four models; the synthetic golden reports match):
+    - `crosses_region` tests the plane once per edge, not once per triangle. On 332810 the kernel went from 140 s to 14 s.
+    - The protected edges are kept up to date facet by facet (`Protected` in `cdt::faces`), instead of being rebuilt in full before every cavity and Steiner round. `ExactDelaunay::log_touched` logs the vertices of every tet made, and only facets at those vertices, or whose own subfaces or points changed, are read again. Debug builds check the result against a full rebuild. A merged facet's covered flag comes from the same read.
+    - `Point::bounds`: a box certainly holding an implicit point, by interval arithmetic rounded outwards (checked against exact rationals in `implicit_oracle.rs`, nearly parallel line-plane intersections included). Gift-wrapping passes over vertices and front faces whose boxes miss the candidate tet's, and the cavity collection over triangles whose boxes miss the edge's. Each vertex's side of the facet plane is remembered within a cavity.
+    - A triangle's polygon is triangulated into subfaces only where they are used: the dynamic program is cubic in the polygon's length, and its result was thrown away for every merged triangle (on 472175, 478 s of the kernel's 532 s).
+    - With `merge_flat`, a lone triangle whose polygon is longer than 512 vertices is a planar-region facet too. This changes results. Making every triangle a region was faster still (median kernel 7.7 s, against 10.9 s) but lost 472175, 1536355 and 1224385; at 512, 472175's 231-vertex triangle is recovered by flips, as before. Turning a triangle that flips leave crossed into a region afterwards was tried and recovered nothing more: its Steiner points then fall on protected faces.
+    - **On the clean subset** (same settings): 91 of 100 mesh, conform and round, against 82.
+      - On the 82 meshed in both runs, the kernel's median went from 37.6 s to 8.5 s, and its total from 11,042 s to 2,275 s. 76 meshes are the same; 6 differ by the long-polygon regions (42936, 112922, 124043, 472175, 780017, 1536355), by at most 0.3% of their tets. 112922 has 125 more tets under 1° (5,511) and 56 fewer face Steiner points; 780017 has 2 fewer tets under 1°.
+      - Newly meshed: 37883, 45009, 55277, 98939, 129988, 135674, 472020, 822698 and 894834. The kernel is slowest on these (135674 at 638 s, 472020 at 505 s, 37883 at 493 s).
+      - Over all 91, the kernel's median is 11.0 s against refinement's 10.9 s; 74 take under 60 s.
+      - Six still time out: 104738 and 225958 in refinement, and 77922, 101548, 200965 and 1620057.
+      - 39245 now leaves one input triangle unrecovered (it timed out before), and 500113 still does; 1501546 still keeps one tet turned over after rounding.
+  - **Open:**
+    - the six timeouts, and the kernel's time on the slowest models;
+    - Steiner points on a facet that flips have partly covered (39245, 500113): points near the crossings land on protected faces;
+    - the 0° tets left (591216);
+    - slivers (dihedral angles reach 0 in 60 meshes; the paper's sliver criterion is optional).
 - [ ] Refinement against the sizing field. Opt-in and under the work budget; it hands over to Milestone 15 on `MESH_BUDGET_EXCEEDED`
 - [ ] Exit criterion, on the clean subset:
   - refinement ends within budget on every model, or records why

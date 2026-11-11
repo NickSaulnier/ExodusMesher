@@ -17,17 +17,24 @@
 //!   faces.
 //! - [`regions`]: the tets inside the surface, by a parity flood from the
 //!   hull.
+//! - `locate`: for the enriched CDT (Milestone 14), extra points (implicit or
+//!   not) placed exactly on the input segments and triangles they lie on;
+//!   with `merge_flat`, coplanar triangles across flat edges are one facet
+//!   (`recover_faces_with`), as is a triangle with points inside or a long
+//!   polygon, recovered by the same cavity and Steiner steps
+//!   and read off by a flood from its boundary.
 //! - [`rounding`]: the mesh in f64 coordinates, with what rounding turned
 //!   over untangled (Milestone 13).
 
 pub mod delaunay;
 pub mod faces;
+mod locate;
 pub mod regions;
 pub mod rounding;
 pub mod segments;
 
 pub use delaunay::{DelaunayError, ExactDelaunay, GHOST, Inserted, Refill};
-pub use faces::{FaceError, RecoveredFaces, Subface, recover_faces};
-pub use regions::{Region, RegionError, mesh_region};
+pub use faces::{FaceError, RecoveredFaces, Subface, recover_faces, recover_faces_with};
+pub use regions::{Region, RegionError, mesh_region, mesh_region_with};
 pub use rounding::{RoundedMesh, RoundingError, Untangle, round_region};
-pub use segments::{RecoveredSegments, SegmentError, recover_segments};
+pub use segments::{RecoveredSegments, SegmentError, recover_segments, recover_segments_with};
