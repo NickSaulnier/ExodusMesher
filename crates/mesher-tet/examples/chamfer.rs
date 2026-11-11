@@ -4,11 +4,13 @@
 //! cargo run --release -p mesher-tet --example chamfer -- a.obj b.obj ...
 //! ```
 //!
-//! Prints, per file: triangles, acute vertices and edges, vertices of the
-//! chamfered surface before and after bridge simplification, the smallest
-//! angle between two of its segments meeting at a vertex after it (degrees,
-//! from rounded positions; flat input edges are not segments), and seconds;
-//! or the error. The OBJ is read
+//! Filters the input by `CHAMFER_TAU` times the bounding-box diagonal
+//! (1e-4 by default), chamfers it and simplifies its bridges, then prints,
+//! per file: triangles, triangles filtered out, rounds of filtering and
+//! chamfering, acute vertices and edges of the filtered surface, vertices of
+//! the chamfered surface, the smallest angle between two of its segments
+//! meeting at a vertex (degrees, from rounded positions; flat input edges
+//! are not segments), and seconds; or the error. The OBJ is read
 //! naively (`v` and triangular `f` lines).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -16,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use mesher_tet::chamfer::{chamfer, classify, simplify_bridges};
+use mesher_tet::chamfer::chamfer_filtered;
 
 fn main() {
     for path in std::env::args().skip(1) {
@@ -39,39 +41,45 @@ fn main() {
                 _ => {}
             }
         }
+        let (lo, hi) = points.iter().fold(
+            ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
+            |(lo, hi), p: &[f64; 3]| {
+                (
+                    [0, 1, 2].map(|k| lo[k].min(p[k])),
+                    [0, 1, 2].map(|k| hi[k].max(p[k])),
+                )
+            },
+        );
+        let diagonal = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f64>().sqrt();
+        // CHAMFER_TAU: the filtering tolerance relative to the diagonal.
+        let tau = std::env::var("CHAMFER_TAU")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(1e-4)
+            * diagonal;
         let started = Instant::now();
-        let acute = match classify(&points, &triangles) {
-            Ok(a) => a,
+        let filtered = match chamfer_filtered(&points, &triangles, tau) {
+            Ok(f) => f,
             Err(e) => {
                 println!("{path}\tfailed\t{e}");
                 continue;
             }
         };
-        let mut c = match chamfer(&points, &triangles, &acute) {
-            Ok(c) => c,
-            Err(e) => {
-                println!("{path}\tfailed\t{e}");
-                continue;
-            }
-        };
-        let used = |c: &mesher_tet::chamfer::Chamfered| {
-            c.faces
-                .iter()
-                .flat_map(|f| f.polygon.iter().copied())
-                .collect::<BTreeSet<u32>>()
-                .len()
-        };
-        let before = used(&c);
-        simplify_bridges(&mut c, &acute);
-        let after = used(&c);
         let seconds = started.elapsed().as_secs_f64();
+        let (acute, c) = (&filtered.acute, &filtered.chamfered);
+        let used = c
+            .faces
+            .iter()
+            .flat_map(|f| f.polygon.iter().copied())
+            .collect::<BTreeSet<u32>>()
+            .len();
         // Segments: face edges, except those lying along a flat input edge.
         let mut segments: BTreeSet<(u32, u32)> = BTreeSet::new();
         for f in &c.faces {
             let k = f.polygon.len();
             for i in 0..k {
                 let (u, v) = (f.polygon[i], f.polygon[(i + 1) % k]);
-                if c.is_segment(u, v, &acute) {
+                if c.is_segment(u, v, acute) {
                     segments.insert((u.min(v), u.max(v)));
                 }
             }
@@ -104,8 +112,10 @@ fn main() {
             }
         }
         println!(
-            "{path}\t{}\t{}\t{}\t{before}\t{after}\t{smallest:.3}\t{seconds:.2}",
+            "{path}\t{}\t{}\t{}\t{}\t{}\t{used}\t{smallest:.3}\t{seconds:.2}",
             triangles.len(),
+            filtered.kept.iter().filter(|k| !**k).count(),
+            filtered.rounds,
             acute.acute_vertices().count(),
             acute.acute_edges().count(),
         );

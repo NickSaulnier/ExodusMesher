@@ -28,7 +28,7 @@ use mesher_geom::implicit::{self, Point};
 /// Why a surface cannot be classified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChamferError {
-    /// An edge with other than two triangles: the surface is not a closed
+    /// An edge with more than two triangles: the surface is not a
     /// 2-manifold.
     NotManifold { edge: (u32, u32) },
     /// A non-finite coordinate.
@@ -41,7 +41,7 @@ impl std::fmt::Display for ChamferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChamferError::NotManifold { edge } => {
-                write!(f, "edge {}-{} does not have two triangles", edge.0, edge.1)
+                write!(f, "edge {}-{} has more than two triangles", edge.0, edge.1)
             }
             ChamferError::NonFinite { vertex } => write!(f, "vertex {vertex} is not finite"),
             ChamferError::Degenerate { triangle } => {
@@ -66,10 +66,14 @@ pub struct Acute {
 /// One edge of the surface.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EdgeInfo {
-    /// The opposite vertices of its two triangles.
+    /// The opposite vertices of its two triangles (the same twice for a
+    /// boundary edge).
     pub opposite: [u32; 2],
-    /// Its two triangles.
+    /// Its two triangles (the same twice for a boundary edge).
     pub triangles: [u32; 2],
+    /// An edge with one triangle: where filtering removed the other. It is
+    /// a segment, never acute or flat.
+    pub boundary: bool,
     pub acute: bool,
     pub flat: bool,
     /// Local feature size: the distance from the edge to the nearer opposite
@@ -108,8 +112,9 @@ fn distance_to_segment(p: Point3, a: Point3, b: Point3) -> f64 {
         .sqrt()
 }
 
-/// Classify a closed, oriented, 2-manifold triangle surface. Every decision
-/// is an exact predicate on the input coordinates.
+/// Classify an oriented, 2-manifold triangle surface, closed or with
+/// boundary edges (where filtering removed triangles). Every decision is an
+/// exact predicate on the input coordinates.
 ///
 /// # Errors
 /// See [`ChamferError`].
@@ -136,18 +141,33 @@ pub fn classify(points: &[Point3], triangles: &[[u32; 3]]) -> Result<Acute, Cham
     }
     let mut edges = BTreeMap::new();
     for (&(c, d), around) in &sides {
+        let at = |v: u32| points[v as usize];
+        if let &[(t0, a)] = around.as_slice() {
+            edges.insert(
+                (c, d),
+                EdgeInfo {
+                    opposite: [a, a],
+                    triangles: [t0, t0],
+                    boundary: true,
+                    acute: false,
+                    flat: false,
+                    lfs: distance_to_segment(at(a), at(c), at(d)),
+                },
+            );
+            continue;
+        }
         let &[(t0, a), (t1, b)] = around.as_slice() else {
             return Err(ChamferError::NotManifold { edge: (c, d) });
         };
         let p = |v: u32| &pts[v as usize];
         let dihedral = implicit::dihedral_sign(p(a), p(b), p(c), p(d));
         let coplanar = implicit::orient3d(p(a), p(b), p(c), p(d)) == Sign::Zero;
-        let at = |v: u32| points[v as usize];
         edges.insert(
             (c, d),
             EdgeInfo {
                 opposite: [a, b],
                 triangles: [t0, t1],
+                boundary: false,
                 acute: dihedral == Sign::Positive,
                 flat: coplanar && dihedral == Sign::Negative,
                 lfs: distance_to_segment(at(a), at(c), at(d)).min(distance_to_segment(
@@ -684,6 +704,212 @@ pub fn simplify_bridges(c: &mut Chamfered, acute: &Acute) -> usize {
     dropped
 }
 
+/// Closest distance between segments `p0 p1` and `q0 q1` (f64; it only
+/// decides what filtering removes, never topology).
+fn segment_distance(p0: Point3, p1: Point3, q0: Point3, q1: Point3) -> f64 {
+    let d1 = sub3(p1, p0);
+    let d2 = sub3(q1, q0);
+    let r = sub3(p0, q0);
+    let (a, e, f) = (dot3(d1, d1), dot3(d2, d2), dot3(d2, r));
+    let (mut s, mut t);
+    if a <= f64::MIN_POSITIVE && e <= f64::MIN_POSITIVE {
+        return norm3(r);
+    }
+    if a <= f64::MIN_POSITIVE {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = dot3(d1, r);
+        if e <= f64::MIN_POSITIVE {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let b = dot3(d1, d2);
+            let denom = a * e - b * b;
+            s = if denom > 0.0 {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            t = (b * s + f) / e;
+            if t < 0.0 {
+                t = 0.0;
+                s = (-c / a).clamp(0.0, 1.0);
+            } else if t > 1.0 {
+                t = 1.0;
+                s = ((b - c) / a).clamp(0.0, 1.0);
+            }
+        }
+    }
+    norm3(sub3(add3(p0, scale3(d1, s)), add3(q0, scale3(d2, t))))
+}
+
+/// The input triangles (among those `kept`) responsible for a local feature
+/// size under `tau`: an edge or a height under `tau`, or two non-incident
+/// features of two triangles (a vertex and a triangle not containing it, or
+/// two edges sharing no vertex) closer than `tau`. Found by sweeping
+/// bounding boxes grown by `tau` along x. Distances are f64: they only
+/// choose what is filtered, and filtered triangles come back exactly at the
+/// end.
+#[must_use]
+pub fn small_features(
+    points: &[Point3],
+    triangles: &[[u32; 3]],
+    kept: &[bool],
+    tau: f64,
+) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    let tri = |t: u32| triangles[t as usize].map(|v| points[v as usize]);
+    let live: Vec<u32> = (0..triangles.len() as u32)
+        .filter(|&t| kept[t as usize])
+        .collect();
+    for &t in &live {
+        let p = tri(t);
+        let small = (0..3).any(|k| {
+            let (a, b, c) = (p[k], p[(k + 1) % 3], p[(k + 2) % 3]);
+            norm3(sub3(b, a)) < tau || distance_to_segment(a, b, c) < tau
+        });
+        if small {
+            out.push(t);
+        }
+    }
+    // Candidate pairs: boxes grown by tau overlapping, by a sweep along x.
+    let boxes: Vec<(Point3, Point3)> = live
+        .iter()
+        .map(|&t| {
+            let p = tri(t);
+            let lo = [0, 1, 2].map(|k| p[0][k].min(p[1][k]).min(p[2][k]) - tau);
+            let hi = [0, 1, 2].map(|k| p[0][k].max(p[1][k]).max(p[2][k]) + tau);
+            (lo, hi)
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..live.len()).collect();
+    order.sort_by(|&i, &j| boxes[i].0[0].total_cmp(&boxes[j].0[0]).then(i.cmp(&j)));
+    let mut active: Vec<usize> = Vec::new();
+    for &i in &order {
+        active.retain(|&j| boxes[j].1[0] >= boxes[i].0[0]);
+        for &j in &active {
+            let (a, b) = (&boxes[i], &boxes[j]);
+            if (1..3).any(|k| a.0[k] > b.1[k] || b.0[k] > a.1[k]) {
+                continue;
+            }
+            let (ti, tj) = (live[i], live[j]);
+            let (vi, vj) = (triangles[ti as usize], triangles[tj as usize]);
+            let (pi, pj) = (tri(ti), tri(tj));
+            let mut close = false;
+            for (v, p, other, q) in [(vi, pi, vj, pj), (vj, pj, vi, pi)] {
+                for k in 0..3 {
+                    if other.contains(&v[k]) {
+                        continue;
+                    }
+                    let c = mesher_geom::bvh::closest_point_on_triangle(p[k], q);
+                    if norm3(sub3(c, p[k])) < tau {
+                        close = true;
+                    }
+                }
+            }
+            for k in 0..3 {
+                for l in 0..3 {
+                    let (a0, a1) = (vi[k], vi[(k + 1) % 3]);
+                    let (b0, b1) = (vj[l], vj[(l + 1) % 3]);
+                    if a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 {
+                        continue;
+                    }
+                    if segment_distance(pi[k], pi[(k + 1) % 3], pj[l], pj[(l + 1) % 3]) < tau {
+                        close = true;
+                    }
+                }
+            }
+            if close {
+                out.push(ti);
+                out.push(tj);
+            }
+        }
+        active.push(i);
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// A chamfered surface after input filtering.
+#[derive(Debug, Clone)]
+pub struct FilteredChamfer {
+    /// Whether each input triangle was kept (filtered triangles come back
+    /// in the enriched CDT).
+    pub kept: Vec<bool>,
+    /// The kept triangles' indices, in order: `acute` and `chamfered` index
+    /// triangles by position in this list.
+    pub kept_ids: Vec<u32>,
+    pub acute: Acute,
+    pub chamfered: Chamfered,
+    /// Rounds of filtering and chamfering.
+    pub rounds: usize,
+}
+
+/// Filter the input by `tau` (see [`small_features`]), then chamfer and
+/// simplify bridges, and while the chamfered surface has a segment shorter
+/// than `tau / 3`, filter out its triangle and chamfer again. A third:
+/// after filtering every local feature size is at least `tau`, so
+/// chamfering cuts at least `tau / 3` by construction, and holding its
+/// segments to `tau` would filter out every triangle a chamfer touches,
+/// round after round. Ends: each round removes a triangle.
+///
+/// # Errors
+/// See [`ChamferError`].
+pub fn chamfer_filtered(
+    points: &[Point3],
+    triangles: &[[u32; 3]],
+    tau: f64,
+) -> Result<FilteredChamfer, ChamferError> {
+    let mut kept = vec![true; triangles.len()];
+    for t in small_features(points, triangles, &kept, tau) {
+        kept[t as usize] = false;
+    }
+    let mut rounds = 0;
+    loop {
+        rounds += 1;
+        let kept_ids: Vec<u32> = (0..triangles.len() as u32)
+            .filter(|&t| kept[t as usize])
+            .collect();
+        let subset: Vec<[u32; 3]> = kept_ids.iter().map(|&t| triangles[t as usize]).collect();
+        let acute = classify(points, &subset)?;
+        let mut chamfered = chamfer(points, &subset, &acute)?;
+        simplify_bridges(&mut chamfered, &acute);
+        // Segments shorter than tau send their triangle out.
+        let mut short: Vec<u32> = Vec::new();
+        for f in &chamfered.faces {
+            let k = f.polygon.len();
+            for i in 0..k {
+                let (u, v) = (f.polygon[i], f.polygon[(i + 1) % k]);
+                if !chamfered.is_segment(u, v, &acute) {
+                    continue;
+                }
+                let (pu, pv) = (
+                    chamfered.points[u as usize].approx(),
+                    chamfered.points[v as usize].approx(),
+                );
+                if norm3(sub3(pu, pv)) < tau / 3.0 {
+                    short.push(kept_ids[f.triangle as usize]);
+                    break;
+                }
+            }
+        }
+        if short.is_empty() || kept_ids.is_empty() {
+            return Ok(FilteredChamfer {
+                kept,
+                kept_ids,
+                acute,
+                chamfered,
+                rounds,
+            });
+        }
+        for t in short {
+            kept[t as usize] = false;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -970,11 +1196,51 @@ mod tests {
         check_chamfer("wedge simplified", &p, &f, true);
     }
 
+    /// Two unit cubes a small gap apart: filtering by a tolerance above the
+    /// gap removes exactly the triangles of the facing sides (and those
+    /// closer than it to them), and chamfering what is left still works.
     #[test]
-    fn open_surfaces_are_refused() {
-        let p = vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    fn filtering_removes_what_is_closer_than_the_tolerance() {
+        let (mut p, mut f) = cube();
+        let (q, g) = cube();
+        let n = p.len() as u32;
+        p.extend(q.iter().map(|x| [x[0] + 1.0 + 1e-3, x[1], x[2]]));
+        f.extend(g.iter().map(|t| t.map(|v| v + n)));
+        let kept = vec![true; f.len()];
+        assert!(small_features(&p, &f, &kept, 1e-4).is_empty());
+        let close = small_features(&p, &f, &kept, 1e-2);
+        // The x = 1 side of the first cube and the x = 1.001 side of the
+        // second, two triangles each, and the triangles whose edges reach
+        // within 1e-2 of the other cube (every side triangle touching x = 1).
+        assert!(close.len() >= 4, "{close:?}");
+        for &t in &close {
+            let xs: Vec<f64> = f[t as usize].iter().map(|&v| p[v as usize][0]).collect();
+            assert!(
+                xs.iter()
+                    .any(|&x| (x - 1.0).abs() < 1e-9 || (x - 1.001).abs() < 1e-9),
+                "{t}"
+            );
+        }
+        let r = chamfer_filtered(&p, &f, 1e-2).unwrap();
+        assert_eq!(r.kept.iter().filter(|k| !**k).count(), close.len());
+        assert_eq!(r.rounds, 1);
+    }
+
+    /// An open surface (one triangle) has boundary edges; three triangles
+    /// at an edge are refused.
+    #[test]
+    fn boundary_edges_and_non_manifold_edges() {
+        let p = vec![
+            [0.0; 3],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ];
+        let a = classify(&p, &[[0, 1, 2]]).unwrap();
+        assert!(a.edges.values().all(|e| e.boundary && !e.acute && !e.flat));
         assert!(matches!(
-            classify(&p, &[[0, 1, 2]]),
+            classify(&p, &[[0, 1, 2], [1, 0, 3], [0, 1, 4]]),
             Err(ChamferError::NotManifold { .. })
         ));
     }
