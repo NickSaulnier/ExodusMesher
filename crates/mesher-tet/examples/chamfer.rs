@@ -5,9 +5,10 @@
 //! ```
 //!
 //! Prints, per file: triangles, acute vertices and edges, vertices of the
-//! chamfered surface, its faces, the smallest angle between two of its
-//! segments meeting at a vertex (degrees, from rounded positions; flat input
-//! edges are not segments), and seconds; or the error. The OBJ is read
+//! chamfered surface before and after bridge simplification, the smallest
+//! angle between two of its segments meeting at a vertex after it (degrees,
+//! from rounded positions; flat input edges are not segments), and seconds;
+//! or the error. The OBJ is read
 //! naively (`v` and triangular `f` lines).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -15,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use mesher_tet::chamfer::{ChamferVertex, chamfer, classify};
+use mesher_tet::chamfer::{chamfer, classify, simplify_bridges};
 
 fn main() {
     for path in std::env::args().skip(1) {
@@ -46,43 +47,33 @@ fn main() {
                 continue;
             }
         };
-        let c = match chamfer(&points, &triangles, &acute) {
+        let mut c = match chamfer(&points, &triangles, &acute) {
             Ok(c) => c,
             Err(e) => {
                 println!("{path}\tfailed\t{e}");
                 continue;
             }
         };
+        let used = |c: &mesher_tet::chamfer::Chamfered| {
+            c.faces
+                .iter()
+                .flat_map(|f| f.polygon.iter().copied())
+                .collect::<BTreeSet<u32>>()
+                .len()
+        };
+        let before = used(&c);
+        simplify_bridges(&mut c, &acute);
+        let after = used(&c);
         let seconds = started.elapsed().as_secs_f64();
         // Segments: face edges, except those lying along a flat input edge.
-        let on_edge = |v: u32| -> Vec<(u32, u32)> {
-            match c.vertices[v as usize] {
-                ChamferVertex::OnEdge { edge, .. } => vec![edge],
-                ChamferVertex::Input(x) => acute
-                    .edges
-                    .keys()
-                    .filter(|e| e.0 == x || e.1 == x)
-                    .copied()
-                    .collect(),
-                ChamferVertex::InFace { .. } => Vec::new(),
-            }
-        };
         let mut segments: BTreeSet<(u32, u32)> = BTreeSet::new();
         for f in &c.faces {
             let k = f.polygon.len();
             for i in 0..k {
                 let (u, v) = (f.polygon[i], f.polygon[(i + 1) % k]);
-                let shared: Vec<(u32, u32)> = on_edge(u)
-                    .into_iter()
-                    .filter(|e| on_edge(v).contains(e))
-                    .collect();
-                if shared
-                    .iter()
-                    .any(|e| acute.edges.get(e).is_some_and(|i| i.flat))
-                {
-                    continue;
+                if c.is_segment(u, v, &acute) {
+                    segments.insert((u.min(v), u.max(v)));
                 }
-                segments.insert((u.min(v), u.max(v)));
             }
         }
         let mut around: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
@@ -113,12 +104,10 @@ fn main() {
             }
         }
         println!(
-            "{path}\t{}\t{}\t{}\t{}\t{}\t{smallest:.3}\t{seconds:.2}",
+            "{path}\t{}\t{}\t{}\t{before}\t{after}\t{smallest:.3}\t{seconds:.2}",
             triangles.len(),
             acute.acute_vertices().count(),
             acute.acute_edges().count(),
-            c.vertices.len(),
-            c.faces.len(),
         );
     }
 }

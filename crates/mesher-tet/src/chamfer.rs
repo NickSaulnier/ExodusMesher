@@ -528,6 +528,162 @@ pub fn chamfer(
     })
 }
 
+impl Chamfered {
+    /// The input edge (lower vertex first) that both `v` and `u` lie on, if
+    /// any.
+    fn on_input_edge(&self, v: u32, u: u32, acute: &Acute) -> Option<(u32, u32)> {
+        use ChamferVertex::{InFace, Input, OnEdge};
+        match (self.vertices[v as usize], self.vertices[u as usize]) {
+            (OnEdge { edge: e, .. }, OnEdge { edge: f, .. }) => (e == f).then_some(e),
+            (OnEdge { edge, .. }, Input(i)) | (Input(i), OnEdge { edge, .. }) => {
+                (edge.0 == i || edge.1 == i).then_some(edge)
+            }
+            (Input(i), Input(j)) => {
+                let e = (i.min(j), i.max(j));
+                acute.edges.contains_key(&e).then_some(e)
+            }
+            (InFace { .. }, _) | (_, InFace { .. }) => None,
+        }
+    }
+
+    /// Is face edge `u v` a segment (a constraint for refinement)? Every
+    /// face edge is, except those along a flat input edge, which only split
+    /// a planar region.
+    #[must_use]
+    pub fn is_segment(&self, u: u32, v: u32, acute: &Acute) -> bool {
+        !self
+            .on_input_edge(u, v, acute)
+            .is_some_and(|e| acute.edges.get(&e).is_some_and(|i| i.flat))
+    }
+}
+
+/// The faces (by index) at each vertex, and each vertex's neighbours
+/// around them.
+fn faces_at(c: &Chamfered) -> Vec<Vec<u32>> {
+    let mut at = vec![Vec::new(); c.vertices.len()];
+    for (fi, f) in c.faces.iter().enumerate() {
+        for &v in &f.polygon {
+            at[v as usize].push(fi as u32);
+        }
+    }
+    at
+}
+
+/// The neighbours of `v` in face polygon `polygon` (before, after).
+fn around(polygon: &[u32], v: u32) -> Option<(u32, u32)> {
+    let k = polygon.len();
+    let i = polygon.iter().position(|&x| x == v)?;
+    Some((polygon[(i + k - 1) % k], polygon[(i + 1) % k]))
+}
+
+/// Would a new segment `x y` in face `face` (replacing the face edges in
+/// `replaced`) keep the projection condition at its ends? Not at an acute
+/// angle with any other segment there, and not leaning over any other face
+/// there. Exact.
+fn segment_fits(
+    c: &Chamfered,
+    acute: &Acute,
+    faces_at: &[Vec<u32>],
+    face: u32,
+    x: u32,
+    y: u32,
+    gone: &[u32],
+) -> bool {
+    for (end, other) in [(x, y), (y, x)] {
+        let here = &c.points[end as usize];
+        let far = &c.points[other as usize];
+        for &fi in &faces_at[end as usize] {
+            let poly = &c.faces[fi as usize].polygon;
+            let Some((before, after)) = around(poly, end) else {
+                continue;
+            };
+            for z in [before, after] {
+                if z == other || gone.contains(&z) || !c.is_segment(end, z, acute) {
+                    continue;
+                }
+                if implicit::dot_sign(far, here, &c.points[z as usize]) == Sign::Positive {
+                    return false;
+                }
+            }
+            if fi != face
+                && implicit::edge_projects_into_triangle(
+                    here,
+                    far,
+                    &c.points[before as usize],
+                    &c.points[after as usize],
+                )
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Simplify the bridges of a chamfered surface (the paper's bridge removal):
+/// in order of their shortest edge, each bridge (a cut, two bridge points
+/// and a cut along a face) is replaced by one edge between its cuts, else by
+/// two edges dropping one bridge point (the one whose loss leaves the longer
+/// new edge first), wherever that makes no acute angle with the segments and
+/// faces at the new edge's ends. Fewer, longer edges mean less refinement.
+/// Returns how many bridge points were dropped.
+pub fn simplify_bridges(c: &mut Chamfered, acute: &Acute) -> usize {
+    let at = |c: &Chamfered, v: u32| c.points[v as usize].approx();
+    let dist = |p: Point3, q: Point3| norm3(sub3(p, q));
+    // Bridges: a cut, two bridge points of the face's triangle, a cut.
+    let mut bridges: Vec<(f64, u32, [u32; 4])> = Vec::new();
+    for (fi, f) in c.faces.iter().enumerate() {
+        let k = f.polygon.len();
+        for i in 0..k {
+            let w = [0, 1, 2, 3].map(|j| f.polygon[(i + j) % k]);
+            let kinds = w.map(|v| c.vertices[v as usize]);
+            if let [
+                ChamferVertex::OnEdge { .. },
+                ChamferVertex::InFace { .. },
+                ChamferVertex::InFace { .. },
+                ChamferVertex::OnEdge { .. },
+            ] = kinds
+            {
+                let shortest = (0..3)
+                    .map(|j| dist(at(c, w[j]), at(c, w[j + 1])))
+                    .fold(f64::INFINITY, f64::min);
+                bridges.push((shortest, fi as u32, w));
+            }
+        }
+    }
+    bridges.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let mut dropped = 0;
+    let mut faces_at = faces_at(c);
+    for (_, fi, [c1, i1, i2, c2]) in bridges {
+        // Still intact (an earlier change may have touched this face)?
+        let poly = &c.faces[fi as usize].polygon;
+        let k = poly.len();
+        let Some(p) = poly.iter().position(|&v| v == c1) else {
+            continue;
+        };
+        if [poly[(p + 1) % k], poly[(p + 2) % k], poly[(p + 3) % k]] != [i1, i2, c2] {
+            continue;
+        }
+        // One edge between the cuts; else two, the longer new edge first.
+        let mut options: Vec<(u32, u32, Vec<u32>)> = vec![(c1, c2, vec![i1, i2])];
+        let mut twos = vec![(c1, i2, vec![i1]), (i1, c2, vec![i2])];
+        twos.sort_by(|a, b| dist(at(c, b.0), at(c, b.1)).total_cmp(&dist(at(c, a.0), at(c, a.1))));
+        options.extend(twos);
+        for (x, y, gone) in options {
+            if segment_fits(c, acute, &faces_at, fi, x, y, &gone) {
+                let poly = &mut c.faces[fi as usize].polygon;
+                poly.retain(|v| !gone.contains(v));
+                for &g in &gone {
+                    faces_at[g as usize].retain(|&f| f != fi);
+                }
+                dropped += gone.len();
+                break;
+            }
+        }
+    }
+    dropped
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -647,9 +803,19 @@ mod tests {
     /// new vertex the two face edges there not acute (to rounding: bridge
     /// points are rounded onto their triangle). Returns the faces' vertex
     /// counts.
-    fn check_chamfer(name: &str, p: &[Point3], f: &[[u32; 3]]) -> Vec<usize> {
+    fn check_chamfer(
+        name: &str,
+        p: &[Point3],
+        f: &[[u32; 3]],
+        simplify: bool,
+    ) -> (Vec<usize>, usize) {
         let a = classify(p, f).unwrap();
-        let c = chamfer(p, f, &a).unwrap();
+        let mut c = chamfer(p, f, &a).unwrap();
+        let dropped = if simplify {
+            simplify_bridges(&mut c, &a)
+        } else {
+            0
+        };
         let at = |v: u32| c.points[v as usize].approx();
         for face in &c.faces {
             let t = f[face.triangle as usize];
@@ -708,14 +874,68 @@ mod tests {
                 "{name}: area {area} of {whole}"
             );
         }
-        c.faces.iter().map(|f| f.polygon.len()).collect()
+        (c.faces.iter().map(|f| f.polygon.len()).collect(), dropped)
+    }
+
+    /// A UV sphere: every vertex acute, so every corner is bridged.
+    fn sphere(segments: u32, rings: u32) -> (Vec<Point3>, Vec<[u32; 3]>) {
+        let mut p = vec![[0.0, 0.0, 1.0]];
+        for i in 1..rings {
+            let t = f64::from(i) / f64::from(rings) * std::f64::consts::PI;
+            for j in 0..segments {
+                let a = f64::from(j) / f64::from(segments) * std::f64::consts::TAU;
+                p.push([
+                    libm::sin(t) * libm::cos(a),
+                    libm::sin(t) * libm::sin(a),
+                    libm::cos(t),
+                ]);
+            }
+        }
+        let south = p.len() as u32;
+        p.push([0.0, 0.0, -1.0]);
+        let ring = |i: u32, j: u32| 1 + i * segments + j % segments;
+        let mut f = Vec::new();
+        for j in 0..segments {
+            f.push([0, ring(0, j), ring(0, j + 1)]);
+        }
+        for i in 0..rings - 2 {
+            for j in 0..segments {
+                let (a, b) = (ring(i, j), ring(i, j + 1));
+                let (c, d) = (ring(i + 1, j), ring(i + 1, j + 1));
+                f.push([a, c, d]);
+                f.push([a, d, b]);
+            }
+        }
+        for j in 0..segments {
+            f.push([south, ring(rings - 2, j + 1), ring(rings - 2, j)]);
+        }
+        (p, f)
+    }
+
+    /// Bridge simplification drops bridge points on a sphere and keeps every
+    /// angle at the faces' new vertices from being acute.
+    #[test]
+    fn bridges_are_simplified_without_acute_angles() {
+        let (p, f) = sphere(12, 8);
+        let (before, _) = check_chamfer("sphere", &p, &f, false);
+        let (after, dropped) = check_chamfer("sphere simplified", &p, &f, true);
+        assert!(dropped > 0);
+        assert_eq!(
+            before.iter().sum::<usize>() - after.iter().sum::<usize>(),
+            dropped
+        );
     }
 
     #[test]
     fn chamfering_cuts_acute_corners_and_edges() {
         // A cube: nothing to cut.
         let (p, f) = cube();
-        assert!(check_chamfer("cube", &p, &f).iter().all(|&n| n == 3));
+        assert!(
+            check_chamfer("cube", &p, &f, true)
+                .0
+                .iter()
+                .all(|&n| n == 3)
+        );
         // A regular tetrahedron: every corner and edge cut, leaving each face
         // a hexagon of bridge points.
         let p = vec![
@@ -725,7 +945,12 @@ mod tests {
             [-1.0, -1.0, 1.0],
         ];
         let f = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
-        assert!(check_chamfer("tetrahedron", &p, &f).iter().all(|&n| n == 6));
+        assert!(
+            check_chamfer("tetrahedron", &p, &f, true)
+                .0
+                .iter()
+                .all(|&n| n == 6)
+        );
         // A wedge prism: its lengthwise edges cut, its end caps' corners too.
         let mut p = Vec::new();
         for z in [0.0, 1.0] {
@@ -741,7 +966,8 @@ mod tests {
             [2, 0, 3],
             [2, 3, 5],
         ];
-        check_chamfer("wedge", &p, &f);
+        check_chamfer("wedge", &p, &f, false);
+        check_chamfer("wedge simplified", &p, &f, true);
     }
 
     #[test]
