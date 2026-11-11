@@ -10,6 +10,7 @@ mod fxhash;
 mod graded;
 pub mod prof;
 pub mod quality;
+pub mod refine;
 pub mod remesh;
 pub mod sizing;
 pub mod smooth;

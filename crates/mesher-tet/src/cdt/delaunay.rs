@@ -283,6 +283,9 @@ impl ExactDelaunay {
             return Vec::new();
         }
         let mut out = vec![start];
+        // A linear scan while the star is small; a set once it is large (a
+        // box corner can have thousands of tets). The order is the same.
+        let mut seen: Option<crate::fxhash::FxHashSet<u32>> = None;
         let mut k = 0;
         while k < out.len() {
             let t = self.tets[out[k] as usize];
@@ -291,8 +294,15 @@ impl ExactDelaunay {
                 // Across face j, which contains v unless v is opposite it.
                 if t.v[j] != v {
                     let u = t.n[j];
-                    if !out.contains(&u) {
+                    let known = match &mut seen {
+                        Some(set) => !set.insert(u),
+                        None => out.contains(&u),
+                    };
+                    if !known {
                         out.push(u);
+                        if seen.is_none() && out.len() > 32 {
+                            seen = Some(out.iter().copied().collect());
+                        }
                     }
                 }
             }
@@ -514,7 +524,9 @@ impl ExactDelaunay {
     fn insert_index(&mut self, i: u32) -> Result<Inserted, DelaunayError> {
         let fail = DelaunayError::Cavity { point: i };
         let p = *self.pt(i);
+        let s = crate::prof::scope("delaunay insert: locate");
         let mut t0 = self.locate(&p);
+        drop(s);
         if !self.is_ghost(t0) {
             for &v in &self.tets[t0 as usize].v {
                 if implicit::coincident(self.pt(v), &p) {
@@ -531,6 +543,7 @@ impl ExactDelaunay {
         let epoch = self.next_epoch();
         let mut cavity = vec![t0];
         self.stamp[t0 as usize] = epoch;
+        let s = crate::prof::scope("delaunay insert: conflicts");
         let mut k = 0;
         while k < cavity.len() {
             let t = cavity[k];
@@ -543,8 +556,10 @@ impl ExactDelaunay {
                 }
             }
         }
+        drop(s);
         // Grow across every boundary face p does not strictly see: then each
         // cone tet is positive (or a valid ghost).
+        let s = crate::prof::scope("delaunay insert: grow");
         loop {
             let mut grow = Vec::new();
             for &t in &cavity {
@@ -564,6 +579,8 @@ impl ExactDelaunay {
                 return Err(fail);
             }
         }
+        drop(s);
+        let _s = crate::prof::scope("delaunay insert: fill");
         self.fill_cavity(i, &cavity)
     }
 
@@ -883,6 +900,15 @@ impl ExactDelaunay {
     fn orient4(&self, v: [u32; 4]) -> Sign {
         let [a, b, c, d] = v.map(|x| self.pt(x));
         implicit::orient3d(a, b, c, d)
+    }
+
+    /// The vertices of tet `t` if it is a live real tet (not a ghost).
+    #[must_use]
+    pub fn tet(&self, t: u32) -> Option<[u32; 4]> {
+        self.tets
+            .get(t as usize)
+            .filter(|x| x.alive && x.v[3] != GHOST)
+            .map(|x| x.v)
     }
 
     /// The tets around edge `xy` in cyclic order (ghosts included), or `None`
