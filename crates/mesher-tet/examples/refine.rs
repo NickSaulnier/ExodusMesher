@@ -6,7 +6,9 @@
 //! ```
 //!
 //! Filters (by `CHAMFER_TAU` times the diagonal, 1e-4 by default) and
-//! chamfers the input, then recovers every segment of the chamfered surface
+//! chamfers the input, then recovers every segment and planar face (and the
+//! box edges and sides; `REFINE_STAGE=segments` stops after the segments) of
+//! the chamfered surface
 //! and the outer box's edges in a Delaunay tetrahedralization. Prints, per
 //! file: triangles, chamfered vertices in use, subsegments, Steiner points
 //! on segments, seconds for chamfering and for recovery; or the error.
@@ -17,7 +19,7 @@
 use std::time::Instant;
 
 use mesher_tet::chamfer::chamfer_filtered;
-use mesher_tet::refine::recover_segments_conforming;
+use mesher_tet::refine::{recover_faces_conforming, recover_segments_conforming};
 
 fn main() {
     for path in std::env::args().skip(1) {
@@ -76,7 +78,14 @@ fn main() {
             .collect::<std::collections::BTreeSet<u32>>()
             .len();
         let started = Instant::now();
-        match recover_segments_conforming(&surface, &points, &triangles, 0.2, max_points) {
+        // REFINE_STAGE=segments stops after the segments.
+        let segments_only = std::env::var("REFINE_STAGE").is_ok_and(|s| s == "segments");
+        let result = if segments_only {
+            recover_segments_conforming(&surface, &points, &triangles, 0.2, max_points)
+        } else {
+            recover_faces_conforming(&surface, &points, &triangles, 0.2, max_points)
+        };
+        match result {
             Ok(r) => {
                 let at = |v: u32| r.dt.points()[v as usize].approx();
                 let length = |s: &[u32; 2]| {
@@ -88,25 +97,20 @@ fn main() {
                     .iter()
                     .map(length)
                     .fold(f64::INFINITY, f64::min);
-                // Subsegments on the box's edges.
-                let on_box = r
-                    .subsegments
-                    .iter()
-                    .filter(|s| {
-                        s.iter().all(|&v| v >= r.box_corners[0]) || r.box_corners.contains(&s[0])
-                    })
-                    .count();
                 println!(
-                    "{path}\tok\t{}\t{used}\t{}\t{}\t{chamfer_seconds:.2}\t{:.2}\tshortest {:.1e}\tbox {on_box}",
+                    "{path}\tok\t{}\t{used}\t{}\t{}\t{chamfer_seconds:.2}\t{:.2}\tshortest {:.1e}\t{} subfaces, {} Steiner points on faces, {} set aside",
                     triangles.len(),
                     r.subsegments.len(),
-                    r.steiner,
+                    r.steiner_segments,
                     started.elapsed().as_secs_f64(),
-                    shortest / diagonal
+                    shortest / diagonal,
+                    r.subfaces.len(),
+                    r.steiner_faces,
+                    r.stuck_subfaces
                 );
             }
             Err(e) => println!(
-                "{path}\tfailed\t{}\tsegments: {e}\t{:.2}",
+                "{path}\tfailed\t{}\trefinement: {e}\t{:.2}",
                 triangles.len(),
                 started.elapsed().as_secs_f64()
             ),

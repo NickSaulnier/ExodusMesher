@@ -341,6 +341,25 @@ impl ExactDelaunay {
             .any(|&t| f.iter().all(|x| self.tets[t as usize].v.contains(x)))
     }
 
+    /// The vertices opposite face `f` (any vertex order) in its two tets
+    /// (`GHOST` for a hull face's ghost), or `None` if `f` is not a face.
+    #[must_use]
+    pub fn face_apexes(&self, f: [u32; 3]) -> Option<[u32; 2]> {
+        let mut out = Vec::with_capacity(2);
+        for t in self.star(f[0]) {
+            let v = self.tets[t as usize].v;
+            if f.iter().all(|x| v.contains(x)) {
+                if let Some(&w) = v.iter().find(|x| !f.contains(x)) {
+                    out.push(w);
+                }
+            }
+        }
+        match out[..] {
+            [a, b] => Some([a, b]),
+            _ => None,
+        }
+    }
+
     fn pt(&self, v: u32) -> &Point {
         &self.points[v as usize]
     }
