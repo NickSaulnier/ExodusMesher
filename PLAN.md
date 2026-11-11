@@ -822,9 +822,16 @@ Tasks, in order:
       - Over all 91, the kernel's median is 11.0 s against refinement's 10.9 s; 74 take under 60 s.
       - Six still time out: 104738 and 225958 in refinement, and 77922, 101548, 200965 and 1620057.
       - 39245 now leaves one input triangle unrecovered (it timed out before), and 500113 still does; 1501546 still keeps one tet turned over after rounding.
+  - **Steiner points on facets** (Nov 11, 2026). Two causes left input triangles unrecovered:
+    - Where a crossing edge has an implicit end, the point near the crossing (a BPT point from approximate positions) lies at a corner of the tets' sections by the plane, so on a facet that flips have partly covered it can fall on a protected face, and every insertion fails (39245, 500113). `ExactDelaunay::point_in_crossing_tet` puts it instead at the approximate centroid of the section of a tet around the edge, as a BPT point of the triangle, kept only if exactly inside that tet: then it is in the uncovered part and on no edge or face. The point near the crossing is still tried where that one does not go in; using only the new one lost 106779, 472175 and 1146192. Test: `points_in_crossing_tets_lie_on_the_plane_inside_a_tet`.
+    - A large facet ran out of rounds, not points: 106779's, crossed by 505 edges, took every point but ended at 264 crossings after 64 rounds of at most 8. The points a round now double up to 32 (`PER_ROUND`), from 128 crossing edges tried.
+    - The synthetic golden reports are unchanged.
+    - **On the clean subset:** 92 of 100 mesh, conform and round (91 before). 39245, 500113 and 77922 are newly meshed; no model now fails face recovery.
+      - The machine ran slower for this run: refinement, which did not change, took 28% longer at the median. Run back to back, the old and new kernels take the same time (332810, 42936, 119918). So 135674 and 472020 (638 s and 505 s before) went past 900 s, as did 200965, which meshes in 765 s alone.
+      - 72 of the 89 meshed in both runs have the same Steiner counts; the other 17 differ in face Steiner points (24 fewer to 136 more), by at most 0.44% of their tets. The smallest face angle fell to 0.000° in 64992, 106779 and 822698 (from 0.021°, 0.080° and 0.027°) and rose in 132060.
+      - Seven time out (104738 and 225958 in refinement; 101548, 135674, 200965, 472020 and 1620057), and 1501546 still keeps one tet turned over after rounding.
   - **Open:**
-    - the six timeouts, and the kernel's time on the slowest models;
-    - Steiner points on a facet that flips have partly covered (39245, 500113): points near the crossings land on protected faces;
+    - the timeouts, and the kernel's time on the slowest models;
     - the 0° tets left (591216);
     - slivers (dihedral angles reach 0 in 60 meshes; the paper's sliver criterion is optional).
 - [ ] Refinement against the sizing field. Opt-in and under the work budget; it hands over to Milestone 15 on `MESH_BUDGET_EXCEEDED`

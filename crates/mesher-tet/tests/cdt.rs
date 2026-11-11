@@ -128,6 +128,75 @@ fn implicit_points_are_inserted_exactly() {
     d.check_delaunay().unwrap();
 }
 
+/// Steiner points for an edge crossing a plane, from implicit and explicit
+/// vertices: exactly on the plane and strictly inside a tet around the edge,
+/// found for nearly every crossing edge.
+#[test]
+fn points_in_crossing_tets_lie_on_the_plane_inside_a_tet() {
+    use mesher_geom::Sign;
+    use mesher_geom::implicit::orient3d;
+    let mut rng = Rng(0x1405_7b7e_f767_814f);
+    let corners: Vec<Point3> = (0..8)
+        .map(|i| {
+            [
+                f64::from(i & 1),
+                f64::from((i >> 1) & 1),
+                f64::from((i >> 2) & 1),
+            ]
+        })
+        .collect();
+    let mut pts = explicit(&corners);
+    for k in 0..150 {
+        pts.push(if k % 2 == 0 {
+            Point::lnc(rng.point(), rng.point(), rng.unit()).unwrap()
+        } else {
+            Point::explicit(rng.point()).unwrap()
+        });
+    }
+    let d = ExactDelaunay::new(pts, 5).unwrap();
+    let pt = |v: u32| d.points()[v as usize];
+    let tets = d.tets();
+    let (mut crossing, mut found) = (0, 0);
+    for plane in [
+        [[0.0, 0.0, 0.37], [1.0, 0.0, 0.41], [0.0, 1.0, 0.33]],
+        [[0.5, 0.0, 0.0], [0.45, 1.0, 0.0], [0.55, 0.0, 1.0]],
+    ] {
+        let [a, b, c] = plane.map(Point::from);
+        let side = |v: u32| orient3d(&a, &b, &c, &pt(v));
+        let mut edges = std::collections::BTreeSet::new();
+        for t in &tets {
+            for (i, j) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
+                edges.insert((t[i].min(t[j]), t[i].max(t[j])));
+            }
+        }
+        for (x, y) in edges {
+            let (sx, sy) = (side(x), side(y));
+            if sx == Sign::Zero || sy == Sign::Zero || sx == sy {
+                continue;
+            }
+            crossing += 1;
+            let Some(p) = d.point_in_crossing_tet(x, y, plane) else {
+                continue;
+            };
+            found += 1;
+            assert_eq!(orient3d(&a, &b, &c, &p), Sign::Zero);
+            // Strictly inside a positive tet holding the edge.
+            let inside = tets.iter().any(|t| {
+                t.contains(&x)
+                    && t.contains(&y)
+                    && (0..4).all(|k| {
+                        let mut q = t.map(pt);
+                        q[k] = p;
+                        orient3d(&q[0], &q[1], &q[2], &q[3]) == Sign::Positive
+                    })
+            });
+            assert!(inside, "edge {x} {y}");
+        }
+    }
+    assert!(crossing > 100, "{crossing}");
+    assert!(found * 10 >= crossing * 9, "{found} of {crossing}");
+}
+
 type Surface = (Vec<Point3>, Vec<[u32; 3]>);
 
 fn cube() -> Surface {

@@ -16,8 +16,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mesher_geom::Sign;
 use mesher_geom::implicit::{self, Point};
+use mesher_geom::{Point3, Sign};
 
 mod untangle;
 mod wrap;
@@ -1064,6 +1064,65 @@ impl ExactDelaunay {
             .get(t as usize)
             .filter(|x| x.alive && x.v[3] != GHOST)
             .map(|x| x.v)
+    }
+
+    /// A point exactly on the plane through `plane` and strictly inside a
+    /// tet around the edge `xy`, which crosses that plane: a BPT point of
+    /// `plane` at the approximate centroid of the tet's section by the plane,
+    /// kept only if it is exactly inside the tet (each tet in ring order
+    /// until one is). Where `xy` crosses a facet whose sides are edges, such
+    /// a point lies in the part not covered by faces, on no edge or face.
+    #[must_use]
+    pub fn point_in_crossing_tet(&self, x: u32, y: u32, plane: [Point3; 3]) -> Option<Point> {
+        let sub = |a: Point3, b: Point3| [0, 1, 2].map(|k| a[k] - b[k]);
+        let dot = |a: Point3, b: Point3| (0..3).map(|k| a[k] * b[k]).sum::<f64>();
+        let cross = |a: Point3, b: Point3| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let c = plane;
+        let n = cross(sub(c[1], c[0]), sub(c[2], c[0]));
+        let area = dot(n, n);
+        for t in self.edge_ring(x, y)? {
+            if self.is_ghost(t) {
+                continue;
+            }
+            let v = self.tets[t as usize].v;
+            let q = v.map(|w| self.pt(w).approx());
+            let d = q.map(|p| dot(n, sub(p, c[0])));
+            // The section's corners: where edges with ends on either side
+            // meet the plane.
+            let mut sum = [0.0; 3];
+            let mut corners = 0;
+            for (i, j) in EDGES {
+                if (d[i] > 0.0 && d[j] < 0.0) || (d[i] < 0.0 && d[j] > 0.0) {
+                    let s = d[i] / (d[i] - d[j]);
+                    for k in 0..3 {
+                        sum[k] += q[i][k] + s * (q[j][k] - q[i][k]);
+                    }
+                    corners += 1;
+                }
+            }
+            if corners < 3 {
+                continue;
+            }
+            let g = sum.map(|s| s / f64::from(corners));
+            let w = [0, 1, 2]
+                .map(|m| dot(n, cross(sub(c[(m + 1) % 3], g), sub(c[(m + 2) % 3], g))) / area);
+            if !w.iter().all(|x| x.is_finite()) {
+                continue;
+            }
+            let Ok(p) = Point::bpt(c, w) else {
+                continue;
+            };
+            if (0..4).all(|j| self.orient(face(&v, j), &p) == Sign::Negative) {
+                return Some(p);
+            }
+        }
+        None
     }
 
     /// The tets around edge `xy` in cyclic order (ghosts included), or `None`

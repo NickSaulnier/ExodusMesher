@@ -24,11 +24,12 @@
 //!    cavity fails, it is filled by gift-wrapping instead.
 //! 3. Steiner points on the facet where edges cross it: the exact
 //!    line-plane intersection (an LPI point) when the edge's ends are
-//!    explicit, else a BPT point of the input triangle near it, exactly on
-//!    its plane. They go in so that no protected edge or face is lost; then
+//!    explicit, else a BPT point of the input triangle, exactly on its
+//!    plane, strictly inside a tet around the edge, or failing that near the
+//!    crossing. They go in so that no protected edge or face is lost; then
 //!    the cavity again. Rounds repeat within the point budget, a facet
 //!    taking one point in its first round and twice as many each round it
-//!    is still crossed (up to eight), at edges sharing no vertex, so the
+//!    is still crossed (up to 32), at edges sharing no vertex, so the
 //!    points spread over it.
 //!
 //! Every subsegment, and every side of a subface or of a face already on a
@@ -119,9 +120,10 @@ const MAX_PASSES: usize = 8;
 const MAX_ROUNDS: usize = 64;
 
 /// Steiner points inserted per facet in a round, at most: one at first,
-/// doubling each round the facet is still crossed, up to this; and the
-/// crossing edges tried for them.
-const PER_ROUND: usize = 8;
+/// doubling each round the facet is still crossed, up to this (a large
+/// facet can be crossed by hundreds of edges); and the crossing edges tried
+/// for them.
+const PER_ROUND: usize = 32;
 const TRIES: usize = 4 * PER_ROUND;
 
 /// With `merge_flat`, the longest polygon a lone triangle is triangulated
@@ -684,10 +686,11 @@ pub fn recover_faces_with(
                 }
                 fresh
             });
-            let candidates: Vec<Point> = spread
+            // Per crossing edge, its points in order: the first that goes in.
+            let candidates: Vec<Vec<Point>> = spread
                 .iter()
                 .chain(&rest)
-                .flat_map(|&(x, y)| {
+                .map(|&(x, y)| {
                     // On the triangle of a merged facet the edge crosses.
                     let f = &facets[ti];
                     let corners = f
@@ -695,24 +698,28 @@ pub fn recover_faces_with(
                         .iter()
                         .find(|t| dt.crosses_region(x, y, std::slice::from_ref(*t)))
                         .map_or(f.corners, |t| t.0);
-                    crossing_point(&dt, points, corners, x, y)
+                    crossing_points(&dt, points, corners, x, y)
                 })
+                .filter(|c| !c.is_empty())
                 .take(TRIES)
                 .collect();
             let mut added = 0;
             let mut gained = Vec::new();
             let most = PER_ROUND.min(1 << steiner_rounds[ti].min(8));
             steiner_rounds[ti] += 1;
-            for p in candidates {
+            for tries in candidates {
                 if added == most || dt.points().len() >= limit {
                     break;
                 }
-                if let Ok(Inserted::New(m)) = dt.insert_protected(p, &is_protected) {
-                    facets[ti].inside.push(m);
-                    gained.push(m);
-                    steiner_on_faces += 1;
-                    inserted = true;
-                    added += 1;
+                for p in tries {
+                    if let Ok(Inserted::New(m)) = dt.insert_protected(p, &is_protected) {
+                        facets[ti].inside.push(m);
+                        gained.push(m);
+                        steiner_on_faces += 1;
+                        inserted = true;
+                        added += 1;
+                        break;
+                    }
                 }
             }
             for m in gained {
@@ -870,13 +877,41 @@ fn merge_facets(
     out
 }
 
-/// A point exactly on input triangle `corners` where the edge `xy` crosses
-/// it, to try as a Steiner point: exactly the crossing (an LPI point) when
-/// both ends are explicit, which lies inside the part of the triangle not
-/// covered by faces. Otherwise near it, from approximate positions: a BPT
-/// point of the triangle, exactly on its plane, with weights kept a little
-/// inside.
-fn crossing_point(
+/// Points exactly on input triangle `corners`'s plane where the edge `xy`
+/// crosses its facet, to try as Steiner points, best first. Exactly the
+/// crossing (an LPI point) when both ends are explicit, which lies inside the
+/// part of the facet not covered by faces. Otherwise a BPT point of the
+/// triangle exactly inside a tet around `xy`
+/// ([`ExactDelaunay::point_in_crossing_tet`]), also in the uncovered part and
+/// off every edge and face; then one near the crossing from approximate
+/// positions ([`near_crossing`]), which can fall on a protected face but goes
+/// in where the first does not.
+fn crossing_points(
+    dt: &ExactDelaunay,
+    points: &[Point3],
+    corners: [u32; 3],
+    x: u32,
+    y: u32,
+) -> Vec<Point> {
+    let c = corners.map(|v| points[v as usize]);
+    if let (Kind::Explicit(a), Kind::Explicit(b)) = (
+        dt.points()[x as usize].kind(),
+        dt.points()[y as usize].kind(),
+    ) {
+        if let Ok(p) = Point::lpi([*a, *b], c) {
+            return vec![p];
+        }
+    }
+    dt.point_in_crossing_tet(x, y, c)
+        .into_iter()
+        .chain(near_crossing(dt, points, corners, x, y))
+        .collect()
+}
+
+/// A BPT point of input triangle `corners`, exactly on its plane, near where
+/// the edge `xy` crosses it, from approximate positions, with weights kept a
+/// little inside.
+fn near_crossing(
     dt: &ExactDelaunay,
     points: &[Point3],
     corners: [u32; 3],
@@ -884,14 +919,6 @@ fn crossing_point(
     y: u32,
 ) -> Option<Point> {
     let c = corners.map(|v| points[v as usize]);
-    if let (Kind::Explicit(a), Kind::Explicit(b)) = (
-        dt.points()[x as usize].kind(),
-        dt.points()[y as usize].kind(),
-    ) {
-        if let Ok(p) = Point::lpi([*a, *b], c) {
-            return Some(p);
-        }
-    }
     let (px, py) = (
         dt.points()[x as usize].approx(),
         dt.points()[y as usize].approx(),
