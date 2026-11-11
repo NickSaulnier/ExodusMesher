@@ -37,6 +37,10 @@ pub(crate) struct PlaneDelaunay {
     pts: Vec<Point>,
     /// Each local point's id outside (a vertex of the 3D tetrahedralization).
     ids: Vec<u32>,
+    /// The local point of each id outside.
+    local_of: std::collections::BTreeMap<u32, u32>,
+    /// A live triangle at each local point (`NONE` until it has one).
+    vertex_tri: Vec<u32>,
     tris: Vec<Tri>,
     free: Vec<u32>,
     last: u32,
@@ -44,6 +48,8 @@ pub(crate) struct PlaneDelaunay {
     pending: Vec<u32>,
     stamp: Vec<u32>,
     epoch: u32,
+    /// Triangle slots filled since the last insertion began.
+    created: Vec<u32>,
 }
 
 impl PlaneDelaunay {
@@ -54,12 +60,15 @@ impl PlaneDelaunay {
             axis,
             pts: Vec::new(),
             ids: Vec::new(),
+            local_of: std::collections::BTreeMap::new(),
+            vertex_tri: Vec::new(),
             tris: Vec::new(),
             free: Vec::new(),
             last: NONE,
             pending: Vec::new(),
             stamp: Vec::new(),
             epoch: 0,
+            created: Vec::new(),
         }
     }
 
@@ -86,14 +95,21 @@ impl PlaneDelaunay {
             n: [NONE; 3],
             alive: true,
         };
-        if let Some(id) = self.free.pop() {
+        let id = if let Some(id) = self.free.pop() {
             self.tris[id as usize] = t;
             id
         } else {
             self.tris.push(t);
             self.stamp.push(0);
             (self.tris.len() - 1) as u32
+        };
+        self.created.push(id);
+        for x in v {
+            if let Some(slot) = self.vertex_tri.get_mut(x as usize) {
+                *slot = id;
+            }
         }
+        id
     }
 
     /// Pair up the edges the triangles `new` share (the first triangle and
@@ -127,22 +143,30 @@ impl PlaneDelaunay {
     /// Add point `p` (id `id` outside). Returns `false` if it equals a point
     /// already there (nothing changes).
     pub(crate) fn insert(&mut self, id: u32, p: Point) -> bool {
-        if self.pts.iter().any(|q| implicit::coincident(q, &p)) && self.last == NONE {
+        self.created.clear();
+        let _s = crate::prof::scope("plane insert");
+        // Before the first triangle a duplicate is found here; after it,
+        // by the insertion.
+        if self.last == NONE && self.pts.iter().any(|q| implicit::coincident(q, &p)) {
             return false;
         }
         let i = self.pts.len() as u32;
         self.pts.push(p);
         self.ids.push(id);
+        self.vertex_tri.push(NONE);
         if self.last == NONE {
+            self.local_of.insert(id, i);
             self.pending.push(i);
             self.start();
             return true;
         }
         if self.insert_index(i) {
+            self.local_of.insert(id, i);
             true
         } else {
             self.pts.pop();
             self.ids.pop();
+            self.vertex_tri.pop();
             false
         }
     }
@@ -262,7 +286,9 @@ impl PlaneDelaunay {
 
     fn insert_index(&mut self, i: u32) -> bool {
         let p = self.pts[i as usize];
+        let s = crate::prof::scope("plane locate");
         let t0 = self.locate(&p);
+        drop(s);
         let v0 = self.tris[t0 as usize].v;
         if v0
             .iter()
@@ -388,19 +414,109 @@ impl PlaneDelaunay {
     }
 
     /// Is there a real triangle with these outside vertex ids (any order)?
-    /// A scan: for rare checks.
+    /// A walk around the first vertex.
     pub(crate) fn has_triangle(&self, v: [u32; 3]) -> bool {
-        self.tris.iter().any(|t| {
-            t.alive
-                && t.v[2] != GHOST
-                && v.iter()
-                    .all(|id| t.v.iter().any(|&x| self.ids[x as usize] == *id))
-        })
+        let locals: Vec<u32> = v
+            .iter()
+            .filter_map(|id| self.local_of.get(id).copied())
+            .collect();
+        let &[a, b, c] = locals.as_slice() else {
+            return false;
+        };
+        let Some(&start) = self.vertex_tri.get(a as usize) else {
+            return false;
+        };
+        if start == NONE
+            || !self.tris[start as usize].alive
+            || !self.tris[start as usize].v.contains(&a)
+        {
+            return false;
+        }
+        // The triangles around a: across each edge through a.
+        let mut seen = vec![start];
+        let mut k = 0;
+        while k < seen.len() {
+            let t = self.tris[seen[k] as usize];
+            k += 1;
+            if t.v[2] != GHOST && t.v.contains(&b) && t.v.contains(&c) {
+                return true;
+            }
+            for j in 0..3 {
+                if t.v[j] != a {
+                    let u = t.n[j];
+                    if u != NONE && !seen.contains(&u) {
+                        seen.push(u);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Is there a first triangle yet? After that, every triangle an
+    /// insertion makes has the new point as a vertex.
+    pub(crate) fn started(&self) -> bool {
+        self.last != NONE
+    }
+
+    /// The triangle slots the last insertion filled.
+    pub(crate) fn created(&self) -> &[u32] {
+        &self.created
+    }
+
+    /// Triangle slots so far (live or not).
+    pub(crate) fn slots(&self) -> usize {
+        self.tris.len()
+    }
+
+    /// Slot `t`, if it holds a live real triangle: its vertices' outside ids
+    /// (counterclockwise in the projection) and the slots across the edges
+    /// opposite them.
+    pub(crate) fn real(&self, t: u32) -> Option<([u32; 3], [u32; 3])> {
+        let tri = self.tris.get(t as usize)?;
+        (tri.alive && tri.v[2] != GHOST).then(|| (tri.v.map(|x| self.ids[x as usize]), tri.n))
+    }
+
+    /// The real triangles at the vertex with outside id `id`: each one's slot
+    /// (see [`PlaneDelaunay::real`]) and its
+    /// vertices' outside ids. Empty for a vertex not in the triangulation.
+    pub(crate) fn triangles_at(&self, id: u32) -> Vec<(u32, [u32; 3])> {
+        let Some(&a) = self.local_of.get(&id) else {
+            return Vec::new();
+        };
+        let Some(&start) = self.vertex_tri.get(a as usize) else {
+            return Vec::new();
+        };
+        if start == NONE
+            || !self.tris[start as usize].alive
+            || !self.tris[start as usize].v.contains(&a)
+        {
+            return Vec::new();
+        }
+        let mut seen = vec![start];
+        let mut k = 0;
+        while k < seen.len() {
+            let t = self.tris[seen[k] as usize];
+            k += 1;
+            for j in 0..3 {
+                if t.v[j] != a {
+                    let u = t.n[j];
+                    if u != NONE && !seen.contains(&u) {
+                        seen.push(u);
+                    }
+                }
+            }
+        }
+        seen.into_iter()
+            .filter(|&t| self.tris[t as usize].v[2] != GHOST)
+            .map(|t| (t, self.tris[t as usize].v.map(|x| self.ids[x as usize])))
+            .collect()
     }
 
     /// The real triangles, counterclockwise in the projection, with their
     /// vertices' outside ids, and each one's neighbours (by position in this
     /// list; `None` across the hull).
+    #[cfg(test)]
     pub(crate) fn triangles(&self) -> Vec<([u32; 3], [Option<usize>; 3])> {
         let mut index = vec![usize::MAX; self.tris.len()];
         let mut out = Vec::new();

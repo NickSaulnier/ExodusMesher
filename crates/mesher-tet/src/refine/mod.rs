@@ -27,8 +27,15 @@
 //!   of the region's boundary, which is split instead. The equatorial-sphere
 //!   test is f64: it only chooses where to put points, while every
 //!   topological decision stays exact.
+//! - **Tets**: every tet in the box whose circumradius over its shortest
+//!   edge exceeds a bound (2, the paper's and TetGen's default, a smallest
+//!   face angle of about 14.47°) is split at its circumcentre (an f64
+//!   point: any point in the circumsphere would do), worst first, unless the
+//!   circumcentre encroaches a subsegment or a subface, which is split
+//!   instead. Segments, then faces, are always repaired first.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use mesher_geom::implicit::{self, Kind, Point};
 use mesher_geom::{Point3, Sign};
@@ -99,14 +106,58 @@ fn middle(carrier: Carrier, p0: Param, p1: Param) -> Option<(Point, Param)> {
     match (carrier, p0, p1) {
         (Carrier::Line { a, b }, Param::S(s0), Param::S(s1)) => {
             let s = 0.5 * (s0 + s1);
+            // On a line along an axis, an explicit point with the two fixed
+            // coordinates copied lies on it exactly, and explicit points take
+            // the fast predicates.
+            let fixed = (0..3).filter(|&k| a[k] == b[k]).count();
+            if fixed == 2 {
+                let p = [0, 1, 2].map(|k| {
+                    if a[k] == b[k] {
+                        a[k]
+                    } else {
+                        a[k] + s * (b[k] - a[k])
+                    }
+                });
+                return Point::explicit(p).ok().map(|p| (p, Param::S(s)));
+            }
             // a + s(b − a) = s·b + (1 − s)·a
             Point::lnc(b, a, s).ok().map(|p| (p, Param::S(s)))
         }
         (Carrier::Triangle { tri }, Param::W(w0), Param::W(w1)) => {
             let w = [0, 1, 2].map(|k| 0.5 * (w0[k] + w1[k]));
+            if let Some(k) = axis_plane(tri) {
+                let q = [0, 1, 2].map(|j| {
+                    if j == k {
+                        tri[0][k]
+                    } else {
+                        w[0] * tri[0][j] + w[1] * tri[1][j] + w[2] * tri[2][j]
+                    }
+                });
+                return Point::explicit(q).ok().map(|p| (p, Param::W(w)));
+            }
             Point::bpt(tri, w).ok().map(|p| (p, Param::W(w)))
         }
         _ => None,
+    }
+}
+
+/// The axis a plane through `tri` is perpendicular to, if its three points
+/// share that coordinate exactly (an explicit point with the coordinate
+/// copied then lies on it exactly).
+fn axis_plane(tri: [Point3; 3]) -> Option<usize> {
+    (0..3).find(|&k| tri[0][k] == tri[1][k] && tri[1][k] == tri[2][k])
+}
+
+/// A point of the plane through `plane` near `o`: explicit on a plane
+/// perpendicular to an axis (the coordinate snapped), else a BPT point.
+fn on_plane(o: Point3, plane: [Point3; 3]) -> Option<Point> {
+    match axis_plane(plane) {
+        Some(k) => {
+            let mut q = o;
+            q[k] = plane[0][k];
+            Point::explicit(q).ok()
+        }
+        None => Point::bpt(plane, plane_weights(o, plane)).ok(),
     }
 }
 
@@ -201,6 +252,57 @@ fn plane_weights(p: Point3, t: [Point3; 3]) -> [f64; 3] {
     ]
 }
 
+/// The circumcentre of tet `a b c d` and its circumradius over its shortest
+/// edge (f64), or `None` if it is flat to rounding.
+fn tet_quality(p: [Point3; 4]) -> Option<(Point3, f64)> {
+    let [a, b, c, d] = p;
+    let (u, v, w) = (sub(b, a), sub(c, a), sub(d, a));
+    let det = dot(u, cross(v, w));
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    let (uu, vv, ww) = (dot(u, u), dot(v, v), dot(w, w));
+    let (x, y, z) = (cross(v, w), cross(w, u), cross(u, v));
+    let o = [0, 1, 2].map(|k| (uu * x[k] + vv * y[k] + ww * z[k]) / (2.0 * det));
+    let centre = [a[0] + o[0], a[1] + o[1], a[2] + o[2]];
+    let radius = dot(o, o).sqrt();
+    let mut shortest = f64::INFINITY;
+    for i in 0..4 {
+        for j in i + 1..4 {
+            let e = sub(p[i], p[j]);
+            shortest = shortest.min(dot(e, e).sqrt());
+        }
+    }
+    let ratio = radius / shortest;
+    (ratio.is_finite() && centre.iter().all(|x| x.is_finite())).then_some((centre, ratio))
+}
+
+/// A bad tet in the queue: worst ratio first, then by vertices (a fixed
+/// order).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BadTet {
+    ratio: f64,
+    tet: u32,
+    v: [u32; 4],
+}
+
+impl Eq for BadTet {}
+
+impl PartialOrd for BadTet {
+    fn partial_cmp(&self, other: &BadTet) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BadTet {
+    fn cmp(&self, other: &BadTet) -> Ordering {
+        self.ratio
+            .total_cmp(&other.ratio)
+            .then_with(|| other.v.cmp(&self.v))
+            .then_with(|| other.tet.cmp(&self.tet))
+    }
+}
+
 /// A segment as a chain of pieces: its carrier, its vertices in order with
 /// their parameters, and the regions it bounds (with whether the region's
 /// faces run along it backwards).
@@ -223,7 +325,19 @@ struct Region {
     pd: PlaneDelaunay,
     chains: Vec<usize>,
     all_inside: bool,
+    /// Marked for a pass: a change near it may have left a triangle missing
+    /// or encroached.
     dirty: bool,
+    /// Only the triangles at these vertices can have changed since the last
+    /// pass (unless `all`): a point's insertion changes only faces whose
+    /// vertices all become its neighbours, and the plane's new triangles all
+    /// have it as a vertex.
+    touched: BTreeSet<u32>,
+    all: bool,
+    /// Whether each triangle slot of the plane is inside the region (not
+    /// kept for a box side), once found by a flood and then kept up to date
+    /// at each insertion.
+    labels: Option<Vec<bool>>,
 }
 
 /// The refined tetrahedralization: the chamfered surface's vertices and the
@@ -247,6 +361,10 @@ pub struct Refined {
     /// Subfaces found encroached or missing whose fix added no point (a
     /// circumcentre already a vertex), left as they are.
     pub stuck_subfaces: usize,
+    /// Points inserted at tet circumcentres.
+    pub steiner_tets: usize,
+    /// Bad tets whose fix added no point, left as they are.
+    pub stuck_tets: usize,
 }
 
 /// Refinement under way.
@@ -262,9 +380,16 @@ struct Refiner {
     /// Subfaces (sorted vertices) whose fix added no point: set aside, not
     /// retried.
     stuck: BTreeSet<[u32; 3]>,
+    /// The radius-edge bound once tet refinement has started.
+    quality: Option<f64>,
+    bad: BinaryHeap<BadTet>,
+    stuck_tets: BTreeSet<[u32; 4]>,
+    /// The box, lowest and highest corner.
+    bounds: (Point3, Point3),
     max_points: usize,
     steiner_segments: usize,
     steiner_faces: usize,
+    steiner_tets: usize,
 }
 
 impl Refiner {
@@ -286,12 +411,28 @@ impl Refiner {
             Inserted::New(m) => m,
             Inserted::Duplicate(_) => return Ok(None),
         };
+        self.inserted(m, &p);
+        Ok(Some(m))
+    }
+
+    /// After vertex `m` (at `p`) goes in: room for it in the per-vertex
+    /// lists, its bad tets queued, the pieces at its neighbours it lies inside
+    /// or on the diametral sphere of queued, and their regions marked.
+    fn inserted(&mut self, m: u32, p: &Point) {
+        let _s = crate::prof::scope("refine: after insertion");
         let n = self.dt.points().len();
         self.at_vertex.resize(n, Vec::new());
         self.region_of.resize(n, Vec::new());
+        if self.quality.is_some() {
+            for t in self.dt.star(m) {
+                self.queue_if_bad(t);
+            }
+        }
         for w in self.dt.neighbours(m) {
             for &r in &self.region_of[w as usize] {
-                self.regions[r as usize].dirty = true;
+                let region = &mut self.regions[r as usize];
+                region.dirty = true;
+                region.touched.insert(w);
             }
             for &c in &self.at_vertex[w as usize] {
                 let chain = &self.chains[c as usize];
@@ -303,14 +444,13 @@ impl Refiner {
                     (Some(w), chain.verts.get(i + 1).copied()),
                 ] {
                     if let (Some(a), Some(b)) = (a, b) {
-                        if implicit::dot_sign(self.pt(a), &p, self.pt(b)) != Sign::Positive {
+                        if implicit::dot_sign(self.pt(a), p, self.pt(b)) != Sign::Positive {
                             self.queue.push((c, a, b));
                         }
                     }
                 }
             }
         }
-        Ok(Some(m))
     }
 
     /// Is piece `a b` a Delaunay edge no vertex of the tets around it
@@ -350,9 +490,7 @@ impl Refiner {
         self.at_vertex[m as usize].push(c);
         for (r, _) in regions {
             self.region_of[m as usize].push(r as u32);
-            let region = &mut self.regions[r];
-            region.pd.insert(m, p);
-            region.dirty = true;
+            self.plane_insert(r, m, p);
         }
         self.queue.push((c, a, m));
         self.queue.push((c, m, b));
@@ -397,23 +535,38 @@ impl Refiner {
         }
     }
 
-    /// The triangles of region `r` inside it: all of them for a box side;
-    /// otherwise a flood from the inner side of each boundary piece that
-    /// never crosses one.
+    /// The triangles of region `r` inside it, in slot order: all of them
+    /// for a box side; otherwise a flood from the inner side of each boundary
+    /// piece that never crosses one.
     fn inside(&self, r: usize) -> Vec<[u32; 3]> {
+        let pd = &self.regions[r].pd;
+        let labels = if self.regions[r].all_inside {
+            None
+        } else {
+            Some(self.flood(r))
+        };
+        (0..pd.slots() as u32)
+            .filter(|&t| labels.as_ref().is_none_or(|l| l[t as usize]))
+            .filter_map(|t| pd.real(t).map(|(v, _)| v))
+            .collect()
+    }
+
+    /// Each triangle slot of region `r`'s plane: is it inside (see
+    /// [`Refiner::inside`])?
+    fn flood(&self, r: usize) -> Vec<bool> {
         let region = &self.regions[r];
-        let tris = region.pd.triangles();
-        if region.all_inside {
-            return tris.into_iter().map(|(v, _)| v).collect();
-        }
-        let mut by_edge: BTreeMap<(u32, u32), usize> = BTreeMap::new();
-        for (i, (v, _)) in tris.iter().enumerate() {
-            for k in 0..3 {
-                by_edge.insert((v[(k + 1) % 3], v[(k + 2) % 3]), i);
+        let pd = &region.pd;
+        let n = pd.slots();
+        let mut by_edge: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        for t in 0..n as u32 {
+            if let Some((v, _)) = pd.real(t) {
+                for k in 0..3 {
+                    by_edge.insert((v[(k + 1) % 3], v[(k + 2) % 3]), t);
+                }
             }
         }
         let mut walls: BTreeSet<(u32, u32)> = BTreeSet::new();
-        let mut inside = vec![false; tris.len()];
+        let mut inside = vec![false; n];
         let mut stack = Vec::new();
         for &c in &region.chains {
             let chain = &self.chains[c];
@@ -433,33 +586,138 @@ impl Refiner {
                 // triangulation is counterclockwise in the projection.
                 let key = if region.positive { (a, b) } else { (b, a) };
                 if let Some(&t) = by_edge.get(&key) {
-                    if !inside[t] {
-                        inside[t] = true;
+                    if !inside[t as usize] {
+                        inside[t as usize] = true;
                         stack.push(t);
                     }
                 }
             }
         }
         while let Some(t) = stack.pop() {
-            let (v, n) = tris[t];
+            let Some((v, nb)) = pd.real(t) else {
+                continue;
+            };
             for k in 0..3 {
                 let (a, b) = (v[(k + 1) % 3], v[(k + 2) % 3]);
                 if walls.contains(&(a.min(b), a.max(b))) {
                     continue;
                 }
-                if let Some(u) = n[k] {
-                    if !inside[u] {
-                        inside[u] = true;
-                        stack.push(u);
-                    }
+                let u = nb[k];
+                if pd.real(u).is_some() && !inside[u as usize] {
+                    inside[u as usize] = true;
+                    stack.push(u);
                 }
             }
         }
-        tris.iter()
-            .zip(&inside)
-            .filter(|(_, i)| **i)
-            .map(|(t, _)| t.0)
-            .collect()
+        inside
+    }
+
+    /// If `x y` is a boundary piece of region `r`: the directed edge whose
+    /// triangle on the left is inside (see [`Refiner::flood`]).
+    fn wall_key(&self, r: usize, x: u32, y: u32) -> Option<(u32, u32)> {
+        for &c in &self.at_vertex[x as usize] {
+            let chain = &self.chains[c as usize];
+            let Some(&(_, backwards)) = chain.regions.iter().find(|(q, _)| *q == r) else {
+                continue;
+            };
+            for w in chain.verts.windows(2) {
+                if (w[0] == x && w[1] == y) || (w[0] == y && w[1] == x) {
+                    let (a, b) = if backwards {
+                        (w[1], w[0])
+                    } else {
+                        (w[0], w[1])
+                    };
+                    return Some(if self.regions[r].positive {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Add vertex `m` at `p` to region `r`'s plane, keeping its inside
+    /// labels: each new triangle has `m` as a vertex, and across the edge
+    /// opposite it lies an unchanged triangle or the hull. Across a boundary
+    /// piece, the piece's side decides; across any other edge it is as its
+    /// neighbour; at the hull, outside. (This is the flood's answer while the
+    /// boundary pieces are edges of the plane's triangulation.)
+    fn plane_insert(&mut self, r: usize, m: u32, p: Point) {
+        let started = self.regions[r].pd.started();
+        let region = &mut self.regions[r];
+        region.pd.insert(m, p);
+        region.dirty = true;
+        region.touched.insert(m);
+        if region.all_inside || region.labels.is_none() {
+            return;
+        }
+        if !started {
+            region.labels = None;
+            return;
+        }
+        let created = region.pd.created().to_vec();
+        let mut found = Vec::with_capacity(created.len());
+        for &t in &created {
+            let pd = &self.regions[r].pd;
+            let Some((v, nb)) = pd.real(t) else {
+                found.push((t, false));
+                continue;
+            };
+            let Some(k) = v.iter().position(|&x| x == m) else {
+                // Not the cone of a single insertion: find them again.
+                self.regions[r].labels = None;
+                return;
+            };
+            let (x, y) = (v[(k + 1) % 3], v[(k + 2) % 3]);
+            let label = if let Some(key) = self.wall_key(r, x, y) {
+                key == (x, y)
+            } else {
+                let u = nb[k];
+                pd.real(u).is_some()
+                    && self.regions[r]
+                        .labels
+                        .as_ref()
+                        .is_some_and(|l| l.get(u as usize).copied().unwrap_or(false))
+            };
+            found.push((t, label));
+        }
+        let region = &mut self.regions[r];
+        let slots = region.pd.slots();
+        if let Some(labels) = &mut region.labels {
+            labels.resize(slots, false);
+            for (t, label) in found {
+                labels[t as usize] = label;
+            }
+        }
+    }
+
+    /// The triangles inside region `r` that a pass checks, in the order of
+    /// [`Refiner::inside`]: those at the vertices touched since the last pass
+    /// (every one when marked `all`). Clears the marks.
+    fn candidates(&mut self, r: usize) -> Vec<[u32; 3]> {
+        let region = &mut self.regions[r];
+        region.dirty = false;
+        let touched = std::mem::take(&mut region.touched);
+        if std::mem::take(&mut region.all) {
+            return self.inside(r);
+        }
+        let mut at: BTreeMap<u32, [u32; 3]> = BTreeMap::new();
+        for w in touched {
+            at.extend(region.pd.triangles_at(w));
+        }
+        if !region.all_inside {
+            if region.labels.is_none() {
+                let _s = crate::prof::scope("refine region: inside");
+                let labels = self.flood(r);
+                self.regions[r].labels = Some(labels);
+            }
+            if let Some(labels) = &self.regions[r].labels {
+                at.retain(|&t, _| labels.get(t as usize).copied().unwrap_or(false));
+            }
+        }
+        at.into_values().collect()
     }
 
     /// Is triangle `v` a face whose equatorial sphere holds neither apex of
@@ -486,54 +744,269 @@ impl Refiner {
     /// encroached is split at its circumcentre, or the boundary pieces that
     /// point encroaches are split instead.
     fn region(&mut self, r: usize) -> Result<(), RefineError> {
-        self.regions[r].dirty = false;
-        let bad: Vec<[u32; 3]> = self
-            .inside(r)
+        let candidates = self.candidates(r);
+        let s = crate::prof::scope("refine region: check");
+        let bad: Vec<[u32; 3]> = candidates
             .into_iter()
             .filter(|&v| !self.is_stuck(v) && !self.subface_ok(v))
             .collect();
+        drop(s);
         for v in bad {
+            // An earlier fix in this pass may have removed it (the triangles
+            // of a cocircular quad share a circumcentre: fixing both would
+            // put two points an ulp apart).
+            if !self.regions[r].pd.has_triangle(v) {
+                continue;
+            }
             let before = self.dt.points().len();
-            let [a, b, c] = v.map(|x| self.pt(x).approx());
-            let Some(o) = circumcentre(a, b, c) else {
-                continue;
-            };
-            let plane = self.regions[r].plane;
-            let Ok(p) = Point::bpt(plane, plane_weights(o, plane)) else {
-                continue;
-            };
-            // Boundary pieces it encroaches are split instead.
-            let mut pieces = Vec::new();
-            for &ch in &self.regions[r].chains {
-                for w in self.chains[ch].verts.windows(2) {
-                    if encroaches(self.pt(w[0]), &p, self.pt(w[1])) {
-                        pieces.push((ch, w[0], w[1]));
-                    }
-                }
-            }
-            if pieces.is_empty() {
-                if let Some(m) = self.insert(p)? {
-                    self.steiner_faces += 1;
-                    self.region_of[m as usize].push(r as u32);
-                    let region = &mut self.regions[r];
-                    region.pd.insert(m, p);
-                    region.dirty = true;
-                }
-            } else {
-                for (ch, x, y) in pieces {
-                    self.split(ch as u32, x, y)?;
-                }
-            }
+            self.fix_subface(r, v)?;
             self.drain()?;
+            // Still there (the fix split boundary pieces, or added nothing):
+            // check it again next pass.
+            if self.regions[r].pd.has_triangle(v) {
+                self.regions[r].touched.extend(v);
+            }
             // No point added: set it aside if it is still there (a triangle
             // an earlier fix in this pass already removed is not stuck).
-            if self.dt.points().len() == before && self.regions[r].pd.has_triangle(v) {
+            if self.dt.points().len() == before
+                && self.regions[r].pd.has_triangle(v)
+                && !self.subface_ok(v)
+            {
                 let mut key = v;
                 key.sort_unstable();
                 self.stuck.insert(key);
             }
         }
         Ok(())
+    }
+
+    /// Split subface `v` of region `r` at its circumcentre (a BPT point of
+    /// the region's plane), or the region's boundary pieces that point
+    /// encroaches instead.
+    fn fix_subface(&mut self, r: usize, v: [u32; 3]) -> Result<(), RefineError> {
+        let [a, b, c] = v.map(|x| self.pt(x).approx());
+        let Some(o) = circumcentre(a, b, c) else {
+            return Ok(());
+        };
+        let plane = self.regions[r].plane;
+        let Some(p) = on_plane(o, plane) else {
+            return Ok(());
+        };
+        let s = crate::prof::scope("refine subface: pieces");
+        // An f64 distance first, to skip the pieces p is far outside the
+        // diametral sphere of (by much more than the points' rounding: 1e-9
+        // of the box diagonal); the exact test decides the rest.
+        let (lo, hi) = self.bounds;
+        let slack = 1e-9 * dot(sub(hi, lo), sub(hi, lo)).sqrt();
+        let pa = p.approx();
+        let mut pieces = Vec::new();
+        for &ch in &self.regions[r].chains {
+            for w in self.chains[ch].verts.windows(2) {
+                let (a, b) = (self.pt(w[0]).approx(), self.pt(w[1]).approx());
+                let mid = [0, 1, 2].map(|k| 0.5 * (a[k] + b[k]));
+                let radius = 0.5 * dot(sub(a, b), sub(a, b)).sqrt();
+                if dot(sub(pa, mid), sub(pa, mid)).sqrt() > radius + slack {
+                    continue;
+                }
+                if encroaches(self.pt(w[0]), &p, self.pt(w[1])) {
+                    pieces.push((ch, w[0], w[1]));
+                }
+            }
+        }
+        drop(s);
+        if pieces.is_empty() {
+            if let Some(m) = self.insert(p)? {
+                self.steiner_faces += 1;
+                self.region_of[m as usize].push(r as u32);
+                self.plane_insert(r, m, p);
+            }
+        } else {
+            for (ch, x, y) in pieces {
+                self.split(ch as u32, x, y)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Queue tet `t` if it is a live real tet over the radius-edge bound.
+    fn queue_if_bad(&mut self, t: u32) {
+        let (Some(bound), Some(v)) = (self.quality, self.dt.tet(t)) else {
+            return;
+        };
+        let p = v.map(|x| self.pt(x).approx());
+        if let Some((_, ratio)) = tet_quality(p) {
+            if ratio > bound {
+                self.bad.push(BadTet { ratio, tet: t, v });
+            }
+        }
+    }
+
+    /// Split the bad tet `v` at its circumcentre `c`, unless `c` encroaches
+    /// a subsegment or a subface near it (those of the tets it conflicts
+    /// with), which is split instead.
+    fn fix_tet(&mut self, c: Point3, near: u32) -> Result<(), RefineError> {
+        // Not outside the box (unencroached box sides keep circumcentres in;
+        // a set-aside subface or the f64 sphere test could let one out).
+        let (lo, hi) = self.bounds;
+        if (0..3).any(|k| !(c[k] > lo[k] && c[k] < hi[k])) {
+            return Ok(());
+        }
+        let Ok(p) = Point::explicit(c) else {
+            return Ok(());
+        };
+        // A point inside a subsegment's diametral sphere or a subface's
+        // equatorial sphere is inside the circumsphere of a tet at it: only
+        // the edges and faces of the tets it conflicts with are candidates,
+        // checked on the conflict region the insertion itself finds. The
+        // circumcentre is near the tet: locate it from there.
+        if self.dt.points().len() >= self.max_points {
+            return Err(RefineError::Budget {
+                points: self.dt.points().len(),
+                limit: self.max_points,
+            });
+        }
+        let mut pieces: BTreeSet<(u32, u32, u32)> = BTreeSet::new();
+        let mut face: Option<([u32; 3], u32)> = None;
+        let (chains, at_vertex, region_of) = (&self.chains, &self.at_vertex, &self.region_of);
+        let mut reject = |dt: &ExactDelaunay, cavity: &[[u32; 4]]| -> bool {
+            let _s = crate::prof::scope("refine tets: encroachment");
+            let pt = |v: u32| &dt.points()[v as usize];
+            for tv in cavity {
+                for i in 0..4 {
+                    for j in i + 1..4 {
+                        let (a, b) = (tv[i], tv[j]);
+                        for &ch in &at_vertex[a as usize] {
+                            if !at_vertex[b as usize].contains(&ch) {
+                                continue;
+                            }
+                            let verts = &chains[ch as usize].verts;
+                            let piece = verts
+                                .windows(2)
+                                .find(|w| (w[0] == a && w[1] == b) || (w[0] == b && w[1] == a));
+                            if let Some(w) = piece {
+                                if encroaches(pt(w[0]), &p, pt(w[1])) {
+                                    pieces.insert((ch, w[0], w[1]));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !pieces.is_empty() {
+                return true;
+            }
+            let mut faces: BTreeSet<([u32; 3], u32)> = BTreeSet::new();
+            for tv in cavity {
+                for k in 0..4 {
+                    let mut f = [tv[(k + 1) % 4], tv[(k + 2) % 4], tv[(k + 3) % 4]];
+                    f.sort_unstable();
+                    let common = region_of[f[0] as usize].iter().find(|r| {
+                        region_of[f[1] as usize].contains(r) && region_of[f[2] as usize].contains(r)
+                    });
+                    if let Some(&r) = common {
+                        faces.insert((f, r));
+                    }
+                }
+            }
+            for (f, r) in faces {
+                let [a, b, cc] = f.map(|x| pt(x).approx());
+                let Some(o) = circumcentre(a, b, cc) else {
+                    continue;
+                };
+                let r2 = dot(sub(a, o), sub(a, o));
+                if dot(sub(c, o), sub(c, o)) < r2 * (1.0 - 1e-9) {
+                    face = Some((f, r));
+                    return true;
+                }
+            }
+            false
+        };
+        self.dt.hint(near);
+        let result = self.dt.insert_unless(p, &mut reject)?;
+        match result {
+            Some(Inserted::New(m)) => {
+                self.inserted(m, &p);
+                self.steiner_tets += 1;
+            }
+            Some(Inserted::Duplicate(_)) => {}
+            None => {
+                if !pieces.is_empty() {
+                    for (ch, a, b) in pieces {
+                        self.split(ch, a, b)?;
+                    }
+                } else if let Some((f, r)) = face {
+                    self.fix_subface(r as usize, f)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Tets: every bad one queued, then split worst first, segments and
+    /// faces repaired first at every step (each insertion queues the bad tets
+    /// it makes; a bad tet whose fix split something else instead goes back
+    /// in once the queue is empty); then a full check of segments and faces,
+    /// and again from the start if that added points.
+    fn tets(&mut self, bound: f64) -> Result<(), RefineError> {
+        self.faces()?;
+        self.quality = Some(bound);
+        loop {
+            let s = crate::prof::scope("refine tets: queue all");
+            for t in 0..self.dt.tet_slots() {
+                self.queue_if_bad(t);
+            }
+            drop(s);
+            let mut later: Vec<BadTet> = Vec::new();
+            loop {
+                self.drain()?;
+                if let Some(r) = self.regions.iter().position(|x| x.dirty) {
+                    let _s = crate::prof::scope("refine tets: region");
+                    self.region(r)?;
+                    continue;
+                }
+                let Some(b) = self.bad.pop() else {
+                    if later.is_empty() {
+                        break;
+                    }
+                    self.bad.extend(later.drain(..));
+                    continue;
+                };
+                if self.dt.tet(b.tet) != Some(b.v) {
+                    continue;
+                }
+                let mut key = b.v;
+                key.sort_unstable();
+                if self.stuck_tets.contains(&key) {
+                    continue;
+                }
+                let Some((c, _)) = tet_quality(b.v.map(|x| self.pt(x).approx())) else {
+                    continue;
+                };
+                let before = self.dt.points().len();
+                let _s = crate::prof::scope("refine tets: fix");
+                self.fix_tet(c, b.tet)?;
+                drop(_s);
+                if self.dt.points().len() == before {
+                    self.stuck_tets.insert(key);
+                } else {
+                    // Points went in elsewhere (an encroached subsegment or
+                    // subface split instead): it is bad still, if there, and
+                    // goes back in once the queue is empty.
+                    if self.dt.tet(b.tet) == Some(b.v) {
+                        later.push(b);
+                    }
+                }
+            }
+            // A full check of segments and faces; whatever it adds, the
+            // tets it makes are checked again.
+            let before = self.dt.points().len();
+            let s = crate::prof::scope("refine tets: faces after");
+            self.faces()?;
+            drop(s);
+            if self.dt.points().len() == before {
+                return Ok(());
+            }
+        }
     }
 
     fn is_stuck(&self, v: [u32; 3]) -> bool {
@@ -562,6 +1035,7 @@ impl Refiner {
                     .any(|v| !self.is_stuck(v) && !self.subface_ok(v))
                 {
                     self.regions[r].dirty = true;
+                    self.regions[r].all = true;
                     any = true;
                 }
             }
@@ -593,6 +1067,8 @@ impl Refiner {
             steiner_segments: self.steiner_segments,
             steiner_faces: self.steiner_faces,
             stuck_subfaces: self.stuck.len(),
+            steiner_tets: self.steiner_tets,
+            stuck_tets: self.stuck_tets.len(),
         }
     }
 }
@@ -716,6 +1192,9 @@ fn set_up(
                 chains: Vec::new(),
                 all_inside: false,
                 dirty: true,
+                touched: BTreeSet::new(),
+                all: true,
+                labels: None,
             });
             regions.len() - 1
         });
@@ -844,6 +1323,9 @@ fn set_up(
             chains: region_chains,
             all_inside: true,
             dirty: true,
+            touched: BTreeSet::new(),
+            all: true,
+            labels: None,
         });
     }
     let mut at_vertex: Vec<Vec<u32>> = vec![Vec::new(); n];
@@ -866,9 +1348,14 @@ fn set_up(
         region_of,
         queue,
         stuck: BTreeSet::new(),
+        quality: None,
+        bad: BinaryHeap::new(),
+        stuck_tets: BTreeSet::new(),
+        bounds: (lo, hi),
         max_points,
         steiner_segments: 0,
         steiner_faces: 0,
+        steiner_tets: 0,
     };
     Ok((refiner, vertex_of, box_corners))
 }
@@ -897,6 +1384,25 @@ pub fn recover_segments_conforming(
     let mut out = r.finish(vertex_of, box_corners);
     out.subfaces.clear();
     Ok(out)
+}
+
+/// [`recover_faces_conforming`], then every tet in the box whose
+/// circumradius over its shortest edge exceeds `bound` split (2 is the
+/// paper's choice, a smallest face angle of about 14.47°).
+///
+/// # Errors
+/// See [`RefineError`].
+pub fn refine_conforming(
+    surface: &FilteredChamfer,
+    points: &[Point3],
+    triangles: &[[u32; 3]],
+    margin: f64,
+    max_points: usize,
+    bound: f64,
+) -> Result<Refined, RefineError> {
+    let (mut r, vertex_of, box_corners) = set_up(surface, points, triangles, margin, max_points)?;
+    r.tets(bound)?;
+    Ok(r.finish(vertex_of, box_corners))
 }
 
 /// [`recover_segments_conforming`], then every planar region of the
@@ -1031,6 +1537,37 @@ mod tests {
         let (p, f) = tetrahedron();
         let r = check("tetrahedron", &p, &f, false);
         assert!(r.subsegments.len() >= 24 + 12);
+    }
+
+    /// After tet refinement no tet is over the bound (bar any set aside),
+    /// every subsegment and subface is still there, and the
+    /// tetrahedralization is valid and Delaunay.
+    #[test]
+    fn tets_of_a_cube_and_a_chamfered_tetrahedron_are_refined() {
+        for (name, (p, f)) in [("cube", cube()), ("tetrahedron", tetrahedron())] {
+            let surface = chamfer_filtered(&p, &f, 1e-6).unwrap();
+            let r = refine_conforming(&surface, &p, &f, 0.2, 500_000, 2.0).unwrap();
+            r.dt.check().unwrap();
+            r.dt.check_delaunay().unwrap();
+            for s in &r.subsegments {
+                assert!(r.dt.has_edge(s[0], s[1]), "{name}: {s:?}");
+            }
+            for (v, _) in &r.subfaces {
+                assert!(r.dt.has_face(*v), "{name}: {v:?}");
+            }
+            let worst =
+                r.dt.tets()
+                    .iter()
+                    .filter_map(|t| tet_quality(t.map(|x| r.dt.points()[x as usize].approx())))
+                    .map(|(_, q)| q)
+                    .fold(0.0f64, f64::max);
+            assert!(
+                r.stuck_tets > 0 || worst <= 2.0,
+                "{name}: worst ratio {worst}"
+            );
+            // The cube's faces already leave its tets within the bound.
+            assert!(name == "cube" || r.steiner_tets > 0, "{name}");
+        }
     }
 
     #[test]

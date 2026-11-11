@@ -11,7 +11,10 @@
 //! the chamfered surface
 //! and the outer box's edges in a Delaunay tetrahedralization. Prints, per
 //! file: triangles, chamfered vertices in use, subsegments, Steiner points
-//! on segments, seconds for chamfering and for recovery; or the error.
+//! on segments, seconds for chamfering and for recovery, the shortest
+//! subsegment over the diagonal, subfaces, Steiner points on faces and
+//! subfaces set aside; then tets, Steiner points in tets and tets set aside
+//! (`REFINE_STAGE=faces` stops after the faces); or the error.
 //! `REFINE_MAX_POINTS` caps the vertex count (default 2,000,000).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -19,7 +22,9 @@
 use std::time::Instant;
 
 use mesher_tet::chamfer::chamfer_filtered;
-use mesher_tet::refine::{recover_faces_conforming, recover_segments_conforming};
+use mesher_tet::refine::{
+    recover_faces_conforming, recover_segments_conforming, refine_conforming,
+};
 
 fn main() {
     for path in std::env::args().skip(1) {
@@ -78,12 +83,14 @@ fn main() {
             .collect::<std::collections::BTreeSet<u32>>()
             .len();
         let started = Instant::now();
-        // REFINE_STAGE=segments stops after the segments.
-        let segments_only = std::env::var("REFINE_STAGE").is_ok_and(|s| s == "segments");
-        let result = if segments_only {
-            recover_segments_conforming(&surface, &points, &triangles, 0.2, max_points)
-        } else {
-            recover_faces_conforming(&surface, &points, &triangles, 0.2, max_points)
+        // REFINE_STAGE: segments, faces or tets (the default).
+        let stage = std::env::var("REFINE_STAGE").unwrap_or_else(|_| "tets".to_owned());
+        let result = match stage.as_str() {
+            "segments" => {
+                recover_segments_conforming(&surface, &points, &triangles, 0.2, max_points)
+            }
+            "faces" => recover_faces_conforming(&surface, &points, &triangles, 0.2, max_points),
+            _ => refine_conforming(&surface, &points, &triangles, 0.2, max_points, 2.0),
         };
         match result {
             Ok(r) => {
@@ -98,7 +105,7 @@ fn main() {
                     .map(length)
                     .fold(f64::INFINITY, f64::min);
                 println!(
-                    "{path}\tok\t{}\t{used}\t{}\t{}\t{chamfer_seconds:.2}\t{:.2}\tshortest {:.1e}\t{} subfaces, {} Steiner points on faces, {} set aside",
+                    "{path}\tok\t{}\t{used}\t{}\t{}\t{chamfer_seconds:.2}\t{:.2}\tshortest {:.1e}\t{} subfaces, {} Steiner points on faces, {} set aside	{} tets, {} Steiner points in tets, {} set aside",
                     triangles.len(),
                     r.subsegments.len(),
                     r.steiner_segments,
@@ -106,7 +113,10 @@ fn main() {
                     shortest / diagonal,
                     r.subfaces.len(),
                     r.steiner_faces,
-                    r.stuck_subfaces
+                    r.stuck_subfaces,
+                    r.dt.tets().len(),
+                    r.steiner_tets,
+                    r.stuck_tets
                 );
             }
             Err(e) => println!(

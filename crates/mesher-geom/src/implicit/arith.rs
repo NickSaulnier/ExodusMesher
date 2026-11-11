@@ -280,36 +280,57 @@ impl Ring for Exact {
     }
 }
 
-/// Determinant of a 2×2 to 5×5 matrix by Laplace expansion along the first
-/// row (rows of equal length).
+/// Determinant of a 1×1 to 5×5 matrix (rows of equal length) by Laplace
+/// expansion along the first row, each minor computed once: the minors of the
+/// last `k` rows are kept by their column set, built from those of the last
+/// `k - 1` rows, so a 5×5 takes 75 products and no allocation per minor.
 pub(crate) fn det<R: Ring>(m: &[Vec<R>]) -> R {
     let n = m.len();
+    if n == 0 {
+        return R::from_f64(1.0);
+    }
     if n == 1 {
         return m[0][0].clone();
     }
     if n == 2 {
         return m[0][0].mul(&m[1][1]).sub(&m[0][1].mul(&m[1][0]));
     }
-    let mut total: Option<R> = None;
-    for j in 0..n {
-        let minor: Vec<Vec<R>> = m[1..]
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .enumerate()
-                    .filter(|&(k, _)| k != j)
-                    .map(|(_, x)| x.clone())
-                    .collect()
-            })
-            .collect();
-        let term = m[0][j].mul(&det(&minor));
-        total = Some(match total {
-            None => term,
-            Some(t) if j % 2 == 0 => t.add(&term),
-            Some(t) => t.sub(&term),
-        });
+    // minor[mask]: the determinant of the last popcount(mask) rows on the
+    // columns in mask (in increasing order).
+    let mut minor: Vec<Option<R>> = vec![None; 1 << n];
+    for (j, x) in m[n - 1].iter().enumerate() {
+        minor[1 << j] = Some(x.clone());
     }
-    total.unwrap_or_else(|| R::from_f64(0.0))
+    for (i, row) in m.iter().enumerate().take(n - 1).rev() {
+        let size = n - i;
+        for mask in 1usize..(1 << n) {
+            if mask.count_ones() as usize != size {
+                continue;
+            }
+            let mut total: Option<R> = None;
+            let mut position = 0;
+            for (j, x) in row.iter().enumerate() {
+                if mask & (1 << j) == 0 {
+                    continue;
+                }
+                let rest = minor[mask & !(1 << j)].as_ref();
+                if let Some(rest) = rest {
+                    let term = x.mul(rest);
+                    total = Some(match total {
+                        None if position % 2 == 0 => term,
+                        None => R::from_f64(0.0).sub(&term),
+                        Some(t) if position % 2 == 0 => t.add(&term),
+                        Some(t) => t.sub(&term),
+                    });
+                }
+                position += 1;
+            }
+            minor[mask] = total;
+        }
+    }
+    minor[(1 << n) - 1]
+        .take()
+        .unwrap_or_else(|| R::from_f64(0.0))
 }
 
 #[cfg(test)]

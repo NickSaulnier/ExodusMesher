@@ -151,6 +151,10 @@ pub enum Inserted {
     Duplicate(u32),
 }
 
+/// A check on an insertion's conflict region (its real tets) before the
+/// point goes in: `true` refuses it (see [`ExactDelaunay::insert_unless`]).
+pub type Reject<'a> = dyn FnMut(&ExactDelaunay, &[[u32; 4]]) -> bool + 'a;
+
 /// The exact Delaunay tetrahedralization.
 #[derive(Debug, Clone)]
 pub struct ExactDelaunay {
@@ -236,6 +240,28 @@ impl ExactDelaunay {
         self.vertex_tet.push(NONE);
         let result = self.insert_index(i);
         if !matches!(result, Ok(Inserted::New(_))) {
+            self.points.pop();
+            self.vertex_tet.pop();
+        }
+        result
+    }
+
+    /// [`ExactDelaunay::insert`], unless `reject`, shown the real tets `p`
+    /// conflicts with (by vertices), says no: then nothing changes and the
+    /// result is `None`. The conflict region is found once, for both.
+    ///
+    /// # Errors
+    /// As [`ExactDelaunay::insert`].
+    pub fn insert_unless(
+        &mut self,
+        p: Point,
+        reject: &mut Reject<'_>,
+    ) -> Result<Option<Inserted>, DelaunayError> {
+        let i = self.points.len() as u32;
+        self.points.push(p);
+        self.vertex_tet.push(NONE);
+        let result = self.insert_index_with(i, Some(reject));
+        if !matches!(result, Ok(Some(Inserted::New(_)))) {
             self.points.pop();
             self.vertex_tet.pop();
         }
@@ -503,6 +529,45 @@ impl ExactDelaunay {
 
     /// A real tet whose closure contains `p`, or a ghost whose hull face `p`
     /// is beyond.
+    /// Start the next point location from tet `t` (if it is live): a hint
+    /// when the next point is known to be near it.
+    pub fn hint(&mut self, t: u32) {
+        if self.tets.get(t as usize).is_some_and(|x| x.alive) {
+            self.last = t;
+        }
+    }
+
+    /// The real tets point `p` (not inserted) conflicts with: those whose
+    /// circumsphere strictly contains it, reached from the tet holding it,
+    /// by vertices. Nothing changes.
+    pub fn conflict_tets(&mut self, p: &Point) -> Vec<[u32; 4]> {
+        let t0 = self.locate(p);
+        let epoch = self.next_epoch();
+        let mut cavity = vec![t0];
+        self.stamp[t0 as usize] = epoch;
+        let mut k = 0;
+        while k < cavity.len() {
+            let t = cavity[k];
+            k += 1;
+            for j in 0..4 {
+                let u = self.tets[t as usize].n[j];
+                if self.stamp[u as usize] != epoch && self.conflict(u, p) {
+                    self.stamp[u as usize] = epoch;
+                    cavity.push(u);
+                }
+            }
+        }
+        let out: Vec<[u32; 4]> = cavity
+            .iter()
+            .filter(|&&t| !self.is_ghost(t))
+            .map(|&t| self.tets[t as usize].v)
+            .collect();
+        for &t in &cavity {
+            self.stamp[t as usize] = 0;
+        }
+        out
+    }
+
     fn locate(&mut self, p: &Point) -> u32 {
         let mut t = self.last;
         if !self.tets.get(t as usize).is_some_and(|x| x.alive) {
@@ -541,6 +606,17 @@ impl ExactDelaunay {
     }
 
     fn insert_index(&mut self, i: u32) -> Result<Inserted, DelaunayError> {
+        self.insert_index_with(i, None)
+            .map(|r| r.unwrap_or(Inserted::Duplicate(i)))
+    }
+
+    /// Insert vertex `i`, unless `reject` (shown the conflicting real tets)
+    /// says no (`None`).
+    fn insert_index_with(
+        &mut self,
+        i: u32,
+        reject: Option<&mut Reject<'_>>,
+    ) -> Result<Option<Inserted>, DelaunayError> {
         let fail = DelaunayError::Cavity { point: i };
         let p = *self.pt(i);
         let s = crate::prof::scope("delaunay insert: locate");
@@ -549,12 +625,13 @@ impl ExactDelaunay {
         if !self.is_ghost(t0) {
             for &v in &self.tets[t0 as usize].v {
                 if implicit::coincident(self.pt(v), &p) {
-                    return Ok(Inserted::Duplicate(v));
+                    return Ok(Some(Inserted::Duplicate(v)));
                 }
             }
         }
         if !self.conflict(t0, &p) {
             // Defensive: the located tet always conflicts.
+            let _s = crate::prof::scope("delaunay insert: scan");
             t0 = (0..self.tets.len() as u32)
                 .find(|&t| self.tets[t as usize].alive && self.conflict(t, &p))
                 .ok_or(fail.clone())?;
@@ -576,6 +653,16 @@ impl ExactDelaunay {
             }
         }
         drop(s);
+        if let Some(reject) = reject {
+            let tets: Vec<[u32; 4]> = cavity
+                .iter()
+                .filter(|&&t| !self.is_ghost(t))
+                .map(|&t| self.tets[t as usize].v)
+                .collect();
+            if reject(self, &tets) {
+                return Ok(None);
+            }
+        }
         // Grow across every boundary face p does not strictly see: then each
         // cone tet is positive (or a valid ghost).
         let s = crate::prof::scope("delaunay insert: grow");
@@ -600,7 +687,7 @@ impl ExactDelaunay {
         }
         drop(s);
         let _s = crate::prof::scope("delaunay insert: fill");
-        self.fill_cavity(i, &cavity)
+        self.fill_cavity(i, &cavity).map(Some)
     }
 
     /// A fresh cavity stamp (never 0, which marks a tet taken back out).
@@ -919,6 +1006,13 @@ impl ExactDelaunay {
     fn orient4(&self, v: [u32; 4]) -> Sign {
         let [a, b, c, d] = v.map(|x| self.pt(x));
         implicit::orient3d(a, b, c, d)
+    }
+
+    /// How many tet slots there are (live, dead and ghost): tet indices run
+    /// below this.
+    #[must_use]
+    pub fn tet_slots(&self) -> u32 {
+        self.tets.len() as u32
     }
 
     /// The vertices of tet `t` if it is a live real tet (not a ghost).
