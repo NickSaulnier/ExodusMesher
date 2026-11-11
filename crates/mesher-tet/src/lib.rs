@@ -3,6 +3,7 @@
 //! the constrained Delaunay kernel (Milestone 8).
 
 pub mod cdt;
+pub mod chamfer;
 pub mod conforming;
 pub mod delaunay;
 mod fxhash;
