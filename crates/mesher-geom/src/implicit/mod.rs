@@ -619,3 +619,85 @@ pub fn incircle_coplanar(a: &Point, b: &Point, c: &Point, d: &Point) -> Sign {
     }
     Sign::Zero
 }
+
+/// The sign of `W` for one point (`W` is positive unless the construction
+/// made it negative).
+fn w_of(p: &Point) -> Sign {
+    if p.w_negative {
+        Sign::Negative
+    } else {
+        Sign::Positive
+    }
+}
+
+/// The numerator of `p − q` in homogeneous coordinates: `X_p·W_q − X_q·W_p`
+/// (the difference is this over `W_p·W_q`).
+fn diff_num<R: Ring>(p: &[R; 4], q: &[R; 4]) -> [R; 3] {
+    [0, 1, 2].map(|k| p[k].mul(&q[3]).sub(&q[k].mul(&p[3])))
+}
+
+/// The numerator of `(p − q)·(r − q)`, over `W_p·W_r·W_q²`.
+fn dot_det<R: Ring>(p: [&Point; 3], o: Point3) -> R {
+    let [hp, hq, hr] = p.map(|x| homog::<R>(&x.kind, o));
+    dot3(&diff_num(&hp, &hq), &diff_num(&hr, &hq))
+}
+
+/// The sign of the dot product `(p − q)·(r − q)`: `Positive` when the angle
+/// at `q` is acute, `Zero` when it is right (or `p` or `r` is `q`), and the
+/// stage that settled it.
+#[must_use]
+pub fn dot_sign_staged(p: &Point, q: &Point, r: &Point) -> (Sign, Stage) {
+    let pts = [p, q, r];
+    let o = origin_of(&[q]);
+    let (s, stage) = settle(|stage| match stage {
+        0 => dot_det::<Filtered>(pts, o).sign(),
+        1 => dot_det::<Interval>(pts, o).sign(),
+        _ => dot_det::<Exact>(pts, o).sign(),
+    });
+    (times(s, times(w_of(p), w_of(r))), stage)
+}
+
+/// The sign of `(p − q)·(r − q)` (see [`dot_sign_staged`]).
+#[must_use]
+pub fn dot_sign(p: &Point, q: &Point, r: &Point) -> Sign {
+    dot_sign_staged(p, q, r).0
+}
+
+/// The numerator of `[(b − d)×(c − d)]·[(a − d)×(c − d)]`, over
+/// `W_a·W_b·W_c²·W_d⁴`.
+fn dihedral_det<R: Ring>(p: [&Point; 4], o: Point3) -> R {
+    let [ha, hb, hc, hd] = p.map(|x| homog::<R>(&x.kind, o));
+    let (ua, ub, uc) = (diff_num(&ha, &hd), diff_num(&hb, &hd), diff_num(&hc, &hd));
+    dot3(&cross3(&ub, &uc), &cross3(&ua, &uc))
+}
+
+/// The sign of `[(b − d)×(c − d)]·[(a − d)×(c − d)]`: `Positive` when the
+/// triangles `a c d` and `b c d`, sharing the edge `c d`, meet at an acute
+/// dihedral angle, `Zero` at a right angle or when either is degenerate.
+#[must_use]
+pub fn dihedral_sign_staged(a: &Point, b: &Point, c: &Point, d: &Point) -> (Sign, Stage) {
+    let pts = [a, b, c, d];
+    let o = origin_of(&[d]);
+    let (s, stage) = settle(|stage| match stage {
+        0 => dihedral_det::<Filtered>(pts, o).sign(),
+        1 => dihedral_det::<Interval>(pts, o).sign(),
+        _ => dihedral_det::<Exact>(pts, o).sign(),
+    });
+    (times(s, times(w_of(a), w_of(b))), stage)
+}
+
+/// The sign of the dihedral expression (see [`dihedral_sign_staged`]).
+#[must_use]
+pub fn dihedral_sign(a: &Point, b: &Point, c: &Point, d: &Point) -> Sign {
+    dihedral_sign_staged(a, b, c, d).0
+}
+
+/// Does the projection of edge `a q` onto the plane of triangle `a b c`
+/// meet the triangle's interior? It does when `q` leans over the triangle
+/// past both of its sides at `a`: the dihedral angles at `a b` (between
+/// `q a b` and `c a b`) and at `a c` (between `q a c` and `b a c`) are both
+/// acute. Exact.
+#[must_use]
+pub fn edge_projects_into_triangle(a: &Point, q: &Point, b: &Point, c: &Point) -> bool {
+    dihedral_sign(q, c, a, b) == Sign::Positive && dihedral_sign(q, b, a, c) == Sign::Positive
+}

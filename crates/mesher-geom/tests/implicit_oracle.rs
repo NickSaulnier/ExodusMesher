@@ -750,3 +750,131 @@ fn approximate_positions_are_close() {
         }
     }
 }
+
+/// Milestone 14's angle predicates against the rational reference: random
+/// queries (with the filter rate), and exactly right angles and right
+/// dihedrals built on an integer lattice, with the points in implicit forms.
+#[test]
+fn angle_queries_agree() {
+    let ref_dot = |p: &Point, q: &Point, r: &Point| {
+        let (p, q, r) = (exact(p), exact(q), exact(r));
+        sign(&dot(&sub(&p, &q), &sub(&r, &q)))
+    };
+    let ref_dihedral = |a: &Point, b: &Point, c: &Point, d: &Point| {
+        let (a, b, c, d) = (exact(a), exact(b), exact(c), exact(d));
+        let e = sub(&c, &d);
+        sign(&dot(&cross(&sub(&b, &d), &e), &cross(&sub(&a, &d), &e)))
+    };
+    let stages = run(0x3c6e_f372_fe94_f82b, |rng, _| {
+        let (c, size) = centre(rng);
+        let p: Vec<Point> = (0..4).map(|_| random_point(rng, c, size)).collect();
+        let (s, st0) = implicit::dot_sign_staged(&p[0], &p[1], &p[2]);
+        assert_eq!(s, ref_dot(&p[0], &p[1], &p[2]), "dot {p:?}");
+        let (s, st1) = implicit::dihedral_sign_staged(&p[0], &p[1], &p[2], &p[3]);
+        assert_eq!(
+            s,
+            ref_dihedral(&p[0], &p[1], &p[2], &p[3]),
+            "dihedral {p:?}"
+        );
+        [st0, st1]
+    });
+    let [mut dt, mut dh] = [0; 2].map(|_| Tally::default());
+    for [a, b] in stages {
+        dt.count(a);
+        dh.count(b);
+    }
+    eprintln!(
+        "filter settled: dot {:.4}, dihedral {:.4}",
+        dt.rate(),
+        dh.rate()
+    );
+    for (name, t) in [("dot", &dt), ("dihedral", &dh)] {
+        assert!(
+            t.rate() >= 0.95,
+            "{name}: the filter settled only {:.4}",
+            t.rate()
+        );
+    }
+
+    // Exactly right: integer vectors, scaled by a power of two and moved by
+    // an offset on an eighth grid, so every coordinate is exact in f64.
+    let int3 = |rng: &mut Rng| [0; 3].map(|_| (rng.below(9) as f64) - 4.0);
+    let icross = |a: Point3, b: Point3| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let nonzero = |a: Point3| a.iter().any(|&x| x != 0.0);
+    let zeros = run(0x7137_4491_23ef_65cd, |rng, i| {
+        let (c, _) = centre(rng);
+        let s = [0.25, 1.0, 64.0][rng.below(3)];
+        let o = [0, 1, 2].map(|k| (c[k] * 8.0).round() / 8.0);
+        let at = |rng: &mut Rng, u: Point3| {
+            let x = [0, 1, 2].map(|k| o[k] + s * u[k]);
+            let forms = forms_of(rng, x, s);
+            forms[rng.below(forms.len())]
+        };
+        if i % 2 == 0 {
+            // (p − q) ⊥ (r − q): r − q = (p − q) × w.
+            let u = int3(rng);
+            let v = icross(u, int3(rng));
+            if !nonzero(u) || !nonzero(v) {
+                return None;
+            }
+            let (p, q, r) = (at(rng, u), at(rng, [0.0; 3]), at(rng, v));
+            let got = implicit::dot_sign(&p, &q, &r);
+            assert_eq!(got, ref_dot(&p, &q, &r));
+            assert_eq!(got, Sign::Zero, "right angle");
+            Some(0)
+        } else {
+            // Faces a c d and b c d at a right dihedral: a − d and b − d
+            // perpendicular to each other and to the edge c − d.
+            let e = int3(rng);
+            let u = icross(e, int3(rng));
+            let v = icross(e, u);
+            if !nonzero(e) || !nonzero(u) || !nonzero(v) {
+                return None;
+            }
+            let (a, b, cc, d) = (at(rng, u), at(rng, v), at(rng, e), at(rng, [0.0; 3]));
+            let got = implicit::dihedral_sign(&a, &b, &cc, &d);
+            assert_eq!(got, ref_dihedral(&a, &b, &cc, &d));
+            assert_eq!(got, Sign::Zero, "right dihedral");
+            Some(1)
+        }
+    });
+    let mut count = [0usize; 2];
+    for k in zeros.into_iter().flatten() {
+        count[k] += 1;
+    }
+    eprintln!("right angles {}, right dihedrals {}", count[0], count[1]);
+    assert!(count[0] > 0 && count[1] > 0);
+}
+
+/// The projection test on a flat triangle: an edge leaning over the
+/// triangle projects into it; one leaning away, or over a side only, does
+/// not.
+#[test]
+fn edge_projection_into_a_triangle() {
+    let p = |x: [f64; 3]| Point::explicit(x).unwrap();
+    let (a, b, c) = (p([0.0; 3]), p([4.0, 0.0, 0.0]), p([0.0, 4.0, 0.0]));
+    assert!(implicit::edge_projects_into_triangle(
+        &a,
+        &p([1.0, 1.0, 0.5]),
+        &b,
+        &c
+    ));
+    assert!(!implicit::edge_projects_into_triangle(
+        &a,
+        &p([-1.0, -1.0, 0.5]),
+        &b,
+        &c
+    ));
+    assert!(!implicit::edge_projects_into_triangle(
+        &a,
+        &p([1.0, -1.0, 0.5]),
+        &b,
+        &c
+    ));
+}
