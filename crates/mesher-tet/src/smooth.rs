@@ -47,21 +47,16 @@ pub struct SmoothStats {
 /// smallest angle comes from the largest cosine between normals. Cheaper
 /// than `dihedral_angles` (one `acos`, not six), which matters here: every
 /// candidate position re-evaluates every tet around the vertex.
-fn min_dihedral(p: [Point3; 4]) -> f64 {
-    // Outward normals, for either orientation: each points away from the
-    // vertex opposite its face.
-    let normals = [[1, 2, 3, 0], [0, 2, 3, 1], [0, 1, 3, 2], [0, 1, 2, 3]].map(|[a, b, c, o]| {
+pub(crate) fn min_dihedral(p: [Point3; 4]) -> f64 {
+    // Outward normals of a positive tet (all inward for a negative one,
+    // which leaves every angle between them the same). They are oriented by
+    // the vertex order, not by which side of its face the opposite vertex
+    // lies: for a tet flat in floating point that side is noise, and a flat
+    // tet would come out at 180°, not 0°.
+    let normals = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]].map(|[a, b, c]| {
         let n = cross(sub(p[b], p[a]), sub(p[c], p[a]));
         let l = norm(n);
-        if l == 0.0 {
-            return None;
-        }
-        let n = scale(n, 1.0 / l);
-        Some(if dot(n, sub(p[o], p[a])) > 0.0 {
-            scale(n, -1.0)
-        } else {
-            n
-        })
+        (l > 0.0).then(|| scale(n, 1.0 / l))
     });
     let mut max_cos = -1.0f64;
     for i in 0..4 {
@@ -115,32 +110,56 @@ pub fn smooth_slivers(
     stats
 }
 
-/// The smallest dihedral angle around `v` with `v` at `x`, or `None` if a
-/// tet would not be positively oriented.
+/// A tet's quality for a vertex move, or `None` if the tet is not usable.
+pub(crate) type Quality<'a> = &'a dyn Fn([Point3; 4]) -> Option<f64>;
+
+/// The worst quality around `v` with `v` at `x`, or `None` if a tet would
+/// not be usable.
 fn quality_at(
     points: &[Point3],
     tets: &[[u32; 4]],
     star: &[u32],
     v: u32,
     x: Point3,
+    quality: Quality<'_>,
 ) -> Option<f64> {
     let mut worst = 180.0f64;
     for &t in star {
         let p = tets[t as usize].map(|w| if w == v { x } else { points[w as usize] });
-        if orient3d(p[0], p[1], p[2], p[3]) != Sign::Positive {
-            return None;
-        }
-        worst = worst.min(min_dihedral(p));
+        worst = worst.min(quality(p)?);
     }
     Some(worst)
 }
 
+/// Positive tets, by their smallest dihedral angle.
+fn positive(p: [Point3; 4]) -> Option<f64> {
+    (orient3d(p[0], p[1], p[2], p[3]) == Sign::Positive).then(|| min_dihedral(p))
+}
+
 /// Try candidate positions for `v`; keep the best if it improves.
 fn improve(points: &mut [Point3], tets: &[[u32; 4]], star: &[u32], v: u32) -> bool {
+    match best_position(points, tets, star, v, &positive) {
+        Some((q0, q, x)) if q > q0 + 1e-9 => {
+            points[v as usize] = x;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The worst quality around `v` where it is (-1 if a tet there is not
+/// usable), and the best of the candidate positions with its worst quality
+/// (`v`'s own position if none is better). `None` if `v` has no
+/// neighbours. `star` indexes `tets`; every tet in it has `v`.
+pub(crate) fn best_position(
+    points: &[Point3],
+    tets: &[[u32; 4]],
+    star: &[u32],
+    v: u32,
+    quality: Quality<'_>,
+) -> Option<(f64, f64, Point3)> {
     let p = points[v as usize];
-    let Some(q0) = quality_at(points, tets, star, v, p) else {
-        return false;
-    };
+    let q0 = quality_at(points, tets, star, v, p, quality).unwrap_or(-1.0);
     // Neighbours and the local edge length.
     let mut neighbours: Vec<u32> = star
         .iter()
@@ -150,7 +169,7 @@ fn improve(points: &mut [Point3], tets: &[[u32; 4]], star: &[u32], v: u32) -> bo
     neighbours.sort_unstable();
     neighbours.dedup();
     if neighbours.is_empty() {
-        return false;
+        return None;
     }
     let length = neighbours
         .iter()
@@ -158,7 +177,7 @@ fn improve(points: &mut [Point3], tets: &[[u32; 4]], star: &[u32], v: u32) -> bo
         .sum::<f64>()
         / neighbours.len() as f64;
     if !(length > 0.0 && length.is_finite()) {
-        return false;
+        return None;
     }
     let mut centroid = [0.0; 3];
     for &w in &neighbours {
@@ -178,8 +197,8 @@ fn improve(points: &mut [Point3], tets: &[[u32; 4]], star: &[u32], v: u32) -> bo
         a[k] += h;
         b[k] -= h;
         if let (Some(qa), Some(qb)) = (
-            quality_at(points, tets, star, v, a),
-            quality_at(points, tets, star, v, b),
+            quality_at(points, tets, star, v, a, quality),
+            quality_at(points, tets, star, v, b, quality),
         ) {
             grad[k] = (qa - qb) / (2.0 * h);
         }
@@ -218,18 +237,13 @@ fn improve(points: &mut [Point3], tets: &[[u32; 4]], star: &[u32], v: u32) -> bo
     }
     let mut best = (q0, p);
     for c in candidates {
-        if let Some(q) = quality_at(points, tets, star, v, c) {
+        if let Some(q) = quality_at(points, tets, star, v, c, quality) {
             if q > best.0 {
                 best = (q, c);
             }
         }
     }
-    if best.0 > q0 + 1e-9 {
-        points[v as usize] = best.1;
-        true
-    } else {
-        false
-    }
+    Some((q0, best.0, best.1))
 }
 
 #[cfg(test)]
@@ -324,6 +338,20 @@ mod tests {
                 .fold(180.0, f64::min);
             assert!((min_dihedral(p) - slow).abs() < 1e-6, "{p:?}");
         }
+    }
+
+    /// A tet flat in floating point (four points in a vertical plane,
+    /// positive exactly) has a dihedral angle of 0°, not 180°.
+    #[test]
+    fn a_flat_tet_has_no_angle() {
+        let p = [
+            [-0.0180615, -5.61284, 0.41910145931375087],
+            [-0.010918675000000001, -5.5563, 0.3841763377042716],
+            [-0.00377585, -5.49976, 0.4540265809232301],
+            [-0.00377585, -5.49976, 0.4365640201184905],
+        ];
+        assert_eq!(orient3d(p[0], p[1], p[2], p[3]), Sign::Positive);
+        assert!(min_dihedral(p) < 1e-3, "{}", min_dihedral(p));
     }
 
     #[test]

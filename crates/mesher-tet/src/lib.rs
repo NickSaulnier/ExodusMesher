@@ -8,6 +8,7 @@ pub mod conforming;
 pub mod delaunay;
 mod fxhash;
 mod graded;
+pub mod improve;
 pub mod prof;
 pub mod quality;
 pub mod refine;
@@ -18,6 +19,7 @@ pub mod stuffing;
 
 pub use conforming::{ConformingError, ConformingMesh, ConformingParams, conforming_mesh};
 pub use delaunay::{Delaunay, DelaunayError, Inserted, Tetrahedralization, delaunay};
+pub use improve::{ImproveParams, ImproveStats, Improved, improve};
 pub use quality::{FvQuality, dihedral_angles, dihedral_range, fv_quality};
 pub use remesh::{RemeshError, RemeshParams, Remeshed, remesh};
 pub use sizing::{SizeField, SizingParams};

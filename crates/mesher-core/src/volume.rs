@@ -25,8 +25,9 @@ use mesher_tet::cdt::{
 };
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
 use mesher_tet::{
-    ConformingError, ConformingParams, RemeshParams, SizeField, SizingParams, StuffingError,
-    StuffingParams, conforming_mesh, fv_quality, remesh, stuff, stuff_graded,
+    ConformingError, ConformingParams, ImproveParams, RemeshParams, SizeField, SizingParams,
+    StuffingError, StuffingParams, conforming_mesh, fv_quality, improve, remesh, stuff,
+    stuff_graded,
 };
 
 use crate::diagnose::{InternalError, Tolerances};
@@ -491,19 +492,45 @@ fn exact(
             groups.entry(g.clone()).or_default().push(face);
         }
     }
-    Ok((
-        Candidate {
-            kernel: Kernel::Exact,
-            points: m.points,
-            tets: m.tets,
-            dropped: 0,
-            steiner,
-            face_groups: groups.into_iter().collect(),
-            min_size: None,
-            remeshed: false,
-        },
-        records,
-    ))
+    let mut c = Candidate {
+        kernel: Kernel::Exact,
+        points: m.points,
+        tets: m.tets,
+        dropped: 0,
+        steiner,
+        face_groups: groups.into_iter().collect(),
+        min_size: None,
+        remeshed: false,
+    };
+    improve_cells(&mut c);
+    Ok((c, records))
+}
+
+/// Improve a conformal candidate's poor cells by local operations
+/// (`mesher_tet::improve`). Boundary faces and their vertices never change,
+/// so the face groups only need renumbering; if one could not be, the
+/// candidate is left as it was.
+fn improve_cells(c: &mut Candidate) {
+    let r = improve(&c.points, &c.tets, &ImproveParams::default());
+    let renumbered: Option<Vec<(String, Vec<[u32; 3]>)>> = c
+        .face_groups
+        .iter()
+        .map(|(name, faces)| {
+            let faces = faces
+                .iter()
+                .map(|f| {
+                    let g = f.map(|v| r.map.get(v as usize).copied().unwrap_or(u32::MAX));
+                    (!g.contains(&u32::MAX)).then_some(g)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((name.clone(), faces))
+        })
+        .collect();
+    if let Some(groups) = renumbered {
+        c.face_groups = groups;
+        c.points = r.points;
+        c.tets = r.tets;
+    }
 }
 
 /// The conforming Delaunay mesh of a repaired part, or the record explaining
@@ -629,7 +656,7 @@ fn conformal(
             groups.entry(name.clone()).or_default().push(face);
         }
     }
-    Ok(Candidate {
+    let mut c = Candidate {
         kernel: Kernel::Delaunay,
         points: m.points,
         tets: m.tets,
@@ -638,7 +665,9 @@ fn conformal(
         face_groups: groups.into_iter().collect(),
         min_size,
         remeshed: false,
-    })
+    };
+    improve_cells(&mut c);
+    Ok(c)
 }
 
 /// Check a candidate mesh; returns whether it is accepted and its summary.
