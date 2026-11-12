@@ -111,7 +111,7 @@ pub fn smooth_slivers(
 }
 
 /// A tet's quality for a vertex move, or `None` if the tet is not usable.
-pub(crate) type Quality<'a> = &'a dyn Fn([Point3; 4]) -> Option<f64>;
+type Quality<'a> = &'a dyn Fn([Point3; 4]) -> Option<f64>;
 
 /// The worst quality around `v` with `v` at `x`, or `None` if a tet would
 /// not be usable.
@@ -138,7 +138,8 @@ fn positive(p: [Point3; 4]) -> Option<f64> {
 
 /// Try candidate positions for `v`; keep the best if it improves.
 fn improve(points: &mut [Point3], tets: &[[u32; 4]], star: &[u32], v: u32) -> bool {
-    match best_position(points, tets, star, v, &positive) {
+    let at = |x: Point3| quality_at(points, tets, star, v, x, &positive);
+    match best_position(points, tets, star, v, &at) {
         Some((q0, q, x)) if q > q0 + 1e-9 => {
             points[v as usize] = x;
             true
@@ -147,19 +148,23 @@ fn improve(points: &mut [Point3], tets: &[[u32; 4]], star: &[u32], v: u32) -> bo
     }
 }
 
-/// The worst quality around `v` where it is (-1 if a tet there is not
-/// usable), and the best of the candidate positions with its worst quality
-/// (`v`'s own position if none is better). `None` if `v` has no
+/// The quality around a vertex with it at a position, or `None` if a tet
+/// there would not be usable.
+pub(crate) type At<'a> = &'a dyn Fn(Point3) -> Option<f64>;
+
+/// The quality around `v` where it is (negative infinity if a tet there is
+/// not usable), and the best of the candidate positions with its quality
+/// (`v`'s own position if none is better), by `at`. `None` if `v` has no
 /// neighbours. `star` indexes `tets`; every tet in it has `v`.
 pub(crate) fn best_position(
     points: &[Point3],
     tets: &[[u32; 4]],
     star: &[u32],
     v: u32,
-    quality: Quality<'_>,
+    at: At<'_>,
 ) -> Option<(f64, f64, Point3)> {
     let p = points[v as usize];
-    let q0 = quality_at(points, tets, star, v, p, quality).unwrap_or(-1.0);
+    let q0 = at(p).unwrap_or(f64::NEG_INFINITY);
     // Neighbours and the local edge length.
     let mut neighbours: Vec<u32> = star
         .iter()
@@ -196,10 +201,7 @@ pub(crate) fn best_position(
         let (mut a, mut b) = (p, p);
         a[k] += h;
         b[k] -= h;
-        if let (Some(qa), Some(qb)) = (
-            quality_at(points, tets, star, v, a, quality),
-            quality_at(points, tets, star, v, b, quality),
-        ) {
+        if let (Some(qa), Some(qb)) = (at(a), at(b)) {
             grad[k] = (qa - qb) / (2.0 * h);
         }
     }
@@ -237,7 +239,7 @@ pub(crate) fn best_position(
     }
     let mut best = (q0, p);
     for c in candidates {
-        if let Some(q) = quality_at(points, tets, star, v, c, quality) {
+        if let Some(q) = at(c) {
             if q > best.0 {
                 best = (q, c);
             }

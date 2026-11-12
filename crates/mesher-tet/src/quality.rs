@@ -73,6 +73,14 @@ pub struct FvQuality {
     /// not positive. Exact predicates can find such a tet positive (it is
     /// flat to rounding), but a finite-volume solver cannot use it.
     pub flat_in_float: usize,
+    /// Cells with a boundary face (wall-adjacent).
+    pub wall_cells: usize,
+    /// The largest non-orthogonality over every face of a wall-adjacent
+    /// cell: interior faces as above, boundary faces by the line from the
+    /// cell's centroid to the face's.
+    pub wall_max_non_orthogonality_degrees: f64,
+    /// The largest skewness over the interior faces of wall-adjacent cells.
+    pub wall_max_skewness: f64,
 }
 
 /// The signed volume of a tet in floating point, the way a solver computes it.
@@ -149,48 +157,73 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
 
     let mut faces: std::collections::HashMap<[u32; 3], (usize, usize)> =
         std::collections::HashMap::with_capacity(tets.len() * 2);
-    let (mut sum, mut count) = (0.0f64, 0usize);
+    // Interior faces in the order found: (first cell, its face, second cell).
+    let mut interior = Vec::with_capacity(tets.len() * 2);
     for (i, t) in tets.iter().enumerate() {
         for (k, f) in OUTWARD.iter().enumerate() {
             let mut key = f.map(|j| t[j]);
             key.sort_unstable();
-            let Some((j, kj)) = faces.remove(&key) else {
-                faces.insert(key, (i, k));
-                continue;
-            };
-            // Interior face between cell j (first seen) and cell i.
-            let (pj, pi) = (corners(&tets[j]), corners(t));
-            let (cj, ci) = (centroid(pj), centroid(pi));
-            let face = OUTWARD[kj].map(|m| pj[m]);
-            let fc = [0, 1, 2].map(|m| (face[0][m] + face[1][m] + face[2][m]) / 3.0);
-            let n = cross(sub(face[1], face[0]), sub(face[2], face[0]));
-            let nn = norm(n);
-            let d = sub(ci, cj);
-            let dd = norm(d);
-            if nn <= 0.0 || dd <= 0.0 {
-                continue;
+            match faces.remove(&key) {
+                Some((j, kj)) => interior.push((j, kj, i)),
+                None => {
+                    faces.insert(key, (i, k));
+                }
             }
-            let n = scale(n, 1.0 / nn);
-            let cos = (dot(d, n) / dd).clamp(-1.0, 1.0);
-            let angle = libm::acos(cos).to_degrees();
-            q.max_non_orthogonality_degrees = q.max_non_orthogonality_degrees.max(angle);
-            sum += angle;
-            count += 1;
-            let skew = if dot(d, n) > 0.0 {
-                let t = dot(sub(fc, cj), n) / dot(d, n);
-                let x = [0, 1, 2].map(|m| cj[m] + t * d[m]);
-                norm(sub(fc, x)) / dd
-            } else {
-                norm(sub(fc, cj)) / dd
-            };
-            q.max_skewness = q.max_skewness.max(skew);
-            // Flat cells are counted in `flat_in_float`; a ratio against one
-            // would be unbounded.
-            let (vj, vi) = (volume(pj), volume(pi));
-            if vj > 0.0 && vi > 0.0 {
-                let ratio = (vj.max(vi) / vj.min(vi)).min(f64::MAX);
-                q.max_volume_ratio = q.max_volume_ratio.max(ratio);
-            }
+        }
+    }
+    let mut wall = vec![false; tets.len()];
+    for &(i, k) in faces.values() {
+        wall[i] = true;
+        // A boundary face: the line from the cell's centroid to the face's.
+        let p = corners(&tets[i]);
+        let face = OUTWARD[k].map(|m| p[m]);
+        let fc = [0, 1, 2].map(|m| (face[0][m] + face[1][m] + face[2][m]) / 3.0);
+        let n = cross(sub(face[1], face[0]), sub(face[2], face[0]));
+        let d = sub(fc, centroid(p));
+        let (nn, dd) = (norm(n), norm(d));
+        if nn > 0.0 && dd > 0.0 {
+            let angle = libm::acos((dot(d, n) / (nn * dd)).clamp(-1.0, 1.0)).to_degrees();
+            q.wall_max_non_orthogonality_degrees = q.wall_max_non_orthogonality_degrees.max(angle);
+        }
+    }
+    q.wall_cells = wall.iter().filter(|&&w| w).count();
+    let (mut sum, mut count) = (0.0f64, 0usize);
+    for (j, kj, i) in interior {
+        let (pj, pi) = (corners(&tets[j]), corners(&tets[i]));
+        let (cj, ci) = (centroid(pj), centroid(pi));
+        let face = OUTWARD[kj].map(|m| pj[m]);
+        let fc = [0, 1, 2].map(|m| (face[0][m] + face[1][m] + face[2][m]) / 3.0);
+        let n = cross(sub(face[1], face[0]), sub(face[2], face[0]));
+        let nn = norm(n);
+        let d = sub(ci, cj);
+        let dd = norm(d);
+        if nn <= 0.0 || dd <= 0.0 {
+            continue;
+        }
+        let n = scale(n, 1.0 / nn);
+        let cos = (dot(d, n) / dd).clamp(-1.0, 1.0);
+        let angle = libm::acos(cos).to_degrees();
+        q.max_non_orthogonality_degrees = q.max_non_orthogonality_degrees.max(angle);
+        sum += angle;
+        count += 1;
+        let skew = if dot(d, n) > 0.0 {
+            let t = dot(sub(fc, cj), n) / dot(d, n);
+            let x = [0, 1, 2].map(|m| cj[m] + t * d[m]);
+            norm(sub(fc, x)) / dd
+        } else {
+            norm(sub(fc, cj)) / dd
+        };
+        q.max_skewness = q.max_skewness.max(skew);
+        if wall[i] || wall[j] {
+            q.wall_max_non_orthogonality_degrees = q.wall_max_non_orthogonality_degrees.max(angle);
+            q.wall_max_skewness = q.wall_max_skewness.max(skew);
+        }
+        // Flat cells are counted in `flat_in_float`; a ratio against one
+        // would be unbounded.
+        let (vj, vi) = (volume(pj), volume(pi));
+        if vj > 0.0 && vi > 0.0 {
+            let ratio = (vj.max(vi) / vj.min(vi)).min(f64::MAX);
+            q.max_volume_ratio = q.max_volume_ratio.max(ratio);
         }
     }
     q.mean_non_orthogonality_degrees = if count > 0 { sum / count as f64 } else { 0.0 };
@@ -253,6 +286,13 @@ mod tests {
         assert!((q.max_volume_ratio - 1.0).abs() < 1e-12);
         assert_eq!(q.dihedral_histogram.iter().sum::<u64>(), 12);
         assert_eq!(q.flat_in_float, 0);
+        // Both cells are on the boundary; the corner tet's face on x = 0
+        // makes acos(0.25 / |(0.25, 1/12, 1/12)|) with its centroid line.
+        assert_eq!(q.wall_cells, 2);
+        let corner = libm::acos(0.25 / (0.0625f64 + 2.0 / 144.0).sqrt()).to_degrees();
+        assert!(q.wall_max_non_orthogonality_degrees >= corner - 1e-9);
+        assert!(q.wall_max_non_orthogonality_degrees < 90.0);
+        assert_eq!(q.wall_max_skewness, q.max_skewness);
     }
 
     /// A neighbour flat in floating point is counted, not divided by: the

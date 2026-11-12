@@ -887,7 +887,29 @@ Tasks, in order:
   - `--example improve` meshes as the pipeline does (`IMPROVE_KERNEL=exact` for the exact kernel), improves (`IMPROVE_TARGET`, `IMPROVE_SPLITS=0`, `IMPROVE_COLLAPSES=0`) and prints quality before and after.
   - **On the clean subset** (conforming kernel, the 53 models it meshes): the smallest dihedral angle rises on all 53 (median 0.82° to 7.18°; 30 reach 5°, from 17), tets under 1° fall from 6,805 to 1,082 (models with any: 27 to 10), tets under 10° from 65,796 to 55,683. Tets grow by 3.5 % at the median and 43 % at most (41106; 894834 by 34 %), almost all from splits: without them the smallest angle barely moves (43853: 0.0003° to 0.0004°, against 2.28° with them). The largest non-orthogonality falls on 30 models and rises on 11 (median 87.7° to 86.6°); the largest skewness rises on 19 (median 3.05 to 4.74), as the target is not yet a finite-volume one. Improvement takes 0.13 s at the median (12 % of meshing), 29 s at most (894834).
 - [ ] A WSVM-style energy as the vertex-move objective, measured against the candidate search
-- [ ] Targets: per-face non-orthogonality and skewness, cells with a boundary face first
+- [x] Targets: per-face non-orthogonality and skewness, cells with a boundary face first (Nov 12, 2026).
+  - **Quality** is what a cell-centred solver sees, each measure over its target (`ImproveParams`: smallest dihedral angle 15°, non-orthogonality 70°, skewness 2), so 1 is on target: a tet's smallest dihedral angle; each face's non-orthogonality (normal against the centroid line; on the boundary, against the line from the cell's centroid to the face's); each interior face's skewness. A cell's quality is its angle and its four faces', each capped at 1, so a cell on target is left alone. A target of 90°, infinity or 0° turns its measure off.
+  - **Regions:** an operation is scored on its new tets and every face of them, against the old tets and theirs, so the cells across the cavity count. A vertex move's face structure is built once and scored at each candidate position.
+  - **Acceptance:** the region's worst of the two measures (angle, faces) must rise, or stay while the other rises; neither may fall below its floor, the lower of its old worst and halfway from the region's worst to the target. So a measure the boundary fixes does not stop the other improving, and one measure is traded for the other only well above the worst. Tried and set aside: the worst alone (dihedral angles traded down for faces: tets under 10° 55,788 to 81,922), and a strict guard that no measure's worst may fall (no better on the subset, and 655 s on 894834 before the cheap rejection below).
+  - **Order:** the poor cells with a boundary face first, then by quality and index.
+  - **Speed:** a candidate's tets are checked (positive, angle above the floor) before its faces are looked up; that took 97659 from 50 s to 4.8 s.
+  - **Measured:** `FvQuality` gains `wall_cells`, `wall_max_non_orthogonality_degrees` (every face of a cell with a boundary face, boundary faces by the centroid-to-face line) and `wall_max_skewness`. `--example improve` prints them, takes `IMPROVE_NONORTH`, `IMPROVE_SKEW` and `IMPROVE_FV=0`, and with `IMPROVE_WORST=1` describes the worst face left. `tests/oracle/examples/tetgen_quality.rs` meshes the same files with TetGen (`pzAfq`, the same size) and prints the same line.
+  - Tests: `a_mirrored_face_is_on_target`, `face_targets_improve_the_worst_faces`, and the wall measures in `fv_quality_of_two_mirror_tets`. Goldens regenerated: records, kernels and acceptance unchanged, tet counts within 1 %, mean non-orthogonality within 0.2°; the three sliver-face runs' smallest angle falls from 8.8–10° to 3.5–6.9° (the angle-only target's moves there worsen a boundary face that cannot be fixed).
+  - **On the clean subset** (the 53 models the conforming kernel meshes; medians of the per-model worst):
+
+    | | Kernel | Angle only | Angle and faces | TetGen |
+    |---|---|---|---|---|
+    | Smallest dihedral | 0.82° | 6.00° | 3.87° | 4.67° |
+    | Tets under 1° (sum) | 6,805 | 1,137 | 2,974 | 4,418 |
+    | Tets under 10° (sum) | 65,796 | 55,788 | 49,499 | 80,192 |
+    | Largest non-orthogonality | 87.7° | 86.1° | 81.9° | 76.0° |
+    | Largest skewness | 3.05 | 4.05 | 2.43 | 1.99 |
+    | Wall-adjacent non-orthogonality | 88.3° | 86.1° | 81.9° | 71.4° |
+    | Wall-adjacent skewness | 2.21 | 2.81 | 2.01 | 1.16 |
+
+    Against the kernel, the wall-adjacent non-orthogonality falls on 36 models and the skewness on 29. Against TetGen it is lower on only 12 models (skewness 16). Tets grow 5 % at the median (46 % at most); improvement takes 0.43 s at the median, 115 s at most. The sum of the largest skewness falls from 42,784 to 2,634.
+  - **What is left at the walls:** the worst faces sit between two cells with three boundary vertices each and one free vertex low over a small boundary triangle (height 3–12 % of its edge), in parts 8 to 140 edges thick, so not thin features. No operation here may change the boundary, and TetGen splits boundary faces and segments. Boundary operations are the next task.
+- [ ] Boundary operations that keep the geometry: 2-2 flips of exactly coplanar boundary faces in one face group, splits of boundary edges and faces at points on them, and moves of boundary vertices within an exactly flat patch, with face groups carried through `Improved`. Measured against TetGen's wall-adjacent worst on the subset.
 - [ ] Report the worst cells and their locations, wall-adjacent cells separately. `VOL_LOW_QUALITY` is gated on non-orthogonality and skewness too
 - [ ] Absorb improvements 5, 6 and 8; parallel by independent sets with a fixed colouring
 - [ ] Exit criterion:

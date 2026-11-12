@@ -1,8 +1,8 @@
 # Golden reports for the synthetic suite (tests/synthetic/tests/suite.rs).
 # label <TAB> code severity [action/outcome] xcount; ... <TAB> part kernel accepted tets min_dihedral mean_non_orthogonality; ...
 # Regenerate with UPDATE_GOLDEN=1 cargo test -p mesher-synthetic
-clean cube [x1 +0]		0 delaunay accepted 4266 15.0 20.5
-clean cube [x0.001 +1000]		0 delaunay accepted 4373 15.0 20.6
+clean cube [x1 +0]		0 delaunay accepted 4268 15.0 20.5
+clean cube [x0.001 +1000]		0 delaunay accepted 4374 15.0 20.6
 clean cube [x10000 +-50000]		0 delaunay accepted 4394 15.0 20.6
 clean grid cube [x1 +0]		0 delaunay accepted 4568 15.1 20.6
 clean grid cube [x0.001 +1000]		0 delaunay accepted 4521 15.3 20.4
@@ -16,37 +16,37 @@ clean torus [x10000 +-50000]		0 delaunay accepted 1777 16.4 21.0
 clean hollow cube (cavity joins its component) [x1 +0]		0 delaunay accepted 4473 15.5 19.5
 clean hollow cube (cavity joins its component) [x0.001 +1000]		0 delaunay accepted 4444 15.2 20.5
 clean hollow cube (cavity joins its component) [x10000 +-50000]		0 delaunay accepted 4362 15.2 19.8
-clean separate cubes [x1 +0]		0 delaunay accepted 4266 15.0 20.5; 1 delaunay accepted 4437 15.5 20.6
-clean separate cubes [x0.001 +1000]		0 delaunay accepted 4373 15.0 20.6; 1 delaunay accepted 4315 15.0 20.6
+clean separate cubes [x1 +0]		0 delaunay accepted 4268 15.0 20.5; 1 delaunay accepted 4437 15.5 20.6
+clean separate cubes [x0.001 +1000]		0 delaunay accepted 4374 15.0 20.6; 1 delaunay accepted 4316 15.0 20.6
 clean separate cubes [x10000 +-50000]		0 delaunay accepted 4394 15.0 20.6; 1 delaunay accepted 4381 15.2 20.5
-touching boxes as two parts [x1 +0]	PART_SHARED_INTERFACE info x1	0 delaunay accepted 4266 15.0 20.5; 1 delaunay accepted 4293 15.2 20.6
-touching boxes as two parts [x0.001 +1000]	PART_SHARED_INTERFACE info x1	0 delaunay accepted 4373 15.0 20.6; 1 delaunay accepted 4373 15.0 20.6
+touching boxes as two parts [x1 +0]	PART_SHARED_INTERFACE info x1	0 delaunay accepted 4268 15.0 20.5; 1 delaunay accepted 4294 15.1 20.6
+touching boxes as two parts [x0.001 +1000]	PART_SHARED_INTERFACE info x1	0 delaunay accepted 4374 15.0 20.6; 1 delaunay accepted 4374 15.0 20.6
 touching boxes as two parts [x10000 +-50000]	PART_SHARED_INTERFACE info x1	0 delaunay accepted 4394 15.0 20.6; 1 delaunay accepted 4403 15.0 20.7
-duplicate vertex, exact [x1 +0]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4266 15.0 20.5
-duplicate vertex, exact [x0.001 +1000]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4373 15.0 20.6
+duplicate vertex, exact [x1 +0]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4268 15.0 20.5
+duplicate vertex, exact [x0.001 +1000]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4374 15.0 20.6
 duplicate vertex, exact [x10000 +-50000]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4394 15.0 20.6
-duplicate vertex, within tolerance [x1 +0]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4266 15.0 20.5
-duplicate vertex, within tolerance [x0.001 +1000]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4373 15.0 20.6
+duplicate vertex, within tolerance [x1 +0]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4268 15.0 20.5
+duplicate vertex, within tolerance [x0.001 +1000]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4374 15.0 20.6
 duplicate vertex, within tolerance [x10000 +-50000]	GEO_DUPLICATE_VERTEX info merge/applied x1; GEO_DUPLICATE_VERTEX warning merge/deferred x1	0 delaunay accepted 4394 15.0 20.6
-degenerate face, repeated vertex [x1 +0]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4266 15.0 20.5
-degenerate face, repeated vertex [x0.001 +1000]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4373 15.0 20.6
+degenerate face, repeated vertex [x1 +0]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4268 15.0 20.5
+degenerate face, repeated vertex [x0.001 +1000]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4374 15.0 20.6
 degenerate face, repeated vertex [x10000 +-50000]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4394 15.0 20.6
 degenerate face, collinear [x1 +0]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4365 15.1 20.6
-degenerate face, collinear [x0.001 +1000]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4420 15.2 20.5
-degenerate face, collinear [x10000 +-50000]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4409 15.2 20.5
+degenerate face, collinear [x0.001 +1000]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4421 15.2 20.5
+degenerate face, collinear [x10000 +-50000]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4410 15.2 20.5
 degenerate face at a T-junction [x1 +0]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4365 15.2 20.4
 degenerate face at a T-junction [x0.001 +1000]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4350 15.0 20.8
 degenerate face at a T-junction [x10000 +-50000]	GEO_DEGENERATE_FACE info remove/applied x1; GEO_DEGENERATE_FACE warning remove/deferred x1	0 delaunay accepted 4363 15.0 20.8
-duplicate face [x1 +0]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4266 15.0 20.5
-duplicate face [x0.001 +1000]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4373 15.0 20.6
+duplicate face [x1 +0]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4268 15.0 20.5
+duplicate face [x0.001 +1000]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4374 15.0 20.6
 duplicate face [x10000 +-50000]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4394 15.0 20.6
-duplicate face, reversed [x1 +0]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4266 15.0 20.5
-duplicate face, reversed [x0.001 +1000]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4373 15.0 20.6
+duplicate face, reversed [x1 +0]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4268 15.0 20.5
+duplicate face, reversed [x0.001 +1000]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4374 15.0 20.6
 duplicate face, reversed [x10000 +-50000]	GEO_DUPLICATE_FACE info remove/applied x1; GEO_DUPLICATE_FACE warning remove/deferred x1	0 delaunay accepted 4394 15.0 20.6
-hole, one triangle [x1 +0]	TOP_BOUNDARY_EDGE info fill_hole/applied x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1	0 delaunay accepted 4266 15.0 20.5
-hole, one triangle [x0.001 +1000]	TOP_BOUNDARY_EDGE info fill_hole/applied x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1	0 delaunay accepted 4373 15.0 20.6
+hole, one triangle [x1 +0]	TOP_BOUNDARY_EDGE info fill_hole/applied x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1	0 delaunay accepted 4268 15.0 20.5
+hole, one triangle [x0.001 +1000]	TOP_BOUNDARY_EDGE info fill_hole/applied x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1	0 delaunay accepted 4374 15.0 20.6
 hole, one triangle [x10000 +-50000]	TOP_BOUNDARY_EDGE info fill_hole/applied x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1	0 delaunay accepted 4394 15.0 20.6
-hole, one quad [x1 +0]	TOP_BOUNDARY_EDGE info fill_hole/applied x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1	0 delaunay accepted 4320 15.0 21.0
+hole, one quad [x1 +0]	TOP_BOUNDARY_EDGE info fill_hole/applied x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1	0 delaunay accepted 4321 15.0 21.0
 hole, one quad [x0.001 +1000]	TOP_BOUNDARY_EDGE info fill_hole/applied x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1	0 delaunay accepted 4362 15.2 20.4
 hole, one quad [x10000 +-50000]	TOP_BOUNDARY_EDGE info fill_hole/applied x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1	0 delaunay accepted 4375 15.2 20.6
 hole, open bowl (too large to fill) [x1 +0]	TOP_BOUNDARY_EDGE error x1; TOP_BOUNDARY_EDGE error fill_hole/failed x1; TOP_BOUNDARY_EDGE warning fill_hole/deferred x1; VOL_BOUNDARY_DEVIATION error x1	0 stuffing rejected 4088 19.0 5.3
@@ -58,14 +58,14 @@ non-manifold edge (cubes sharing an edge) [x10000 +-50000]	MESH_RECOVERY_FAILED 
 non-manifold vertex (cubes sharing a corner) [x1 +0]	MESH_RECOVERY_FAILED warning fallback/applied x1; TOP_NONMANIFOLD_VERTEX info duplicate_vertex/applied x1; TOP_NONMANIFOLD_VERTEX warning duplicate_vertex/deferred x1	0 stuffing accepted 3048 26.5 5.6
 non-manifold vertex (cubes sharing a corner) [x0.001 +1000]	MESH_RECOVERY_FAILED warning fallback/applied x1; TOP_NONMANIFOLD_VERTEX info duplicate_vertex/applied x1; TOP_NONMANIFOLD_VERTEX warning duplicate_vertex/deferred x1	0 stuffing accepted 3048 27.4 5.6
 non-manifold vertex (cubes sharing a corner) [x10000 +-50000]	MESH_RECOVERY_FAILED warning fallback/applied x1; TOP_NONMANIFOLD_VERTEX info duplicate_vertex/applied x1; TOP_NONMANIFOLD_VERTEX warning duplicate_vertex/deferred x1	0 stuffing accepted 3048 23.0 5.6
-inconsistent orientation, one face [x1 +0]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 4266 15.0 20.5
-inconsistent orientation, one face [x0.001 +1000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 4373 15.0 20.6
+inconsistent orientation, one face [x1 +0]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 4268 15.0 20.5
+inconsistent orientation, one face [x0.001 +1000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 4374 15.0 20.6
 inconsistent orientation, one face [x10000 +-50000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 4394 15.0 20.6
-inconsistent orientation, five faces [x1 +0]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 1986 12.1 21.0
-inconsistent orientation, five faces [x0.001 +1000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 2022 15.1 21.3
+inconsistent orientation, five faces [x1 +0]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 1978 12.1 21.0
+inconsistent orientation, five faces [x0.001 +1000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 2023 15.1 21.5
 inconsistent orientation, five faces [x10000 +-50000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 1982 15.0 21.1
-inverted cube [x1 +0]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4266 15.0 20.5
-inverted cube [x0.001 +1000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4373 15.0 20.6
+inverted cube [x1 +0]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4268 15.0 20.5
+inverted cube [x0.001 +1000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4374 15.0 20.6
 inverted cube [x10000 +-50000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4394 15.0 20.6
 inverted torus [x1 +0]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 1862 15.4 20.7
 inverted torus [x0.001 +1000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 1733 15.2 21.0
@@ -85,17 +85,17 @@ self-intersection (vertex pushed through) [x10000 +-50000]	INT_SELF_INTERSECTION
 shell overlap within one part [x1 +0]	INT_SHELL_OVERLAP warning fallback/applied x2	0 stuffing accepted 8424 21.4 3.5
 shell overlap within one part [x0.001 +1000]	INT_SHELL_OVERLAP warning fallback/applied x2	0 stuffing accepted 8424 21.4 3.5
 shell overlap within one part [x10000 +-50000]	INT_SHELL_OVERLAP warning fallback/applied x2	0 stuffing accepted 8424 21.4 3.5
-overlapping parts [x1 +0]	PART_OVERLAP error x1	0 delaunay accepted 4266 15.0 20.5; 1 delaunay accepted 4409 15.0 20.8
-overlapping parts [x0.001 +1000]	PART_OVERLAP error x1	0 delaunay accepted 4373 15.0 20.6; 1 delaunay accepted 4420 15.0 20.2
+overlapping parts [x1 +0]	PART_OVERLAP error x1	0 delaunay accepted 4268 15.0 20.5; 1 delaunay accepted 4409 15.0 20.8
+overlapping parts [x0.001 +1000]	PART_OVERLAP error x1	0 delaunay accepted 4374 15.0 20.6; 1 delaunay accepted 4421 15.0 20.3
 overlapping parts [x10000 +-50000]	PART_OVERLAP error x1	0 delaunay accepted 4394 15.0 20.6; 1 delaunay accepted 4394 15.0 20.6
 part inside another part [x1 +0]	PART_OVERLAP error x1	0 delaunay accepted 4362 15.1 20.2; 1 delaunay accepted 4363 15.0 20.3
-part inside another part [x0.001 +1000]	PART_OVERLAP error x1	0 delaunay accepted 4320 15.1 20.4; 1 delaunay accepted 4373 15.0 20.6
-part inside another part [x10000 +-50000]	PART_OVERLAP error x1	0 delaunay accepted 4353 15.2 20.6; 1 delaunay accepted 4330 15.0 20.7
+part inside another part [x0.001 +1000]	PART_OVERLAP error x1	0 delaunay accepted 4320 15.1 20.4; 1 delaunay accepted 4374 15.0 20.6
+part inside another part [x10000 +-50000]	PART_OVERLAP error x1	0 delaunay accepted 4353 15.2 20.7; 1 delaunay accepted 4330 15.0 20.7
 selecting a missing part [x1 +0]	PART_EMPTY_SELECTION fatal abort/applied x1	
 selecting a missing part [x0.001 +1000]	PART_EMPTY_SELECTION fatal abort/applied x1	
 selecting a missing part [x10000 +-50000]	PART_EMPTY_SELECTION fatal abort/applied x1	
-sliver face [x1 +0]	QUAL_SLIVER_FACE warning remesh/deferred x1; VOL_LOW_QUALITY warning x1	0 delaunay accepted 4395 8.8 20.8
-sliver face [x0.001 +1000]	QUAL_SLIVER_FACE warning remesh/deferred x1; VOL_LOW_QUALITY warning x1	0 delaunay accepted 4362 10.0 21.3
-sliver face [x10000 +-50000]	QUAL_SLIVER_FACE warning remesh/deferred x1; VOL_LOW_QUALITY warning x1	0 delaunay accepted 4385 9.4 20.9
+sliver face [x1 +0]	QUAL_SLIVER_FACE warning remesh/deferred x1; VOL_LOW_QUALITY warning x1	0 delaunay accepted 4407 6.9 20.9
+sliver face [x0.001 +1000]	QUAL_SLIVER_FACE warning remesh/deferred x1; VOL_LOW_QUALITY warning x1	0 delaunay accepted 4339 5.2 21.1
+sliver face [x10000 +-50000]	QUAL_SLIVER_FACE warning remesh/deferred x1; VOL_LOW_QUALITY warning x1	0 delaunay accepted 4353 3.5 20.7
 tiny model [x1 +0]	QUAL_SUSPECT_SCALE info x1	0 delaunay accepted 4374 15.0 20.7
 huge model [x1 +0]	QUAL_SUSPECT_SCALE info x1	0 delaunay accepted 4330 15.1 20.6

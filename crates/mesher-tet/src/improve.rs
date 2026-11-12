@@ -1,8 +1,8 @@
 //! Worst-cell improvement by invariant-guarded local operations
 //! (Milestone 15), in the style of the Wildmeshing Toolkit.
 //!
-//! A finished tetrahedral mesh is improved one poor tet at a time, worst
-//! first, by local operations:
+//! A finished tetrahedral mesh is improved one poor cell at a time, cells
+//! with a boundary face first, worst first, by local operations:
 //!
 //! - **Flips:** a 2-3 flip of an interior face, and edge removal of an
 //!   interior edge (3-2 and 4-4 flips and their larger cousins), the ring of
@@ -14,19 +14,33 @@
 //! - **Splits:** an interior edge splits at a new vertex, which then moves
 //!   to the best candidate position.
 //!
-//! Each is accepted only if every tet it makes is positive exactly (and in
-//! floating point, as a solver computes it) and the worst quality of the
-//! region it replaces strictly improves. No operation touches a boundary
-//! face or moves a boundary vertex: flips and splits act only on faces and
-//! edges inside the mesh, and moves and collapses only on vertices off the
-//! boundary. So the boundary stays exactly the input's, the volume is
-//! unchanged, and a mesh positive before stays positive after.
+//! **Quality** is what a cell-centred finite-volume solver sees, against
+//! targets ([`ImproveParams`]), each measure divided by its target so that 1
+//! is on target and smaller is worse:
 //!
-//! The target is the smallest dihedral angle for now. Deterministic: the
-//! poor tets go in order of quality and index, and every choice is by a
-//! fixed order.
+//! - each tet's smallest dihedral angle;
+//! - each face's non-orthogonality: the angle between its normal and the
+//!   line joining the centroids of its two cells, or, on the boundary, the
+//!   line from its cell's centroid to its own centroid;
+//! - each interior face's skewness: the distance from its centroid to where
+//!   the centroid line crosses its plane, over the centroid distance.
+//!
+//! A cell's quality is the worst of its own angle and its four faces',
+//! capped at 1: a cell on target in every measure is not improved further.
+//!
+//! Each operation is accepted only if every tet it makes is positive
+//! exactly (and in floating point, as a solver computes it) and the worst
+//! quality of the region it changes (the new tets and every face of them,
+//! against the old tets and theirs) strictly improves. No operation touches
+//! a boundary face or moves a boundary vertex: flips and splits act only on
+//! faces and edges inside the mesh, and moves and collapses only on
+//! vertices off the boundary. So the boundary stays exactly the input's,
+//! the volume is unchanged, and a mesh positive before stays positive
+//! after. Deterministic: the poor cells go in order of quality and index,
+//! and every choice is by a fixed order.
 
 use mesher_geom::predicates::orient3d;
+use mesher_geom::vec3::{add, cross, dot, norm, scale, sub};
 use mesher_geom::{Point3, Sign};
 
 use crate::fxhash::FxHashMap;
@@ -34,7 +48,8 @@ use crate::quality::float_volume;
 use crate::smooth::{best_position, min_dihedral};
 
 /// An operation must raise the worst quality of its region by more than
-/// this (degrees): a strict gain, so operations cannot undo each other.
+/// this (a fraction of a target): a strict gain, so operations cannot undo
+/// each other.
 const GAIN: f64 = 1e-6;
 
 /// Largest ring of tets an edge is removed from.
@@ -47,13 +62,18 @@ const EDGES: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 
 /// face followed by that vertex is positive.
 const INWARD: [[usize; 3]; 4] = [[1, 3, 2], [0, 2, 3], [0, 3, 1], [0, 1, 2]];
 
-/// How improvement works.
+/// How improvement works. A target at or beyond its measure's range (a
+/// non-orthogonality of 90° or more, an infinite skewness, a dihedral angle
+/// of 0°) turns that measure off.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImproveParams {
-    /// Tets whose smallest dihedral angle is below this are improved,
-    /// degrees.
+    /// Smallest dihedral angle of a tet, degrees.
     pub target_degrees: f64,
-    /// Passes over the poor tets; stops early when nothing changes.
+    /// Largest non-orthogonality of a face, degrees.
+    pub max_non_orthogonality_degrees: f64,
+    /// Largest skewness of an interior face.
+    pub max_skewness: f64,
+    /// Passes over the poor cells; stops early when nothing changes.
     pub passes: usize,
     /// Whether vertices may collapse and edges split.
     pub collapses: bool,
@@ -64,6 +84,8 @@ impl Default for ImproveParams {
     fn default() -> ImproveParams {
         ImproveParams {
             target_degrees: 15.0,
+            max_non_orthogonality_degrees: 70.0,
+            max_skewness: 2.0,
             passes: 8,
             collapses: true,
             splits: true,
@@ -90,7 +112,11 @@ pub struct ImproveStats {
     /// not positive in floating point.
     pub min_before: f64,
     pub min_after: f64,
-    /// Tets below the target before and after.
+    /// The worst cell's quality before and after (1 on target; negative
+    /// infinity for a tet not positive in floating point).
+    pub worst_before: f64,
+    pub worst_after: f64,
+    /// Cells below target before and after.
     pub poor_before: usize,
     pub poor_after: usize,
 }
@@ -107,20 +133,72 @@ pub struct Improved {
     pub stats: ImproveStats,
 }
 
-/// A tet's quality: its smallest dihedral angle in degrees, or -1 if it is
-/// not positive exactly or its floating-point volume is not positive.
-fn quality(p: [Point3; 4]) -> f64 {
+/// Whether a tet is positive exactly and its floating-point volume positive.
+fn usable(p: [Point3; 4]) -> bool {
     let volume = float_volume(p);
-    if orient3d(p[0], p[1], p[2], p[3]) != Sign::Positive || volume <= 0.0 || volume.is_nan() {
-        return -1.0;
-    }
-    min_dihedral(p)
+    orient3d(p[0], p[1], p[2], p[3]) == Sign::Positive && volume > 0.0
 }
 
-/// `quality` for a candidate tet: `None` if it is not usable.
-fn usable(p: [Point3; 4]) -> Option<f64> {
-    let q = quality(p);
-    (q >= 0.0).then_some(q)
+fn centroid(p: [Point3; 4]) -> Point3 {
+    [0, 1, 2].map(|k| (p[0][k] + p[1][k] + p[2][k] + p[3][k]) / 4.0)
+}
+
+/// The measures against their targets.
+#[derive(Debug, Clone, Copy)]
+struct Targets {
+    dihedral: f64,
+    non_orthogonality: f64,
+    skewness: f64,
+}
+
+impl Targets {
+    fn new(params: &ImproveParams) -> Targets {
+        Targets {
+            dihedral: params.target_degrees,
+            non_orthogonality: params.max_non_orthogonality_degrees,
+            skewness: params.max_skewness,
+        }
+    }
+
+    /// A usable tet's smallest dihedral angle against the target.
+    fn tet(&self, p: [Point3; 4]) -> f64 {
+        if self.dihedral > 0.0 {
+            min_dihedral(p) / self.dihedral
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    /// Face `local` of usable tet `p` (centroid `c`) against the targets:
+    /// its non-orthogonality, and its skewness if `other` (the centroid of
+    /// the cell across) is given; on the boundary, `other` is `None`.
+    fn face(&self, p: [Point3; 4], local: usize, c: Point3, other: Option<Point3>) -> f64 {
+        let [a, b, d] = INWARD[local].map(|k| p[k]);
+        let inward = cross(sub(b, a), sub(d, a));
+        let fc = [0, 1, 2].map(|k| (a[k] + b[k] + d[k]) / 3.0);
+        let line = sub(other.unwrap_or(fc), c);
+        let (nn, length) = (norm(inward), norm(line));
+        if !(nn > 0.0 && length > 0.0) {
+            return f64::NEG_INFINITY;
+        }
+        let n = scale(inward, -1.0 / nn);
+        let along = dot(line, n);
+        let mut s = f64::INFINITY;
+        if self.non_orthogonality < 90.0 {
+            let angle = libm::acos((along / length).clamp(-1.0, 1.0)).to_degrees();
+            s = (90.0 - angle) / (90.0 - self.non_orthogonality);
+        }
+        if other.is_some() && self.skewness.is_finite() {
+            let skew = if along > 0.0 {
+                let x = add(c, scale(line, dot(sub(fc, c), n) / along));
+                norm(sub(fc, x)) / length
+            } else {
+                norm(sub(fc, c)) / length
+            };
+            s = s.min(self.skewness / skew);
+        }
+        if s.is_nan() { f64::NEG_INFINITY } else { s }
+    }
 }
 
 /// Whether `order` is an even permutation of tet `t`'s vertices.
@@ -137,11 +215,27 @@ fn even(t: [u32; 4], order: [u32; 4]) -> bool {
     inversions % 2 == 0
 }
 
+/// What is across a face of a new tet.
+#[derive(Debug, Clone, Copy)]
+enum Across {
+    /// Another new tet, by index.
+    New(usize),
+    /// A tet the operation keeps, by its centroid.
+    Cell(Point3),
+    /// The boundary.
+    Wall,
+}
+
+/// The faces of an operation's new tets, each once: the tet (by index), its
+/// local face, and what is across. The same for every position of a moved
+/// vertex, since the tets across never contain it.
+type Frame = Vec<(usize, usize, Across)>;
+
 /// A local operation: tets out, tets in, and a vertex added (a split's).
 struct Op {
     old: Vec<u32>,
     new: Vec<[u32; 4]>,
-    /// The worst quality of `new`.
+    /// The worst quality of the region after.
     worst: f64,
     point: Option<Point3>,
 }
@@ -155,15 +249,61 @@ enum Kind {
     Split,
 }
 
+/// A region's quality by measure, each against its target and capped at 1:
+/// the smallest dihedral angle, and the worst face (non-orthogonality and
+/// skewness). Negative infinity where a tet is not usable.
+type Score = [f64; 2];
+
+const UNUSABLE: Score = [f64::NEG_INFINITY; 2];
+
+/// The worst of a score's measures.
+fn low(s: Score) -> f64 {
+    s[0].min(s[1])
+}
+
+/// The least a measure's worst may fall to when `before` is replaced:
+/// its worst before, or halfway from the worst of both to the target, if
+/// lower. So one measure is traded for the other only well above the
+/// region's worst.
+fn floor(before: Score, i: usize) -> f64 {
+    before[i].min(0.5 * (1.0 + low(before)))
+}
+
+/// The better of a score's measures.
+fn high(s: Score) -> f64 {
+    s[0].max(s[1])
+}
+
+/// Whether `after` may replace `before`: neither measure falls below its
+/// floor, and the worst of both strictly improves, or stays and the other
+/// strictly improves. So a measure that cannot improve (a face fixed by
+/// the boundary) does not stop the other from improving.
+fn improves(before: Score, after: Score) -> bool {
+    after[0] >= floor(before, 0)
+        && after[1] >= floor(before, 1)
+        && (low(after) > low(before) + GAIN
+            || (low(after) >= low(before) && high(after) > high(before) + GAIN))
+}
+
+/// A score as one number, for picking the best of several candidates: by
+/// the worst measure, then the other.
+fn key(s: Score) -> f64 {
+    low(s) + 1e-3 * high(s)
+}
+
 struct Mesh {
     points: Vec<Point3>,
     tets: Vec<[u32; 4]>,
-    q: Vec<f64>,
+    /// Each tet's quality: its own angle and the worst of its faces.
+    q: Vec<Score>,
+    /// Whether a tet has a boundary face.
+    wall: Vec<bool>,
     alive: Vec<bool>,
     /// The live tets around each vertex.
     star: Vec<Vec<u32>>,
     /// On a boundary face.
     fixed: Vec<bool>,
+    targets: Targets,
 }
 
 impl Mesh {
@@ -171,14 +311,66 @@ impl Mesh {
         t.map(|v| self.points[v as usize])
     }
 
-    fn add(&mut self, t: [u32; 4]) {
+    /// The live tet with face `f`, other than those in `skip`.
+    fn across(&self, f: [u32; 3], skip: &[u32]) -> Option<u32> {
+        self.star[f[0] as usize].iter().copied().find(|&u| {
+            let t = self.tets[u as usize];
+            !skip.contains(&u) && t.contains(&f[1]) && t.contains(&f[2])
+        })
+    }
+
+    /// Tet `t`'s quality and whether it has a boundary face.
+    fn cell(&self, t: u32) -> (Score, bool) {
+        let _prof = crate::prof::scope("improve::cell");
+        let tet = self.tets[t as usize];
+        let p = self.corners(tet);
+        let ok = usable(p);
+        let c = centroid(p);
+        let mut q = if ok {
+            [self.targets.tet(p), f64::INFINITY]
+        } else {
+            UNUSABLE
+        };
+        let mut wall = false;
+        for (i, f) in INWARD.iter().enumerate() {
+            let other = self.across(f.map(|k| tet[k]), &[t]);
+            wall |= other.is_none();
+            if ok {
+                let other = other.map(|u| centroid(self.corners(self.tets[u as usize])));
+                q[1] = q[1].min(self.targets.face(p, i, c, other));
+            }
+        }
+        (q.map(|x| x.min(1.0)), wall)
+    }
+
+    /// Recompute the quality of tets `ids` and of their neighbours.
+    fn refresh(&mut self, ids: &[u32]) {
+        let _prof = crate::prof::scope("improve::refresh");
+        let mut all = Vec::with_capacity(ids.len() * 5);
+        for &t in ids {
+            all.push(t);
+            let tet = self.tets[t as usize];
+            for f in INWARD {
+                all.extend(self.across(f.map(|k| tet[k]), &[t]));
+            }
+        }
+        all.sort_unstable();
+        all.dedup();
+        for t in all {
+            (self.q[t as usize], self.wall[t as usize]) = self.cell(t);
+        }
+    }
+
+    fn add(&mut self, t: [u32; 4]) -> u32 {
         let id = self.tets.len() as u32;
-        self.q.push(quality(self.corners(t)));
+        self.q.push(UNUSABLE);
+        self.wall.push(false);
         self.tets.push(t);
         self.alive.push(true);
         for v in t {
             self.star[v as usize].push(id);
         }
+        id
     }
 
     fn remove(&mut self, id: u32) {
@@ -197,28 +389,118 @@ impl Mesh {
         for &t in &op.old {
             self.remove(t);
         }
-        for t in op.new {
-            self.add(t);
-        }
+        let ids: Vec<u32> = op.new.into_iter().map(|t| self.add(t)).collect();
+        self.refresh(&ids);
     }
 
-    fn worst(&self, ids: &[u32]) -> f64 {
-        ids.iter()
-            .map(|&t| self.q[t as usize])
-            .fold(f64::INFINITY, f64::min)
+    fn worst(&self, ids: &[u32]) -> Score {
+        ids.iter().fold([f64::INFINITY; 2], |w, &t| {
+            let q = self.q[t as usize];
+            [w[0].min(q[0]), w[1].min(q[1])]
+        })
     }
 
-    /// The worst quality of new tets, -1 as soon as one is not usable.
-    fn new_worst(&self, tets: &[[u32; 4]]) -> f64 {
-        let mut worst = f64::INFINITY;
-        for &t in tets {
-            let q = quality(self.corners(t));
-            if q < 0.0 {
-                return -1.0;
+    /// The faces of `new`, replacing `old`; `None` if they do not fit (a
+    /// face on three new tets, or a face on one that is neither on a kept
+    /// tet nor on the boundary).
+    fn frame(&self, old: &[u32], new: &[[u32; 4]]) -> Option<Frame> {
+        let _prof = crate::prof::scope("improve::frame");
+        let mut keys: Vec<([u32; 3], usize, usize)> = Vec::with_capacity(4 * new.len());
+        for (n, t) in new.iter().enumerate() {
+            for (i, f) in INWARD.iter().enumerate() {
+                let mut k = f.map(|j| t[j]);
+                k.sort_unstable();
+                keys.push((k, n, i));
             }
-            worst = worst.min(q);
         }
-        worst
+        keys.sort_unstable();
+        let mut old = old.to_vec();
+        old.sort_unstable();
+        let mut frame = Vec::with_capacity(keys.len());
+        let mut i = 0;
+        while i < keys.len() {
+            let (k, n, l) = keys[i];
+            let same = |j: usize| keys.get(j).is_some_and(|x| x.0 == k);
+            if same(i + 1) {
+                if same(i + 2) {
+                    return None;
+                }
+                frame.push((n, l, Across::New(keys[i + 1].1)));
+                i += 2;
+                continue;
+            }
+            let kept = self.star[k[0] as usize].iter().copied().find(|&u| {
+                let t = self.tets[u as usize];
+                t.contains(&k[1]) && t.contains(&k[2]) && old.binary_search(&u).is_err()
+            });
+            let across = match kept {
+                Some(u) => Across::Cell(centroid(self.corners(self.tets[u as usize]))),
+                None if k
+                    .iter()
+                    .all(|&v| self.fixed.get(v as usize).copied().unwrap_or(false)) =>
+                {
+                    Across::Wall
+                }
+                None => return None,
+            };
+            frame.push((n, l, across));
+            i += 1;
+        }
+        Some(frame)
+    }
+
+    /// The worst quality of `new` and its faces (`frame`), with vertex
+    /// `moved.0` at `moved.1`, capped at 1; `UNUSABLE` if a tet is not
+    /// usable.
+    fn eval(&self, new: &[[u32; 4]], frame: &Frame, moved: Option<(u32, Point3)>) -> Score {
+        let _prof = crate::prof::scope("improve::eval");
+        let pos = |v: u32| match moved {
+            Some((m, x)) if m == v => x,
+            _ => self.points[v as usize],
+        };
+        let mut worst = [f64::INFINITY; 2];
+        let mut corners = Vec::with_capacity(new.len());
+        let mut centroids = Vec::with_capacity(new.len());
+        for t in new {
+            let p = t.map(pos);
+            if !usable(p) {
+                return UNUSABLE;
+            }
+            worst[0] = worst[0].min(self.targets.tet(p));
+            corners.push(p);
+            centroids.push(centroid(p));
+        }
+        for &(n, l, across) in frame {
+            let other = match across {
+                Across::New(j) => Some(centroids[j]),
+                Across::Cell(c) => Some(c),
+                Across::Wall => None,
+            };
+            worst[1] = worst[1].min(self.targets.face(corners[n], l, centroids[n], other));
+        }
+        worst.map(|x| x.min(1.0))
+    }
+
+    /// `old` replaced by `new` if that improves the region's worst.
+    fn offer(&self, old: Vec<u32>, new: Vec<[u32; 4]>) -> Option<Op> {
+        let before = self.worst(&old);
+        // The tets alone first: most candidates fail here, before their
+        // faces are looked up.
+        let least = floor(before, 0).max(low(before));
+        for &t in &new {
+            let p = self.corners(t);
+            if !usable(p) || self.targets.tet(p).min(1.0) < least {
+                return None;
+            }
+        }
+        let frame = self.frame(&old, &new)?;
+        let after = self.eval(&new, &frame, None);
+        improves(before, after).then_some(Op {
+            old,
+            new,
+            worst: key(after),
+            point: None,
+        })
     }
 
     fn edge_tets(&self, a: u32, b: u32) -> Vec<u32> {
@@ -273,33 +555,87 @@ impl Mesh {
         (sorted.len() == ring.len()).then_some((around, ring))
     }
 
+    /// What is across the ring faces of edge `ab`'s tets: for ring edge
+    /// `(r[i], r[i + 1])`, the centroid of the kept tet across face
+    /// `(a, r[i], r[i + 1])` and across `(b, r[i], r[i + 1])`, `None` for the
+    /// boundary. `None` if a face is on neither.
+    fn ring_faces(
+        &self,
+        a: u32,
+        b: u32,
+        old: &[u32],
+        r: &[u32],
+    ) -> Option<Vec<[Option<Point3>; 2]>> {
+        let k = r.len();
+        let side = |apex: u32, i: usize| -> Option<Option<Point3>> {
+            let mut f = [apex, r[i], r[(i + 1) % k]];
+            f.sort_unstable();
+            match self.across(f, old) {
+                Some(u) => Some(Some(centroid(self.corners(self.tets[u as usize])))),
+                None => f.iter().all(|&v| self.fixed[v as usize]).then_some(None),
+            }
+        };
+        (0..k).map(|i| Some([side(a, i)?, side(b, i)?])).collect()
+    }
+
     /// Remove interior edge `ab`: its ring of tets replaced by the
-    /// triangulation of the ring polygon whose worst tet is best, each
-    /// triangle coned to `a` and to `b`.
+    /// triangulation of the ring polygon whose worst is best, each triangle
+    /// coned to `a` and to `b`. The dynamic program scores each triangle by
+    /// its two tets, the face between them and their faces on the ring; the
+    /// triangulation it picks is then scored whole.
     fn edge_removal(&self, a: u32, b: u32) -> Option<Op> {
+        let _prof = crate::prof::scope("improve::edge_removal");
         let (old, r) = self.ring(a, b)?;
         let k = r.len();
         if k > MAX_RING {
             return None;
         }
-        let before = self.worst(&old);
+        let outer = self.ring_faces(a, b, &old, &r)?;
         let cones = |i: usize, m: usize, j: usize| [[r[i], r[j], r[m], a], [r[i], r[m], r[j], b]];
-        // best[i][j]: the best worst quality over triangulations of the
-        // polygon r[i..=j]; choice[i][j]: the apex of its triangle on
-        // (r[i], r[j]).
+        // The ring edge of polygon side (p, q), if it is one.
+        let edge = |p: usize, q: usize| {
+            if q == p + 1 {
+                Some(p)
+            } else if p == 0 && q == k - 1 {
+                Some(k - 1)
+            } else {
+                None
+            }
+        };
+        let term = |i: usize, m: usize, j: usize| {
+            let [ta, tb] = cones(i, m, j);
+            let (pa, pb) = (self.corners(ta), self.corners(tb));
+            if !(usable(pa) && usable(pb)) {
+                return f64::NEG_INFINITY;
+            }
+            let (ca, cb) = (centroid(pa), centroid(pb));
+            let t = &self.targets;
+            let mut s = t.tet(pa).min(t.tet(pb)).min(t.face(pa, 3, ca, Some(cb)));
+            // Cone faces (apex, r[p], r[q]) by local index in each cone.
+            for (p, q, la, lb) in [(i, m, 1, 2), (m, j, 0, 0), (i, j, 2, 1)] {
+                if let Some(e) = edge(p, q) {
+                    s = s
+                        .min(t.face(pa, la, ca, outer[e][0]))
+                        .min(t.face(pb, lb, cb, outer[e][1]));
+                }
+            }
+            s.min(1.0)
+        };
+        // best[i][j]: the best worst over triangulations of the polygon
+        // r[i..=j]; choice[i][j]: the apex of its triangle on (r[i], r[j]).
         let mut best = vec![vec![f64::INFINITY; k]; k];
         let mut choice = vec![vec![usize::MAX; k]; k];
         #[allow(clippy::needless_range_loop)] // m indexes two tables and the ring
         for len in 2..k {
             for i in 0..k - len {
                 let j = i + len;
-                let mut top = -1.0;
+                let mut top = f64::NEG_INFINITY;
                 for m in i + 1..j {
                     let sub = best[i][m].min(best[m][j]);
                     if sub <= top {
                         continue;
                     }
-                    let value = self.new_worst(&cones(i, m, j)).min(sub);
+                    let value = term(i, m, j).min(sub);
                     if value > top {
                         top = value;
                         choice[i][j] = m;
@@ -308,8 +644,7 @@ impl Mesh {
                 best[i][j] = top;
             }
         }
-        let after = best[0][k - 1];
-        if !(after >= 0.0 && after > before + GAIN) {
+        if best[0][k - 1] < low(self.worst(&old)) {
             return None;
         }
         let mut new = Vec::with_capacity(2 * (k - 2));
@@ -326,46 +661,29 @@ impl Mesh {
             stack.push((i, m));
             stack.push((m, j));
         }
-        Some(Op {
-            old,
-            new,
-            worst: after,
-            point: None,
-        })
+        self.offer(old, new)
     }
 
     /// The 2-3 flip of the face of tet `t` opposite its vertex `i`.
     fn flip(&self, t: u32, i: usize) -> Option<Op> {
+        let _prof = crate::prof::scope("improve::flip");
         let tet = self.tets[t as usize];
         let d = tet[i];
         let [a, b, c] = INWARD[i].map(|k| tet[k]);
-        let mut others = self.star[a as usize].iter().copied().filter(|&u| {
-            u != t && self.tets[u as usize].contains(&b) && self.tets[u as usize].contains(&c)
-        });
-        let (Some(u), None) = (others.next(), others.next()) else {
-            return None;
-        };
+        let u = self.across([a, b, c], &[t])?;
         let e = self.tets[u as usize]
             .into_iter()
             .find(|&x| x != a && x != b && x != c)?;
         if e == d {
             return None;
         }
-        let new = vec![[a, b, e, d], [b, c, e, d], [c, a, e, d]];
-        let before = self.q[t as usize].min(self.q[u as usize]);
-        let after = self.new_worst(&new);
-        (after >= 0.0 && after > before + GAIN).then_some(Op {
-            old: vec![t, u],
-            new,
-            worst: after,
-            point: None,
-        })
+        self.offer(vec![t, u], vec![[a, b, e, d], [b, c, e, d], [c, a, e, d]])
     }
 
     /// Collapse free vertex `v` into its neighbour `w`.
     fn collapse(&self, v: u32, w: u32) -> Option<Op> {
+        let _prof = crate::prof::scope("improve::collapse");
         let old = self.star[v as usize].clone();
-        let before = self.worst(&old);
         let new: Vec<[u32; 4]> = old
             .iter()
             .map(|&t| self.tets[t as usize])
@@ -375,18 +693,13 @@ impl Mesh {
         if new.is_empty() {
             return None;
         }
-        let after = self.new_worst(&new);
-        (after >= 0.0 && after > before + GAIN).then_some(Op {
-            old,
-            new,
-            worst: after,
-            point: None,
-        })
+        self.offer(old, new)
     }
 
     /// Split interior edge `ab` at a new vertex, placed at the best of the
     /// candidate positions around the midpoint.
     fn split(&mut self, a: u32, b: u32) -> Option<Op> {
+        let _prof = crate::prof::scope("improve::split");
         let (old, _) = self.ring(a, b)?;
         let before = self.worst(&old);
         let m = self.points.len() as u32;
@@ -402,41 +715,60 @@ impl Mesh {
                 ]
             })
             .collect();
+        let frame = self.frame(&old, &new)?;
         let star: Vec<u32> = (0..new.len() as u32).collect();
         self.points.push(mid);
-        let found = best_position(&self.points, &new, &star, m, &usable);
+        let this = &*self;
+        let at = |x: Point3| this.admissible(before, this.eval(&new, &frame, Some((m, x))));
+        let found = best_position(&this.points, &new, &star, m, &at);
         self.points.pop();
-        let (_, after, x) = found?;
-        (after >= 0.0 && after > before + GAIN).then_some(Op {
+        let (_, _, x) = found?;
+        let after = self.eval(&new, &frame, Some((m, x)));
+        improves(before, after).then_some(Op {
             old,
             new,
-            worst: after,
+            worst: key(after),
             point: Some(x),
         })
     }
 
+    /// A vertex position's `key` for `best_position`: `None` if a tet is
+    /// not usable or a measure falls below its floor (`floor`).
+    fn admissible(&self, before: Score, after: Score) -> Option<f64> {
+        (low(after) > f64::NEG_INFINITY
+            && after[0] >= floor(before, 0)
+            && after[1] >= floor(before, 1))
+        .then_some(key(after))
+    }
+
     /// Move free vertex `v` to its best candidate position, if better.
     fn try_move(&mut self, v: u32) -> bool {
+        let _prof = crate::prof::scope("improve::try_move");
         if self.fixed[v as usize] {
             return false;
         }
         let star = self.star[v as usize].clone();
-        let Some((q0, q, x)) = best_position(&self.points, &self.tets, &star, v, &usable) else {
+        let tets: Vec<[u32; 4]> = star.iter().map(|&t| self.tets[t as usize]).collect();
+        let Some(frame) = self.frame(&star, &tets) else {
             return false;
         };
-        if q <= q0 + GAIN || q.is_nan() {
+        let before = self.worst(&star);
+        let at = |x: Point3| self.admissible(before, self.eval(&tets, &frame, Some((v, x))));
+        let local: Vec<u32> = (0..tets.len() as u32).collect();
+        let Some((_, _, x)) = best_position(&self.points, &tets, &local, v, &at) else {
+            return false;
+        };
+        if !improves(before, self.eval(&tets, &frame, Some((v, x)))) {
             return false;
         }
         self.points[v as usize] = x;
-        for t in star {
-            self.q[t as usize] = quality(self.corners(self.tets[t as usize]));
-        }
+        self.refresh(&star);
         true
     }
 
     /// Improve poor tet `t` by the first kind of operation that can: flips,
     /// then vertex moves, collapses and splits. Among operations of one kind
-    /// the one whose new tets' worst is best wins.
+    /// the one whose region's worst is best wins.
     fn fix(&mut self, t: u32, params: &ImproveParams, stats: &mut ImproveStats) -> bool {
         let tet = self.tets[t as usize];
         let mut best: Option<(Op, Kind)> = None;
@@ -501,20 +833,25 @@ impl Mesh {
         true
     }
 
-    fn summary(&self, target: f64) -> (f64, usize) {
-        let mut worst = f64::INFINITY;
-        let mut poor = 0;
+    /// The smallest dihedral angle (-1 if a tet is not usable), the worst
+    /// quality, and the cells below target.
+    fn summary(&self) -> (f64, f64, usize) {
+        let (mut angle, mut worst, mut poor) = (f64::INFINITY, f64::INFINITY, 0);
         for (t, &q) in self.q.iter().enumerate() {
+            let q = low(q);
             if self.alive[t] {
+                let p = self.corners(self.tets[t]);
+                angle = angle.min(if usable(p) { min_dihedral(p) } else { -1.0 });
                 worst = worst.min(q);
-                poor += usize::from(q < target);
+                poor += usize::from(q < 1.0);
             }
         }
-        (if worst.is_finite() { worst } else { 0.0 }, poor)
+        let finite = |x: f64| if x == f64::INFINITY { 0.0 } else { x };
+        (finite(angle), finite(worst), poor)
     }
 }
 
-/// Improve the poor tets of a positively oriented mesh whose boundary is
+/// Improve the poor cells of a positively oriented mesh whose boundary is
 /// the faces on one tet only. The boundary faces and their vertices never
 /// change; see the module documentation.
 #[must_use]
@@ -533,9 +870,11 @@ pub fn improve(points: &[Point3], tets: &[[u32; 4]], params: &ImproveParams) -> 
         points: points.to_vec(),
         tets: Vec::with_capacity(tets.len()),
         q: Vec::with_capacity(tets.len()),
+        wall: Vec::with_capacity(tets.len()),
         alive: Vec::with_capacity(tets.len()),
         star: vec![Vec::new(); points.len()],
         fixed: vec![false; points.len()],
+        targets: Targets::new(params),
     };
     for &t in tets {
         mesh.add(t);
@@ -561,22 +900,28 @@ pub fn improve(points: &[Point3], tets: &[[u32; 4]], params: &ImproveParams) -> 
             }
         }
     }
+    for t in 0..mesh.tets.len() as u32 {
+        (mesh.q[t as usize], mesh.wall[t as usize]) = mesh.cell(t);
+    }
     let mut stats = ImproveStats::default();
-    (stats.min_before, stats.poor_before) = mesh.summary(params.target_degrees);
+    (stats.min_before, stats.worst_before, stats.poor_before) = mesh.summary();
     for _ in 0..params.passes {
         stats.passes += 1;
+        // Cells with a boundary face first, then by quality and index.
         let mut poor: Vec<u32> = (0..mesh.tets.len() as u32)
-            .filter(|&t| mesh.alive[t as usize] && mesh.q[t as usize] < params.target_degrees)
+            .filter(|&t| mesh.alive[t as usize] && low(mesh.q[t as usize]) < 1.0)
             .collect();
         poor.sort_by(|&a, &b| {
-            mesh.q[a as usize]
-                .total_cmp(&mesh.q[b as usize])
+            let (a, b) = (a as usize, b as usize);
+            mesh.wall[b]
+                .cmp(&mesh.wall[a])
+                .then(low(mesh.q[a]).total_cmp(&low(mesh.q[b])))
                 .then(a.cmp(&b))
         });
         let mut changed = 0;
         for t in poor {
             if mesh.alive[t as usize]
-                && mesh.q[t as usize] < params.target_degrees
+                && low(mesh.q[t as usize]) < 1.0
                 && mesh.fix(t, params, &mut stats)
             {
                 changed += 1;
@@ -586,7 +931,7 @@ pub fn improve(points: &[Point3], tets: &[[u32; 4]], params: &ImproveParams) -> 
             break;
         }
     }
-    (stats.min_after, stats.poor_after) = mesh.summary(params.target_degrees);
+    (stats.min_after, stats.worst_after, stats.poor_after) = mesh.summary();
 
     // Compact to the vertices in use, in their order.
     let mut used = vec![false; mesh.points.len()];
@@ -664,7 +1009,7 @@ mod tests {
         let mut faces: BTreeMap<[u32; 3], usize> = BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
         for tet in t {
-            assert!(quality(tet.map(|v| p[v as usize])) >= 0.0, "{tet:?}");
+            assert!(usable(tet.map(|v| p[v as usize])), "{tet:?}");
             let mut key = *tet;
             key.sort_unstable();
             assert!(seen.insert(key), "tet twice: {tet:?}");
@@ -797,7 +1142,7 @@ mod tests {
             assert_eq!(boundary(&r.points, &r.tets), boundary(&p, &t));
             assert!((volume(&r.points, &r.tets) - 1.0).abs() < 1e-12);
             let s = r.stats;
-            assert!(s.min_after >= s.min_before, "{s:?}");
+            assert!(s.worst_after >= s.worst_before, "{s:?}");
             assert!(s.poor_after < s.poor_before, "{s:?}");
             assert!(s.flips + s.edge_removals > 0 && s.moves > 0, "{s:?}");
             // Corners and every boundary vertex stay where they were.
@@ -807,6 +1152,67 @@ mod tests {
             let again = improve(&p, &t, &params);
             assert_eq!(again.points, r.points);
             assert_eq!(again.tets, r.tets);
+        }
+    }
+
+    /// Two tets mirrored through their shared face: the centroid line is
+    /// along the face normal, so the face is orthogonal and unskewed.
+    #[test]
+    fn a_mirrored_face_is_on_target() {
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let t = Targets::new(&ImproveParams::default());
+        // Face opposite vertex 0 is x + y + z = 1. This tet's centroid is
+        // (1/4, 1/4, 1/4); its mirror through the face is (5/12, 5/12, 5/12).
+        let c = centroid(p);
+        let mirror = [5.0 / 12.0; 3];
+        let s = t.face(p, 0, c, Some(mirror));
+        assert!((s - 90.0 / 20.0).abs() < 1e-9, "{s}");
+        // A boundary face: the line from the centroid to the face centroid
+        // of the face x = 0 makes acos(0.25 / |(0.25, 1/12, 1/12)|).
+        let wall = t.face(p, 1, c, None);
+        let line: f64 = (0.0625f64 + 2.0 / 144.0).sqrt();
+        let angle = libm::acos(0.25 / line).to_degrees();
+        assert!((wall - (90.0 - angle) / 20.0).abs() < 1e-9, "{wall}");
+        // Turned off, a measure never limits.
+        let off = Targets::new(&ImproveParams {
+            max_non_orthogonality_degrees: 90.0,
+            max_skewness: f64::INFINITY,
+            ..ImproveParams::default()
+        });
+        assert_eq!(off.face(p, 0, c, Some(mirror)), f64::INFINITY);
+    }
+
+    /// The face targets lower the worst non-orthogonality and skewness of
+    /// a mesh with slivers, the boundary and volume kept.
+    #[test]
+    fn face_targets_improve_the_worst_faces() {
+        for seed in [4, 5] {
+            let (p, t) = random_mesh(300, seed);
+            let before = crate::fv_quality(&p, &t);
+            let r = improve(&p, &t, &ImproveParams::default());
+            check_valid(&r.points, &r.tets);
+            assert_eq!(boundary(&r.points, &r.tets), boundary(&p, &t));
+            assert!((volume(&r.points, &r.tets) - 1.0).abs() < 1e-12);
+            let after = crate::fv_quality(&r.points, &r.tets);
+            assert!(
+                after.max_non_orthogonality_degrees < before.max_non_orthogonality_degrees,
+                "{before:?} {after:?}"
+            );
+            assert!(
+                after.max_skewness < before.max_skewness,
+                "{before:?} {after:?}"
+            );
+            assert!(
+                after.wall_max_non_orthogonality_degrees
+                    <= before.wall_max_non_orthogonality_degrees,
+                "{before:?} {after:?}"
+            );
+            assert!(r.stats.worst_after > r.stats.worst_before, "{:?}", r.stats);
         }
     }
 
