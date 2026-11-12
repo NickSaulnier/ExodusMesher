@@ -140,6 +140,18 @@ impl PlaneDelaunay {
         }
     }
 
+    /// Start the next point location from a triangle at the vertex with id
+    /// `id` outside, if it has one: a hint when the next point is near it.
+    pub(crate) fn hint(&mut self, id: u32) {
+        let Some(&i) = self.local_of.get(&id) else {
+            return;
+        };
+        let t = self.vertex_tri[i as usize];
+        if self.tris.get(t as usize).is_some_and(|x| x.alive) {
+            self.last = t;
+        }
+    }
+
     /// Add point `p` (id `id` outside). Returns `false` if it equals a point
     /// already there (nothing changes).
     pub(crate) fn insert(&mut self, id: u32, p: Point) -> bool {

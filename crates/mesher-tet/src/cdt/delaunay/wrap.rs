@@ -10,7 +10,8 @@
 //! the plane close the other half. Ties between cospherical points are
 //! broken by symbolic perturbation of the lifting (after Edelsbrunner and
 //! Mücke), by vertex index, so both halves see the same order. No points
-//! are added; where a front face has no valid apex the fill fails.
+//! are added; where a front face has no valid apex the fill fails, as it
+//! does for a cavity of more than [`WRAP_VERTICES`] vertices.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +24,11 @@ use crate::fxhash::FxHashMap;
 
 /// Tets per cavity tet and vertex a fill may make before it is abandoned.
 const WRAP_STEPS: usize = 16;
+
+/// The most vertices a cavity may have to be gift-wrapped: the search for
+/// each tet's apex weighs every vertex, so the time grows with the square of
+/// this (a cavity of 9,000 vertices took over a minute).
+const WRAP_VERTICES: usize = 1000;
 
 /// Orientations of vertex quadruples, remembered: a fill asks the same ones
 /// of many candidate tets. Also each cavity vertex's box
@@ -322,6 +328,11 @@ impl ExactDelaunay {
             .collect();
         verts.sort_unstable();
         verts.dedup();
+        // Each step weighs every vertex, so a very large cavity takes minutes
+        // to wrap; it is left to the Steiner points instead.
+        if verts.len() > WRAP_VERTICES {
+            return None;
+        }
         let signs: Vec<Sign> = verts.iter().map(|&v| side(self, v)).collect();
         let upper: Vec<u32> = (0..verts.len())
             .filter(|&k| signs[k] != Sign::Negative)

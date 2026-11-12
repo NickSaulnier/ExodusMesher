@@ -120,11 +120,10 @@ const MAX_PASSES: usize = 8;
 const MAX_ROUNDS: usize = 64;
 
 /// Steiner points inserted per facet in a round, at most: one at first,
-/// doubling each round the facet is still crossed, up to this (a large
-/// facet can be crossed by hundreds of edges); and the crossing edges tried
-/// for them.
+/// doubling each round the facet is still crossed, up to this, or a quarter
+/// of its crossing edges where more (a large facet can be crossed by
+/// hundreds of edges). Four times as many crossing edges are tried.
 const PER_ROUND: usize = 32;
-const TRIES: usize = 4 * PER_ROUND;
 
 /// With `merge_flat`, the longest polygon a lone triangle is triangulated
 /// into subfaces for; a longer one is a planar region instead.
@@ -686,6 +685,11 @@ pub fn recover_faces_with(
                 }
                 fresh
             });
+            // At most one point per four crossing edges a round, once a
+            // facet is crossed by more than `PER_ROUND` times four.
+            let cap = PER_ROUND.max(crossings.len() / 4);
+            let most = cap.min(1 << steiner_rounds[ti].min(16));
+            steiner_rounds[ti] += 1;
             // Per crossing edge, its points in order: the first that goes in.
             let candidates: Vec<Vec<Point>> = spread
                 .iter()
@@ -701,12 +705,10 @@ pub fn recover_faces_with(
                     crossing_points(&dt, points, corners, x, y)
                 })
                 .filter(|c| !c.is_empty())
-                .take(TRIES)
+                .take(4 * cap)
                 .collect();
             let mut added = 0;
             let mut gained = Vec::new();
-            let most = PER_ROUND.min(1 << steiner_rounds[ti].min(8));
-            steiner_rounds[ti] += 1;
             for tries in candidates {
                 if added == most || dt.points().len() >= limit {
                     break;

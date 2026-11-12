@@ -397,11 +397,18 @@ struct Refiner {
     steiner_segments: usize,
     steiner_faces: usize,
     steiner_tets: usize,
+    /// Each vertex's approximate position ([`Point::approx`]), kept: the f64
+    /// checks ask for the same vertices many times.
+    approx: Vec<Point3>,
 }
 
 impl Refiner {
     fn pt(&self, v: u32) -> &Point {
         &self.dt.points()[v as usize]
+    }
+
+    fn at(&self, v: u32) -> Point3 {
+        self.approx[v as usize]
     }
 
     /// Insert `p`; check again the pieces at its neighbours it lies inside
@@ -430,6 +437,10 @@ impl Refiner {
         let n = self.dt.points().len();
         self.at_vertex.resize(n, Vec::new());
         self.region_of.resize(n, Vec::new());
+        for v in self.approx.len()..n {
+            let a = self.dt.points()[v].approx();
+            self.approx.push(a);
+        }
         if self.quality.is_some() {
             for t in self.dt.star(m) {
                 self.queue_if_bad(t);
@@ -486,6 +497,8 @@ impl Refiner {
         }
         let (p, param) = middle(chain.carrier, chain.params[i], chain.params[i + 1])
             .ok_or(RefineError::Construction)?;
+        // The point location starts at the piece's end.
+        self.dt.hint_vertex(a);
         let Some(m) = self.insert(p)? else {
             return Err(RefineError::Duplicate { point: p.approx() });
         };
@@ -497,7 +510,7 @@ impl Refiner {
         self.at_vertex[m as usize].push(c);
         for (r, _) in regions {
             self.region_of[m as usize].push(r as u32);
-            self.plane_insert(r, m, p);
+            self.plane_insert(r, m, p, a);
         }
         self.queue.push((c, a, m));
         self.queue.push((c, m, b));
@@ -651,9 +664,11 @@ impl Refiner {
     /// piece, the piece's side decides; across any other edge it is as its
     /// neighbour; at the hull, outside. (This is the flood's answer while the
     /// boundary pieces are edges of the plane's triangulation.)
-    fn plane_insert(&mut self, r: usize, m: u32, p: Point) {
+    fn plane_insert(&mut self, r: usize, m: u32, p: Point, near: u32) {
         let started = self.regions[r].pd.started();
         let region = &mut self.regions[r];
+        // The walk starts beside `near`, a vertex near `p`.
+        region.pd.hint(near);
         region.pd.insert(m, p);
         region.dirty = true;
         region.touched.insert(m);
@@ -734,14 +749,14 @@ impl Refiner {
         let Some(apexes) = self.dt.face_apexes(v) else {
             return false;
         };
-        let [a, b, c] = v.map(|x| self.pt(x).approx());
+        let [a, b, c] = v.map(|x| self.at(x));
         let Some(o) = circumcentre(a, b, c) else {
             return true;
         };
         let r2 = dot(sub(a, o), sub(a, o));
         !apexes.iter().any(|&w| {
             w != GHOST && {
-                let p = self.pt(w).approx();
+                let p = self.at(w);
                 dot(sub(p, o), sub(p, o)) < r2 * (1.0 - 1e-9)
             }
         })
@@ -791,7 +806,7 @@ impl Refiner {
     /// the region's plane), or the region's boundary pieces that point
     /// encroaches instead.
     fn fix_subface(&mut self, r: usize, v: [u32; 3]) -> Result<(), RefineError> {
-        let [a, b, c] = v.map(|x| self.pt(x).approx());
+        let [a, b, c] = v.map(|x| self.at(x));
         let Some(o) = circumcentre(a, b, c) else {
             return Ok(());
         };
@@ -809,7 +824,7 @@ impl Refiner {
         let mut pieces = Vec::new();
         for &ch in &self.regions[r].chains {
             for w in self.chains[ch].verts.windows(2) {
-                let (a, b) = (self.pt(w[0]).approx(), self.pt(w[1]).approx());
+                let (a, b) = (self.at(w[0]), self.at(w[1]));
                 let mid = [0, 1, 2].map(|k| 0.5 * (a[k] + b[k]));
                 let radius = 0.5 * dot(sub(a, b), sub(a, b)).sqrt();
                 if dot(sub(pa, mid), sub(pa, mid)).sqrt() > radius + slack {
@@ -822,10 +837,12 @@ impl Refiner {
         }
         drop(s);
         if pieces.is_empty() {
+            // The point location starts at the subface's corner.
+            self.dt.hint_vertex(v[0]);
             if let Some(m) = self.insert(p)? {
                 self.steiner_faces += 1;
                 self.region_of[m as usize].push(r as u32);
-                self.plane_insert(r, m, p);
+                self.plane_insert(r, m, p, v[0]);
             }
         } else {
             for (ch, x, y) in pieces {
@@ -840,7 +857,7 @@ impl Refiner {
         let (Some(bound), Some(v)) = (self.quality, self.dt.tet(t)) else {
             return;
         };
-        let p = v.map(|x| self.pt(x).approx());
+        let p = v.map(|x| self.at(x));
         if let Some((_, ratio)) = tet_quality(p) {
             if ratio > bound {
                 self.bad.push(BadTet { ratio, tet: t, v });
@@ -874,7 +891,8 @@ impl Refiner {
         }
         let mut pieces: BTreeSet<(u32, u32, u32)> = BTreeSet::new();
         let mut face: Option<([u32; 3], u32)> = None;
-        let (chains, at_vertex, region_of) = (&self.chains, &self.at_vertex, &self.region_of);
+        let (chains, at_vertex, region_of, approx) =
+            (&self.chains, &self.at_vertex, &self.region_of, &self.approx);
         let mut reject = |dt: &ExactDelaunay, cavity: &[[u32; 4]]| -> bool {
             let _s = crate::prof::scope("refine tets: encroachment");
             let pt = |v: u32| &dt.points()[v as usize];
@@ -916,7 +934,7 @@ impl Refiner {
                 }
             }
             for (f, r) in faces {
-                let [a, b, cc] = f.map(|x| pt(x).approx());
+                let [a, b, cc] = f.map(|x| approx[x as usize]);
                 let Some(o) = circumcentre(a, b, cc) else {
                     continue;
                 };
@@ -986,7 +1004,7 @@ impl Refiner {
                 if self.stuck_tets.contains(&key) {
                     continue;
                 }
-                let Some((c, _)) = tet_quality(b.v.map(|x| self.pt(x).approx())) else {
+                let Some((c, _)) = tet_quality(b.v.map(|x| self.at(x))) else {
                     continue;
                 };
                 let before = self.dt.points().len();
@@ -1352,6 +1370,7 @@ fn set_up(
         .rev()
         .map(|(id, ch)| (id as u32, ch.verts[0], ch.verts[1]))
         .collect();
+    let approx: Vec<Point3> = dt.points().iter().map(Point::approx).collect();
     let refiner = Refiner {
         dt,
         chains,
@@ -1368,6 +1387,7 @@ fn set_up(
         steiner_segments: 0,
         steiner_faces: 0,
         steiner_tets: 0,
+        approx,
     };
     Ok((refiner, vertex_of, box_corners))
 }

@@ -80,6 +80,7 @@ fn main() {
             }
         };
         let t_chamfer = started.elapsed().as_secs_f64();
+        eprintln!("--- {path}: chamfered in {t_chamfer:.2} s");
         let started = Instant::now();
         let refined = match refine_conforming(&surface, &points, &triangles, 0.2, max_points, 2.0) {
             Ok(r) => r,
@@ -89,6 +90,7 @@ fn main() {
             }
         };
         let t_refine = started.elapsed().as_secs_f64();
+        eprintln!("--- {path}: refined in {t_refine:.2} s");
         let started = Instant::now();
         let enriched = match enriched_cdt(&refined, &surface, &points, &triangles, tau, 0, 7) {
             Ok(e) => e,
@@ -101,6 +103,7 @@ fn main() {
             }
         };
         let t_cdt = started.elapsed().as_secs_f64();
+        eprintln!("--- {path}: enriched CDT in {t_cdt:.2} s");
         let recovered = &enriched.region.recovered;
         let (steiner, steiner_faces) = (recovered.steiner, recovered.steiner_on_faces);
         let inside = enriched.region.tets.len();

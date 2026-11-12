@@ -96,6 +96,15 @@ enum Crossing {
 }
 
 /// What is wrong with a constrained cavity.
+/// What a cavity's checks computed, while the tetrahedralization stays as
+/// it is: whether the point sees each tet face, and the ring of each
+/// protected edge.
+#[derive(Default)]
+struct Known {
+    sees: crate::fxhash::FxHashMap<(u32, u8), bool>,
+    rings: crate::fxhash::FxHashMap<(u32, u32), Option<Vec<u32>>>,
+}
+
 enum Violation {
     None,
     /// Take this tet out.
@@ -579,6 +588,16 @@ impl ExactDelaunay {
         }
     }
 
+    /// Start the next point location from a tet at vertex `v`: a hint when
+    /// the next point is known to be near it.
+    pub fn hint_vertex(&mut self, v: u32) {
+        if let Some(&t) = self.vertex_tet.get(v as usize) {
+            if t != NONE {
+                self.hint(t);
+            }
+        }
+    }
+
     /// The real tets point `p` (not inserted) conflicts with: those whose
     /// circumsphere strictly contains it, reached from the tet holding it,
     /// by vertices. Nothing changes.
@@ -916,20 +935,22 @@ impl ExactDelaunay {
             }
         }
         drop(s);
-        // Shrink, one tet at a time, until the cavity is valid.
+        // Shrink, one tet at a time, until the cavity is valid. Nothing
+        // changes in the tetrahedralization meanwhile, so what each check
+        // computes is remembered.
         let _s = crate::prof::scope("cdt insert: shrink cavity");
+        let mut known = Known::default();
         loop {
             // Keep what is connected to the tets containing p.
             let mut reach = must.clone();
-            let mut seen = must.clone();
+            let mut seen: crate::fxhash::FxHashSet<u32> = must.iter().copied().collect();
             let mut k = 0;
             while k < reach.len() {
                 let t = reach[k];
                 k += 1;
                 for j in 0..4 {
                     let u = self.tets[t as usize].n[j];
-                    if self.stamp[u as usize] == epoch && !seen.contains(&u) {
-                        seen.push(u);
+                    if self.stamp[u as usize] == epoch && seen.insert(u) {
                         reach.push(u);
                     }
                 }
@@ -940,7 +961,7 @@ impl ExactDelaunay {
                 }
             }
             cavity = reach;
-            match self.cavity_violation(&cavity, &must, &p, protected) {
+            match self.cavity_violation(&cavity, &must, &p, protected, &mut known) {
                 Violation::None => break,
                 Violation::Remove(t) => {
                     self.stamp[t as usize] = 0;
@@ -967,6 +988,7 @@ impl ExactDelaunay {
         must: &[u32],
         p: &Point,
         protected: &dyn Fn(u32, u32) -> bool,
+        known: &mut Known,
     ) -> Violation {
         let epoch = self.epoch;
         let inside = |t: u32| self.stamp[t as usize] == epoch;
@@ -977,7 +999,12 @@ impl ExactDelaunay {
             }
             for j in 0..4 {
                 let u = self.tets[t as usize].n[j];
-                if !inside(u) && !self.sees(t, j, p) {
+                if !inside(u)
+                    && !*known
+                        .sees
+                        .entry((t, j as u8))
+                        .or_insert_with(|| self.sees(t, j, p))
+                {
                     return Violation::Remove(t);
                 }
             }
@@ -990,7 +1017,11 @@ impl ExactDelaunay {
                 if x == GHOST || y == GHOST || !protected(x, y) {
                     continue;
                 }
-                let Some(ring) = self.edge_ring(x, y) else {
+                let Some(ring) = known
+                    .rings
+                    .entry((x, y))
+                    .or_insert_with(|| self.edge_ring(x, y))
+                else {
                     continue;
                 };
                 if ring.iter().all(|&r| inside(r)) {
