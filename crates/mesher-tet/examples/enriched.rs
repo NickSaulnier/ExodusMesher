@@ -12,7 +12,12 @@
 //! tets inside; tets rounding turned over or left flat; the smallest face
 //! angle and dihedral angle in degrees (and how many tets have a face angle
 //! under 1°); seconds for chamfering, refinement, the CDT and rounding; or
-//! the error. `REFINE_MAX_POINTS` caps refinement (default 2,000,000).
+//! the error. Refinement runs under the budget sized for an element size of
+//! `REFINE_SIZE` times the diagonal (0.03 by default, the pipeline's);
+//! `REFINE_SIZING=1` refines to the sizing field for that size too, and
+//! `REFINE_MAX_POINTS` sets the vertex budget instead. The refined column
+//! adds the points split for size, the steps taken and, where a budget
+//! stopped refinement, why.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -20,7 +25,10 @@ use std::time::Instant;
 
 use mesher_tet::cdt::round_region;
 use mesher_tet::chamfer::chamfer_filtered;
-use mesher_tet::refine::{enriched_cdt, refine_conforming};
+use std::sync::Arc;
+
+use mesher_tet::refine::{RefineParams, enriched_cdt, refine_budget, refine_with};
+use mesher_tet::sizing::{SizeField, SizingParams};
 
 fn angle(p: [f64; 3], q: [f64; 3], r: [f64; 3]) -> f64 {
     let u = [0, 1, 2].map(|k| q[k] - p[k]);
@@ -69,7 +77,13 @@ fn main() {
         let max_points = std::env::var("REFINE_MAX_POINTS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2_000_000);
+            .unwrap_or(0);
+        let h = std::env::var("REFINE_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.03)
+            * diagonal;
+        let sizing = std::env::var("REFINE_SIZING").is_ok_and(|s| s == "1");
         let n = triangles.len();
         let started = Instant::now();
         let surface = match chamfer_filtered(&points, &triangles, tau) {
@@ -82,7 +96,26 @@ fn main() {
         let t_chamfer = started.elapsed().as_secs_f64();
         eprintln!("--- {path}: chamfered in {t_chamfer:.2} s");
         let started = Instant::now();
-        let refined = match refine_conforming(&surface, &points, &triangles, 0.2, max_points, 2.0) {
+        let params = RefineParams {
+            margin: 0.2,
+            bound: 2.0,
+            size: sizing.then(|| {
+                Arc::new(SizeField::from_surface(
+                    &points,
+                    &triangles,
+                    &SizingParams::for_size(h),
+                ))
+            }),
+            max_size: h,
+            max_points,
+            max_work: 0,
+        };
+        let budget = if max_points > 0 {
+            max_points
+        } else {
+            refine_budget(&points, &triangles, h, params.size.as_deref())
+        };
+        let refined = match refine_with(&surface, &points, &triangles, &params) {
             Ok(r) => r,
             Err(e) => {
                 println!("{path}\tfailed\t{n}\trefinement: {e}");
@@ -90,7 +123,14 @@ fn main() {
             }
         };
         let t_refine = started.elapsed().as_secs_f64();
-        eprintln!("--- {path}: refined in {t_refine:.2} s");
+        let stopped = refined
+            .stopped
+            .as_ref()
+            .map_or(String::new(), |e| format!(", stopped: {e}"));
+        eprintln!(
+            "--- {path}: refined in {t_refine:.2} s, {} points of {budget}{stopped}",
+            refined.dt.points().len()
+        );
         let started = Instant::now();
         let enriched = match enriched_cdt(&refined, &surface, &points, &triangles, tau, 0, 7) {
             Ok(e) => e,
@@ -137,8 +177,10 @@ fn main() {
         let (min_dihedral, _) = mesher_tet::quality::dihedral_range(&rounded.points, &rounded.tets)
             .unwrap_or((0.0, 0.0));
         println!(
-            "{path}\tok\t{n}\t{} refined, {} kept, {:?} left out\t{steiner}+{steiner_faces} Steiner\t{inside} tets\t{}+{} turned or flat\tface {min_face:.3}\tdihedral {min_dihedral:.3}\t{under_one} under 1°\t{t_chamfer:.2}\t{t_refine:.2}\t{t_cdt:.2}\t{t_round:.2}",
+            "{path}\tok\t{n}\t{} refined ({} for size, {} steps, budget {budget}{stopped}), {} kept, {:?} left out\t{steiner}+{steiner_faces} Steiner\t{inside} tets\t{}+{} turned or flat\tface {min_face:.3}\tdihedral {min_dihedral:.3}\t{under_one} under 1°\t{t_chamfer:.2}\t{t_refine:.2}\t{t_cdt:.2}\t{t_round:.2}",
             refined.dt.points().len(),
+            refined.steiner_size,
+            refined.steps,
             enriched.kept,
             enriched.cleared,
             rounded.inverted_before,

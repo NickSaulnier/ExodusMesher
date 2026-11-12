@@ -49,7 +49,7 @@ use mesher_geom::{FastWindingNumber, Point3, Sign, TriangleSoup};
 use crate::delaunay::{Delaunay, DelaunayError, Inserted, Walk};
 use crate::fxhash::FxHashMap;
 use crate::quality::dihedral_angles;
-use crate::sizing::SizeField;
+use crate::sizing::{SizeField, point_budget};
 use crate::smooth::{SmoothParams, smooth_slivers};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1766,30 +1766,12 @@ pub fn conforming_mesh(
     let budget = if params.max_points > 0 {
         params.max_points
     } else {
-        // Elements fill the volume at the maximum size, plus the surface at
-        // its local size; where the size is smaller, its graded layer (about
-        // h / gradation thick) adds ∫ 1/(h + g d)³ dd = 1/(2 g h²) per unit
-        // area over what the maximum size would put there.
-        let h = params.max_circumradius;
-        let field = params.size.as_deref();
-        let g = field.map_or(0.0, SizeField::gradation);
-        let (mut surface, mut volume) = (0.0f64, 0.0f64);
-        for t in triangles {
-            let [a, b, c] = t.map(|v| points[v as usize]);
-            let area = norm(cross(sub(b, a), sub(c, a))) / 2.0;
-            let local = field.map_or(h, |f| {
-                f.at(scale(add(add(a, b), c), 1.0 / 3.0)).clamp(f.min(), h)
-            });
-            surface += area / (local * local);
-            if g > 0.0 && local < h {
-                surface += area * (1.0 / (local * local) - 1.0 / (h * h)) / (2.0 * g);
-            }
-            // Relative to a vertex: far from the origin the products cancel.
-            let o = points[0];
-            volume += dot(sub(a, o), cross(sub(b, o), sub(c, o))) / 6.0;
-        }
-        let estimate = volume.abs() / h.powi(3) + surface + points.len() as f64;
-        ((20.0 * estimate) as usize).clamp(10_000, 4_000_000)
+        point_budget(
+            points,
+            triangles,
+            params.max_circumradius,
+            params.size.as_deref(),
+        )
     };
     let work = if params.max_work > 0 {
         params.max_work

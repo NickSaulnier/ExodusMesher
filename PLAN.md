@@ -844,15 +844,34 @@ Tasks, in order:
     - Two other repairs were tried and dropped. Replacing the tet and the inside tets around it by the star of a new f64 point fails: the whole neighbourhood is in the sub-ulp layer, so every candidate point is on its plane. Moves that only lessen the unusable tets around a vertex added nothing once the far moves were in.
     - Test: `offsets_go_from_near_to_far`. The synthetic golden reports are unchanged; `docs/report.md` says a move may reach 64 ulps and that a paired move gives two records.
     - **On the clean subset:** 98 of 100 mesh, conform and round (95 before); the other 95 meshes are identical. Rounding's median is 0.6 s; the three models take 0.5 to 7 s to round.
-  - **Open:**
-    - the two timeouts (104738's refinement; 225958's large facets), and the kernel's time on the slowest models;
+  - **Open** (carried to Milestone 15 and the kernel's speed work):
+    - the two timeouts, both now in the enriched CDT: 104738's refinement ends within its budget (923,154 points of 1,201,640, 603 s alone) but the kernel takes over 900 s on that many points, and 225958's two large facets (above);
+    - the kernel's time on the slowest models (135674 at 640 s);
     - the 0° tets left (591216);
     - slivers (dihedral angles reach 0 in 60 meshes; the paper's sliver criterion is optional).
-- [ ] Refinement against the sizing field. Opt-in and under the work budget; it hands over to Milestone 15 on `MESH_BUDGET_EXCEEDED`
-- [ ] Exit criterion, on the clean subset:
-  - refinement ends within budget on every model, or records why
-  - minimum face angle reported against the paper's (1.3° to 3.6°)
-  - cost per model tabulated
+- [x] Refinement against the sizing field, opt-in and under a deterministic budget (`refine::refine_with`, `RefineParams`, Nov 11, 2026).
+  - **Size:** with a size field, a tet whose centroid is inside the input (the input's fast winding number over 0.5, asked only where the size wants a split) and whose circumradius exceeds the field at its centroid is bad too. It is queued by the larger of its radius-edge ratio and the bound times its circumradius over the size, so without a field the queue and the meshes are exactly the quality-only ones. Tets in the outer box are refined for shape only. `Refined::steiner_size` counts the points split for size alone.
+  - **Budget:** a vertex budget and a step budget (insertion attempts, 64 a budgeted point), both deterministic. The vertex budget is `BUDGET_FACTOR` (8) times the meshing estimate at the element size (`sizing::point_budget`, now shared with the constrained kernel, which is unchanged). The estimate alone was too tight: shape refinement puts points where the input's features are small, which the size does not see, and 46 of 98 models stopped at it (tets under 1° up from 677,000 to 962,000); unbudgeted, models needed up to 6.5 times the estimate (98939) and 90 % of them 3.4 times or less.
+  - **Hand-over:** at either budget refinement stops and returns the points it has, with `Refined::stopped` saying why (`RefineError::Budget` or `RefineError::Work`). The enriched CDT recovers the input from any set of points, so the mesh is only coarser or worse shaped where refinement had not reached; Milestone 15's local operations take it from there. In the pipeline this is to be recorded as `MESH_BUDGET_EXCEEDED`, a warning, when the chain is wired in.
+  - Tests: `a_size_field_refines_inside_the_input` (a cube at size 0.25: no tet centred inside has a larger circumradius, the box keeps its coarse tets, and without a field the mesh is `refine_conforming`'s), `a_budget_stops_refinement_and_hands_over` (point and step budgets on a chamfered tetrahedron; the stopped mesh still makes an enriched CDT that rounds).
+  - `--example enriched`: `REFINE_SIZE` (element size over the diagonal, 0.03 as in the pipeline) sizes the budget, `REFINE_SIZING=1` refines to the sizing field for it, and the output gives the points split for size, the steps, the budget and why refinement stopped.
+  - **On the clean subset** (900 s each, eight runs sharing the machine):
+    - Without sizing: the 98 meshes are identical to the unbudgeted run, and no model stops at its budget.
+    - With sizing: 96 of 100. On the 96 meshed in both runs, sizing adds 1.6 % of tets in all and 4 % more tets under 1°; the smallest face angle rises on 11 models and falls on 8. 101548 and 500113 newly leave one input triangle unrecovered in the enriched CDT. No model stops at its budget.
+- [x] Exit criterion, on the clean subset (met Nov 11, 2026; `enriched` example, without sizing, 900 s a model, eight runs sharing the machine):
+  - **Refinement ends within its budget on every model.** None stops at it, with or without sizing; 104738's is the largest at 923,154 of 1,201,640 points. The two models that do not mesh, 104738 and 225958, time out in the enriched CDT, after refinement.
+  - **Minimum face angle** (98 meshed): on the 18 inputs with no angle under 1°, the smallest face angle in the mesh has a median of 1.01° (1.08° with sizing), from 0.00° to 19.5°, and 7 reach the paper's lowest average, 1.3° (the paper reports 3.6° average minimum face angle, 1.3° for the CDT alone). The other 80 inputs have needles under 1°, which a conforming mesh cannot beat; 35 of the 98 meshes (38 of 96 with sizing) have no face angle below their input's smallest.
+  - **Cost per model** (seconds; chamfering, refinement, enriched CDT, rounding):
+
+    | | Median | 90 % | Largest |
+    |---|---|---|---|
+    | Whole chain | 31.1 | 268.5 | 716.4 |
+    | Chamfering | 0.03 | | 2.0 |
+    | Refinement | 13.7 | | 339.8 |
+    | Enriched CDT | 13.3 | | 643.0 |
+    | Rounding | 0.66 | | 116.9 |
+
+    59 models take under a minute and 90 under five; the median mesh has 133,000 tets (2.4 million at most). With sizing the whole chain's median is 29.1 s (90 %: 227.7 s). The paper reports about 120 s a model and one 36-hour outlier.
 
 **Milestone 15: Worst-cell quality for finite volume.**
 

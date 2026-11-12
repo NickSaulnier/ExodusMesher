@@ -33,15 +33,27 @@
 //!   point: any point in the circumsphere would do), worst first, unless the
 //!   circumcentre encroaches a subsegment or a subface, which is split
 //!   instead. Segments, then faces, are always repaired first.
+//! - **Size** (optional, [`refine_with`]): a tet whose centroid is inside
+//!   the input and whose circumradius exceeds the size field there is bad
+//!   too, queued by the larger of its radius-edge ratio and the bound times
+//!   its circumradius over the size (so without a field the order is the
+//!   quality order).
+//! - **Budget**: refinement stops at a vertex budget or a step budget
+//!   (insertion attempts), both deterministic. [`refine_with`] then hands
+//!   over the points it has, recording why ([`Refined::stopped`]): the
+//!   enriched CDT recovers the input from any set of points, so the mesh is
+//!   only coarser or worse shaped where refinement had not reached.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::sync::Arc;
 
 use mesher_geom::implicit::{self, Kind, Point};
-use mesher_geom::{Point3, Sign};
+use mesher_geom::{FastWindingNumber, Point3, Sign, TriangleSoup};
 
 use crate::cdt::{DelaunayError, ExactDelaunay, GHOST, Inserted};
 use crate::chamfer::{ChamferVertex, FilteredChamfer};
+use crate::sizing::{SizeField, point_budget};
 
 mod enriched;
 mod plane;
@@ -65,6 +77,13 @@ pub enum RefineError {
         points: usize,
         limit: usize,
     },
+    /// More steps (insertion attempts) than the budget.
+    Work {
+        steps: u64,
+        limit: u64,
+    },
+    /// The input is not a surface the inside test can index.
+    Surface(String),
 }
 
 impl std::fmt::Display for RefineError {
@@ -78,6 +97,10 @@ impl std::fmt::Display for RefineError {
             RefineError::Budget { points, limit } => {
                 write!(f, "{points} points exceed the budget of {limit}")
             }
+            RefineError::Work { steps, limit } => {
+                write!(f, "{steps} steps exceed the work budget of {limit}")
+            }
+            RefineError::Surface(e) => write!(f, "{e}"),
         }
     }
 }
@@ -255,9 +278,9 @@ fn plane_weights(p: Point3, t: [Point3; 3]) -> [f64; 3] {
     ]
 }
 
-/// The circumcentre of tet `a b c d` and its circumradius over its shortest
-/// edge (f64), or `None` if it is flat to rounding.
-fn tet_quality(p: [Point3; 4]) -> Option<(Point3, f64)> {
+/// The circumcentre of tet `a b c d`, its circumradius over its shortest
+/// edge, and its circumradius (f64), or `None` if it is flat to rounding.
+fn tet_quality(p: [Point3; 4]) -> Option<(Point3, f64, f64)> {
     let [a, b, c, d] = p;
     let (u, v, w) = (sub(b, a), sub(c, a), sub(d, a));
     let det = dot(u, cross(v, w));
@@ -277,11 +300,12 @@ fn tet_quality(p: [Point3; 4]) -> Option<(Point3, f64)> {
         }
     }
     let ratio = radius / shortest;
-    (ratio.is_finite() && centre.iter().all(|x| x.is_finite())).then_some((centre, ratio))
+    (ratio.is_finite() && centre.iter().all(|x| x.is_finite())).then_some((centre, ratio, radius))
 }
 
-/// A bad tet in the queue: worst ratio first, then by vertices (a fixed
-/// order).
+/// A bad tet in the queue: worst first (by radius-edge ratio, or the bound
+/// times its circumradius over the size where larger), then by vertices (a
+/// fixed order).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct BadTet {
     ratio: f64,
@@ -372,10 +396,18 @@ pub struct Refined {
     /// plane rather than on a line (bridges): exactly on the triangle, but
     /// only near their segment.
     pub on_bridges: Vec<u32>,
+    /// Points inserted at tet circumcentres for size (not shape) alone.
+    pub steiner_size: usize,
+    /// Steps taken (insertion attempts).
+    pub steps: u64,
+    /// Why refinement stopped before it was done ([`RefineError::Budget`]
+    /// or [`RefineError::Work`]), handing over the points it had; `None`
+    /// when it finished.
+    pub stopped: Option<RefineError>,
 }
 
 /// Refinement under way.
-struct Refiner {
+struct Refiner<'a> {
     dt: ExactDelaunay,
     chains: Vec<Chain>,
     regions: Vec<Region>,
@@ -400,9 +432,15 @@ struct Refiner {
     /// Each vertex's approximate position ([`Point::approx`]), kept: the f64
     /// checks ask for the same vertices many times.
     approx: Vec<Point3>,
+    /// The target size, and the input's winding number to tell which tets
+    /// are inside it (only those are refined for size).
+    size: Option<(Arc<SizeField>, FastWindingNumber<'a>)>,
+    steiner_size: usize,
+    steps: u64,
+    max_work: u64,
 }
 
-impl Refiner {
+impl Refiner<'_> {
     fn pt(&self, v: u32) -> &Point {
         &self.dt.points()[v as usize]
     }
@@ -415,6 +453,7 @@ impl Refiner {
     /// or on the diametral sphere of, and mark their regions for checking.
     /// `None` if it equals a vertex.
     fn insert(&mut self, p: Point) -> Result<Option<u32>, RefineError> {
+        self.step()?;
         if self.dt.points().len() >= self.max_points {
             return Err(RefineError::Budget {
                 points: self.dt.points().len(),
@@ -427,6 +466,19 @@ impl Refiner {
         };
         self.inserted(m, &p);
         Ok(Some(m))
+    }
+
+    /// Count one step (an insertion attempt); an error once the work budget
+    /// is spent.
+    fn step(&mut self) -> Result<(), RefineError> {
+        self.steps += 1;
+        if self.steps > self.max_work {
+            return Err(RefineError::Work {
+                steps: self.steps,
+                limit: self.max_work,
+            });
+        }
+        Ok(())
     }
 
     /// After vertex `m` (at `p`) goes in: room for it in the per-vertex
@@ -852,16 +904,32 @@ impl Refiner {
         Ok(())
     }
 
-    /// Queue tet `t` if it is a live real tet over the radius-edge bound.
+    /// Queue tet `t` if it is a live real tet over the radius-edge bound,
+    /// or inside the input with a circumradius over the size at its
+    /// centroid.
     fn queue_if_bad(&mut self, t: u32) {
         let (Some(bound), Some(v)) = (self.quality, self.dt.tet(t)) else {
             return;
         };
         let p = v.map(|x| self.at(x));
-        if let Some((_, ratio)) = tet_quality(p) {
-            if ratio > bound {
-                self.bad.push(BadTet { ratio, tet: t, v });
+        let Some((_, ratio, radius)) = tet_quality(p) else {
+            return;
+        };
+        let mut key = ratio;
+        if let Some((field, winding)) = &self.size {
+            let centroid = [0, 1, 2].map(|k| (p[0][k] + p[1][k] + p[2][k] + p[3][k]) / 4.0);
+            let h = field.at(centroid);
+            // The winding number only where the size asks for a split.
+            if radius > h && winding.winding_number(centroid) > 0.5 {
+                key = key.max(bound * radius / h);
             }
+        }
+        if key > bound {
+            self.bad.push(BadTet {
+                ratio: key,
+                tet: t,
+                v,
+            });
         }
     }
 
@@ -869,6 +937,7 @@ impl Refiner {
     /// a subsegment or a subface near it (those of the tets it conflicts
     /// with), which is split instead.
     fn fix_tet(&mut self, c: Point3, near: u32) -> Result<(), RefineError> {
+        self.step()?;
         // Not outside the box (unencroached box sides keep circumcentres in;
         // a set-aside subface or the f64 sphere test could let one out).
         let (lo, hi) = self.bounds;
@@ -1004,13 +1073,17 @@ impl Refiner {
                 if self.stuck_tets.contains(&key) {
                     continue;
                 }
-                let Some((c, _)) = tet_quality(b.v.map(|x| self.at(x))) else {
+                let Some((c, ratio, _)) = tet_quality(b.v.map(|x| self.at(x))) else {
                     continue;
                 };
                 let before = self.dt.points().len();
+                let tets_before = self.steiner_tets;
                 let _s = crate::prof::scope("refine tets: fix");
                 self.fix_tet(c, b.tet)?;
                 drop(_s);
+                if ratio <= bound && self.steiner_tets > tets_before {
+                    self.steiner_size += 1;
+                }
                 if self.dt.points().len() == before {
                     self.stuck_tets.insert(key);
                 } else {
@@ -1070,7 +1143,12 @@ impl Refiner {
         }
     }
 
-    fn finish(self, vertex_of: Vec<Option<u32>>, box_corners: [u32; 8]) -> Refined {
+    fn finish(
+        self,
+        vertex_of: Vec<Option<u32>>,
+        box_corners: [u32; 8],
+        stopped: Option<RefineError>,
+    ) -> Refined {
         let mut subsegments = Vec::new();
         let mut on_bridges = Vec::new();
         for c in &self.chains {
@@ -1099,12 +1177,15 @@ impl Refiner {
             steiner_tets: self.steiner_tets,
             stuck_tets: self.stuck_tets.len(),
             on_bridges,
+            steiner_size: self.steiner_size,
+            steps: self.steps,
+            stopped,
         }
     }
 }
 
 /// The refiner, each chamfered-surface vertex's vertex, and the box corners.
-type SetUp = (Refiner, Vec<Option<u32>>, [u32; 8]);
+type SetUp<'a> = (Refiner<'a>, Vec<Option<u32>>, [u32; 8]);
 
 /// The projection axis for the plane of `tri`: the one along which its
 /// projected orientation is not zero (the largest normal component first).
@@ -1127,13 +1208,13 @@ fn axis_of(tri: [Point3; 3]) -> Option<(usize, bool)> {
 /// and a box's corners (its bounding box grown by `margin` of its diagonal)
 /// tetrahedralized, its segments and the box's edges as chains, its planar
 /// regions and the box's sides with their 2D triangulations.
-fn set_up(
+fn set_up<'a>(
     surface: &FilteredChamfer,
     points: &[Point3],
     triangles: &[[u32; 3]],
     margin: f64,
     max_points: usize,
-) -> Result<SetUp, RefineError> {
+) -> Result<SetUp<'a>, RefineError> {
     let c = &surface.chamfered;
     let mut used = vec![false; c.vertices.len()];
     for f in &c.faces {
@@ -1388,6 +1469,10 @@ fn set_up(
         steiner_faces: 0,
         steiner_tets: 0,
         approx,
+        size: None,
+        steiner_size: 0,
+        steps: 0,
+        max_work: u64::MAX,
     };
     Ok((refiner, vertex_of, box_corners))
 }
@@ -1413,7 +1498,7 @@ pub fn recover_segments_conforming(
     for region in &mut r.regions {
         region.dirty = false;
     }
-    let mut out = r.finish(vertex_of, box_corners);
+    let mut out = r.finish(vertex_of, box_corners, None);
     out.subfaces.clear();
     Ok(out)
 }
@@ -1434,7 +1519,90 @@ pub fn refine_conforming(
 ) -> Result<Refined, RefineError> {
     let (mut r, vertex_of, box_corners) = set_up(surface, points, triangles, margin, max_points)?;
     r.tets(bound)?;
-    Ok(r.finish(vertex_of, box_corners))
+    Ok(r.finish(vertex_of, box_corners, None))
+}
+
+/// How many times the meshing estimate ([`crate::sizing::point_budget`])
+/// refinement may insert. Shape refinement puts points where the input's
+/// features are small, which the size does not see: on the clean subset it
+/// needed up to 6.5 times the estimate at the default element size (98939),
+/// and 90 % of models 3.4 times or less.
+pub const BUDGET_FACTOR: usize = 8;
+
+/// The vertex budget [`refine_with`] sizes when given none:
+/// [`BUDGET_FACTOR`] times the estimate for meshing at `max_size`, or by
+/// `field`.
+#[must_use]
+pub fn refine_budget(
+    points: &[Point3],
+    triangles: &[[u32; 3]],
+    max_size: f64,
+    field: Option<&SizeField>,
+) -> usize {
+    BUDGET_FACTOR.saturating_mul(point_budget(points, triangles, max_size, field))
+}
+
+/// How far [`refine_with`] refines.
+#[derive(Debug, Clone)]
+pub struct RefineParams {
+    /// The box around the surface: its bounding box grown by this much of
+    /// its diagonal on every side.
+    pub margin: f64,
+    /// Tets with a larger circumradius over shortest edge are split (2 is
+    /// the paper's choice, a smallest face angle of about 14.47°).
+    pub bound: f64,
+    /// Target size by position: a tet whose centroid is inside the input
+    /// and whose circumradius exceeds the size there is split too. `None`:
+    /// shape alone, as the paper refines.
+    pub size: Option<Arc<SizeField>>,
+    /// The largest size (the job's element size), for the budget.
+    pub max_size: f64,
+    /// The vertex budget; `0` sizes it from the input and the size (see
+    /// [`refine_budget`]).
+    pub max_points: usize,
+    /// The step budget (insertion attempts); `0` is 64 a budgeted point.
+    pub max_work: u64,
+}
+
+/// [`refine_conforming`] with an optional size field and deterministic
+/// budgets. At a budget it stops and returns the points it has, with
+/// [`Refined::stopped`] saying why (the enriched CDT takes any set of
+/// points; Milestone 15 is to improve what refinement did not reach).
+///
+/// # Errors
+/// See [`RefineError`]; never [`RefineError::Budget`] or
+/// [`RefineError::Work`], which stop refinement instead.
+pub fn refine_with<'a>(
+    surface: &FilteredChamfer,
+    points: &'a [Point3],
+    triangles: &'a [[u32; 3]],
+    params: &RefineParams,
+) -> Result<Refined, RefineError> {
+    let field = params.size.as_deref();
+    let max_points = if params.max_points > 0 {
+        params.max_points
+    } else {
+        refine_budget(points, triangles, params.max_size, field)
+    };
+    let max_work = if params.max_work > 0 {
+        params.max_work
+    } else {
+        64 * max_points as u64
+    };
+    let (mut r, vertex_of, box_corners) =
+        set_up(surface, points, triangles, params.margin, max_points)?;
+    r.max_work = max_work;
+    if let Some(field) = &params.size {
+        let soup = TriangleSoup::new(points, triangles)
+            .map_err(|e| RefineError::Surface(e.to_string()))?;
+        r.size = Some((Arc::clone(field), FastWindingNumber::new(soup)));
+    }
+    let stopped = match r.tets(params.bound) {
+        Ok(()) => None,
+        Err(e @ (RefineError::Budget { .. } | RefineError::Work { .. })) => Some(e),
+        Err(e) => return Err(e),
+    };
+    Ok(r.finish(vertex_of, box_corners, stopped))
 }
 
 /// [`recover_segments_conforming`], then every planar region of the
@@ -1452,7 +1620,7 @@ pub fn recover_faces_conforming(
 ) -> Result<Refined, RefineError> {
     let (mut r, vertex_of, box_corners) = set_up(surface, points, triangles, margin, max_points)?;
     r.faces()?;
-    Ok(r.finish(vertex_of, box_corners))
+    Ok(r.finish(vertex_of, box_corners, None))
 }
 
 #[cfg(test)]
@@ -1591,7 +1759,7 @@ mod tests {
                 r.dt.tets()
                     .iter()
                     .filter_map(|t| tet_quality(t.map(|x| r.dt.points()[x as usize].approx())))
-                    .map(|(_, q)| q)
+                    .map(|(_, q, _)| q)
                     .fold(0.0f64, f64::max);
             assert!(
                 r.stuck_tets > 0 || worst <= 2.0,
@@ -1599,6 +1767,93 @@ mod tests {
             );
             // The cube's faces already leave its tets within the bound.
             assert!(name == "cube" || r.steiner_tets > 0, "{name}");
+        }
+    }
+
+    /// With a size field, tets inside the input whose circumradius exceeds
+    /// it are split too, and none outside it; without one, `refine_with`
+    /// makes the same mesh as `refine_conforming`.
+    #[test]
+    fn a_size_field_refines_inside_the_input() {
+        let (p, f) = cube();
+        let surface = chamfer_filtered(&p, &f, 1e-6).unwrap();
+        let shape = refine_conforming(&surface, &p, &f, 0.2, 500_000, 2.0).unwrap();
+        let mut params = RefineParams {
+            margin: 0.2,
+            bound: 2.0,
+            size: None,
+            max_size: 0.25,
+            max_points: 0,
+            max_work: 0,
+        };
+        let same = refine_with(&surface, &p, &f, &params).unwrap();
+        assert_eq!(same.dt.points(), shape.dt.points());
+        assert_eq!(same.steiner_size, 0);
+        assert!(same.stopped.is_none());
+        params.size = Some(Arc::new(SizeField::uniform(0.25)));
+        let sized = refine_with(&surface, &p, &f, &params).unwrap();
+        assert!(sized.stopped.is_none());
+        assert!(sized.steiner_size > 0);
+        sized.dt.check().unwrap();
+        sized.dt.check_delaunay().unwrap();
+        let inside = |q: Point3| q.iter().all(|&x| (0.0..=1.0).contains(&x));
+        let mut largest = 0.0f64;
+        for t in sized.dt.tets() {
+            let q = t.map(|x| sized.dt.points()[x as usize].approx());
+            let c = [0, 1, 2].map(|k| (q[0][k] + q[1][k] + q[2][k] + q[3][k]) / 4.0);
+            if inside(c) {
+                if let Some((_, _, r)) = tet_quality(q) {
+                    largest = largest.max(r);
+                }
+            }
+        }
+        assert!(largest <= 0.25, "circumradius {largest} inside");
+        // Outside the cube only shape refines: the box keeps its coarse tets.
+        let outside = sized.dt.points()[shape.dt.points().len()..]
+            .iter()
+            .filter(|q| !inside(q.approx()))
+            .count();
+        assert!(outside < sized.steiner_size, "{outside} new points outside");
+    }
+
+    /// At its budget refinement stops and hands over the points it has,
+    /// which the enriched CDT still meshes conformally.
+    #[test]
+    fn a_budget_stops_refinement_and_hands_over() {
+        let (p, f) = tetrahedron();
+        let surface = chamfer_filtered(&p, &f, 1e-6).unwrap();
+        let whole = refine_conforming(&surface, &p, &f, 0.2, 500_000, 2.0).unwrap();
+        let start = whole.dt.points().len()
+            - whole.steiner_segments
+            - whole.steiner_faces
+            - whole.steiner_tets;
+        for (max_points, max_work) in [(start + 10, 0), (0, 10)] {
+            let params = RefineParams {
+                margin: 0.2,
+                bound: 2.0,
+                size: None,
+                max_size: 1.0,
+                max_points,
+                max_work,
+            };
+            let r = refine_with(&surface, &p, &f, &params).unwrap();
+            assert!(
+                matches!(
+                    r.stopped,
+                    Some(RefineError::Budget { .. } | RefineError::Work { .. })
+                ),
+                "{:?}",
+                r.stopped
+            );
+            assert!(r.dt.points().len() < whole.dt.points().len());
+            if max_points > 0 {
+                assert!(r.dt.points().len() <= max_points);
+            } else {
+                assert!(r.steps <= 11);
+            }
+            r.dt.check().unwrap();
+            let e = enriched_cdt(&r, &surface, &p, &f, 1e-6, 0, 7).unwrap();
+            crate::cdt::round_region(e.region, &p, &f).unwrap();
         }
     }
 
@@ -1645,7 +1900,7 @@ mod tests {
                     .tets
                     .iter()
                     .filter_map(|t| tet_quality(t.map(|v| mesh.points[v as usize])))
-                    .map(|(_, q)| q)
+                    .map(|(_, q, _)| q)
                     .fold(0.0f64, f64::max);
                 assert!(worst <= 2.0 + 1e-9, "cube: radius-edge {worst}");
             }

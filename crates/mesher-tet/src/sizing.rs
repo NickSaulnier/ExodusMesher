@@ -85,6 +85,40 @@ impl std::fmt::Debug for SizeField {
     }
 }
 
+/// A vertex budget for meshing the region a closed, outward surface bounds
+/// at size `h`, or by `field` capped at `h`: 20 × (volume / h³ + the
+/// surface's area over its local size squared + the input's vertices),
+/// clamped to [10,000, 4,000,000]. Elements fill the volume at the maximum
+/// size, plus the surface at its local size; where the size is smaller, its
+/// graded layer (about h / gradation thick) adds ∫ 1/(h + g d)³ dd =
+/// 1/(2 g h²) per unit area over what the maximum size would put there.
+#[must_use]
+pub fn point_budget(
+    points: &[Point3],
+    triangles: &[[u32; 3]],
+    h: f64,
+    field: Option<&SizeField>,
+) -> usize {
+    let g = field.map_or(0.0, SizeField::gradation);
+    let (mut surface, mut volume) = (0.0f64, 0.0f64);
+    for t in triangles {
+        let [a, b, c] = t.map(|v| points[v as usize]);
+        let area = norm(cross(sub(b, a), sub(c, a))) / 2.0;
+        let local = field.map_or(h, |f| {
+            f.at(scale(add(add(a, b), c), 1.0 / 3.0)).clamp(f.min(), h)
+        });
+        surface += area / (local * local);
+        if g > 0.0 && local < h {
+            surface += area * (1.0 / (local * local) - 1.0 / (h * h)) / (2.0 * g);
+        }
+        // Relative to a vertex: far from the origin the products cancel.
+        let o = points[0];
+        volume += dot(sub(a, o), cross(sub(b, o), sub(c, o))) / 6.0;
+    }
+    let estimate = volume.abs() / h.powi(3) + surface + points.len() as f64;
+    ((20.0 * estimate) as usize).clamp(10_000, 4_000_000)
+}
+
 /// The closest point to `p` on the line through `a` and `b`.
 fn closest_point_on_line(p: Point3, a: Point3, b: Point3) -> Point3 {
     let d = sub(b, a);
