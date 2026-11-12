@@ -7,18 +7,34 @@
 //! exactly, or with no positive volume in floating point, which a
 //! finite-volume solver computes) is fixed, in
 //! order of preference, by moving one of its constructed vertices to a
-//! nearby f64 point (within a few ulps of the exact position, so the
-//! boundary moves by rounding only), or by a flip that removes it (a 2-3
-//! flip across a face, or edge removal), never across a boundary face or
-//! through a protected edge. Each fix is returned, for the report.
+//! nearby f64 point (within a few ulps of the exact position, then up to
+//! [`FAR_ULPS`], so the boundary moves by rounding only), by a flip that
+//! removes it (a 2-3 flip across a face, or edge removal), never across a
+//! boundary face or through a protected edge, or by moving two of its
+//! constructed vertices together. Each fix is returned, for the report.
+//!
+//! The far and paired moves are for slivers between near-coincident walls
+//! (two facets of the input less than an ulp apart, with flat tets
+//! between them): no single vertex can move within a few ulps without
+//! turning over another of its tets.
 
 use mesher_geom::Sign;
 use mesher_geom::implicit::Point;
 
 use super::{EDGES, ExactDelaunay, GHOST, face, sorted3};
 
-/// Ulps either way a coordinate may move from its rounded value.
+/// Ulps either way a coordinate may move from its rounded value, trying
+/// every offset.
 const MOVE_ULPS: i64 = 2;
+
+/// The farthest a coordinate may move, in ulps: beyond [`MOVE_ULPS`], each
+/// coordinate moves by `-r`, 0 or `r` for `r` doubling up to this. At 64
+/// ulps a point moves by under 1e-14 of its distance from the origin.
+const FAR_ULPS: i64 = 64;
+
+/// Unusable tets per untangling that may try paired moves, which weigh
+/// tens of thousands of positions each.
+const PAIR_TETS: usize = 32;
 
 /// Passes over the tets still inverted.
 const PASSES: usize = 8;
@@ -62,6 +78,39 @@ fn next_up(x: f64) -> f64 {
     }
     let bits = x.to_bits();
     f64::from_bits(if x > 0.0 { bits + 1 } else { bits - 1 })
+}
+
+/// Offsets in ulps per coordinate, nearest first: every one within `near`,
+/// then each coordinate `-r`, 0 or `r` for `r` doubling from `2 * near` up
+/// to [`FAR_ULPS`]. A fixed order: deterministic.
+fn offsets(near: i64) -> Vec<[i64; 3]> {
+    let norm = |o: &[i64; 3]| o.iter().map(|x| x * x).sum::<i64>();
+    let mut all: Vec<[i64; 3]> = Vec::new();
+    for a in -near..=near {
+        for b in -near..=near {
+            for c in -near..=near {
+                all.push([a, b, c]);
+            }
+        }
+    }
+    all.sort_by_key(|o| (norm(o), *o));
+    let mut r = 2 * near;
+    while r <= FAR_ULPS {
+        let mut ring: Vec<[i64; 3]> = Vec::new();
+        for a in [-r, 0, r] {
+            for b in [-r, 0, r] {
+                for c in [-r, 0, r] {
+                    if [a, b, c] != [0, 0, 0] {
+                        ring.push([a, b, c]);
+                    }
+                }
+            }
+        }
+        ring.sort_by_key(|o| (norm(o), *o));
+        all.extend(ring);
+        r *= 2;
+    }
+    all
 }
 
 /// The f64 `k` steps from `x` (`k` may be negative), through zero.
@@ -150,25 +199,15 @@ impl ExactDelaunay {
         bad
     }
 
-    /// Move constructed vertex `v` to the f64 point near `exact` (within
-    /// [`MOVE_ULPS`] per coordinate of its rounding) that leaves no inside
-    /// tet around it turned over and no more outside ones than now, nearest
-    /// first. Returns where it went.
+    /// Move constructed vertex `v` to the f64 point near `exact` (by
+    /// [`offsets`] of its rounding) that leaves no inside tet around it
+    /// turned over and no more outside ones than now, nearest first.
+    /// Returns where it went.
     fn try_move(&mut self, v: u32, exact: &Point, inside: &[bool]) -> Option<([f64; 3], [f64; 3])> {
         let from = self.points[v as usize].approx();
         let base = exact.approx();
         let (_, outside_now) = self.bad_around(v, inside);
-        let mut offsets: Vec<[i64; 3]> = Vec::new();
-        for a in -MOVE_ULPS..=MOVE_ULPS {
-            for b in -MOVE_ULPS..=MOVE_ULPS {
-                for c in -MOVE_ULPS..=MOVE_ULPS {
-                    offsets.push([a, b, c]);
-                }
-            }
-        }
-        // Nearest first (in ulps), then a fixed order: deterministic.
-        offsets.sort_by_key(|o| (o.iter().map(|x| x * x).sum::<i64>(), *o));
-        for o in offsets {
+        for o in offsets(MOVE_ULPS) {
             let to = [0, 1, 2].map(|k| step(base[k], o[k]));
             if to == from || !to.iter().all(|x| x.is_finite()) {
                 continue;
@@ -185,6 +224,56 @@ impl ExactDelaunay {
         if let Ok(p) = Point::explicit(from) {
             self.set_point(v, p);
         }
+        None
+    }
+
+    /// Move constructed vertices `a` and `b` together (each by
+    /// [`offsets`] within one ulp, then doubling) so that no inside tet
+    /// around either is unusable and no more outside ones are than now.
+    /// Returns the two moves.
+    fn try_pair(
+        &mut self,
+        [a, b]: [u32; 2],
+        exact: &[Point],
+        inside: &[bool],
+    ) -> Option<[Untangle; 2]> {
+        let (from_a, from_b) = (self.points[a as usize], self.points[b as usize]);
+        let (base_a, base_b) = (exact[a as usize].approx(), exact[b as usize].approx());
+        let (_, outside_a) = self.bad_around(a, inside);
+        let (_, outside_b) = self.bad_around(b, inside);
+        let offsets = offsets(1);
+        for oa in &offsets {
+            let to_a = [0, 1, 2].map(|k| step(base_a[k], oa[k]));
+            let Ok(pa) = Point::explicit(to_a) else {
+                continue;
+            };
+            self.set_point(a, pa);
+            for ob in &offsets {
+                let to_b = [0, 1, 2].map(|k| step(base_b[k], ob[k]));
+                let Ok(pb) = Point::explicit(to_b) else {
+                    continue;
+                };
+                self.set_point(b, pb);
+                let (in_a, out_a) = self.bad_around(a, inside);
+                let (in_b, out_b) = self.bad_around(b, inside);
+                if in_a == 0 && in_b == 0 && out_a <= outside_a && out_b <= outside_b {
+                    return Some([
+                        Untangle::Move {
+                            vertex: a,
+                            from: from_a.approx(),
+                            to: to_a,
+                        },
+                        Untangle::Move {
+                            vertex: b,
+                            from: from_b.approx(),
+                            to: to_b,
+                        },
+                    ]);
+                }
+            }
+        }
+        self.set_point(a, from_a);
+        self.set_point(b, from_b);
         None
     }
 
@@ -207,6 +296,7 @@ impl ExactDelaunay {
             .count();
         let flat = before.len() - inverted;
         let mut fixes = Vec::new();
+        let mut paired = 0;
         // Flips must give tets a solver can use, not just positive ones.
         self.float_positive = true;
         for _ in 0..PASSES {
@@ -269,6 +359,24 @@ impl ExactDelaunay {
                         }
                     }
                 }
+                // 3. Move two constructed vertices together.
+                if !fixed && paired < PAIR_TETS {
+                    paired += 1;
+                    let mine: Vec<u32> = tet
+                        .v
+                        .into_iter()
+                        .filter(|&v| movable.get(v as usize).copied().unwrap_or(false))
+                        .collect();
+                    'pairs: for (i, &x) in mine.iter().enumerate() {
+                        for &y in &mine[i + 1..] {
+                            if let Some(moves) = self.try_pair([x, y], exact, &inside) {
+                                fixes.extend(moves);
+                                fixed = true;
+                                break 'pairs;
+                            }
+                        }
+                    }
+                }
                 if fixed {
                     progress = true;
                     // Flips replace tets on one side of the walls; label anew.
@@ -305,7 +413,7 @@ mod tests {
     use mesher_geom::implicit::Point;
 
     use super::super::ExactDelaunay;
-    use super::{Untangle, step};
+    use super::{FAR_ULPS, MOVE_ULPS, Untangle, offsets, step};
 
     /// A cube's corners and a constructed point at its middle (an LNC point
     /// on the diagonal): every tet joins the middle to a hull triangle.
@@ -335,6 +443,35 @@ mod tests {
         assert!(u.left.is_empty(), "{:?}", u.left);
         assert!(matches!(u.fixes[0], Untangle::Move { vertex: 8, .. }));
         d.check().unwrap();
+    }
+
+    /// Every offset within the near cube comes first, nearest first, then
+    /// rings doubling out to the farthest; none repeats.
+    #[test]
+    fn offsets_go_from_near_to_far() {
+        let o = offsets(MOVE_ULPS);
+        let near = (2 * MOVE_ULPS + 1).pow(3) as usize;
+        assert_eq!(o[0], [0, 0, 0]);
+        assert!(
+            o[..near]
+                .iter()
+                .all(|v| v.iter().all(|x| x.abs() <= MOVE_ULPS))
+        );
+        assert!(
+            o[near..]
+                .iter()
+                .all(|v| v.iter().any(|x| x.abs() > MOVE_ULPS))
+        );
+        let norm = |v: &[i64; 3]| v.iter().map(|x| x * x).sum::<i64>();
+        assert!(o[..near].windows(2).all(|w| norm(&w[0]) <= norm(&w[1])));
+        assert_eq!(
+            o.last().map(|v| v.iter().map(|x| x.abs()).max()),
+            Some(Some(FAR_ULPS))
+        );
+        let mut sorted = o.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), o.len());
     }
 
     #[test]

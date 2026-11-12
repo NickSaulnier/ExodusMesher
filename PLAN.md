@@ -838,9 +838,14 @@ Tasks, in order:
       - On the 90 meshed in both runs, the kernel's median went from 17.4 s to 11.4 s and its total from 5,574 s to 3,671 s; refinement's median from 15.7 s to 12.7 s.
       - 104738 and 225958 still time out. Alone, 225958 fails at 1,730 s: two single-triangle facets, each carrying about 74,000 refined points, are still crossed by about 660 edges after 64 Steiner rounds, and the kernel spends its time on their cavities (546 s), protected edges (225 s) and faces (217 s).
       - 77922 and 1224385 now keep tets turned over after rounding (2 and 1), as 1501546 still does (3): the different refinement gives rounding tets it cannot untangle. With the earlier build 1224385 meshes, and with every build from the new walk start on it fails.
+  - **Rounding between near-coincident walls** (Nov 11, 2026). The tets left turned over in 77922, 1224385 and 1501546 were slivers, flat to within an ulp, between input facets less than an ulp apart (in 1224385 and 1501546 a layer of such tets, each with all its vertices within a few ulps of one plane). No single constructed vertex could move within 2 ulps without turning over another of its tets. Untangling (`cdt::delaunay::untangle`) now also:
+    - moves one constructed vertex further, each coordinate by -r, 0 or r for r doubling from 4 to 64 ulps (`FAR_ULPS`), still under 1e-14 of the point's distance from the origin; this fixed 1224385 (one vertex by 16 ulps) and two of 1501546's three tets;
+    - after the flips, moves two of the tet's constructed vertices together (every offset within one ulp, then doubling to 64), for at most 32 tets an untangling (`PAIR_TETS`); this fixed the rest (1501546 by 2 ulps, 77922 with one vertex by 32).
+    - Two other repairs were tried and dropped. Replacing the tet and the inside tets around it by the star of a new f64 point fails: the whole neighbourhood is in the sub-ulp layer, so every candidate point is on its plane. Moves that only lessen the unusable tets around a vertex added nothing once the far moves were in.
+    - Test: `offsets_go_from_near_to_far`. The synthetic golden reports are unchanged; `docs/report.md` says a move may reach 64 ulps and that a paired move gives two records.
+    - **On the clean subset:** 98 of 100 mesh, conform and round (95 before); the other 95 meshes are identical. Rounding's median is 0.6 s; the three models take 0.5 to 7 s to round.
   - **Open:**
     - the two timeouts (104738's refinement; 225958's large facets), and the kernel's time on the slowest models;
-    - rounding that leaves tets turned over (77922, 1224385, 1501546);
     - the 0° tets left (591216);
     - slivers (dihedral angles reach 0 in 60 meshes; the paper's sliver criterion is optional).
 - [ ] Refinement against the sizing field. Opt-in and under the work budget; it hands over to Milestone 15 on `MESH_BUDGET_EXCEEDED`
