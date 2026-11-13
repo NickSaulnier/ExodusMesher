@@ -512,6 +512,7 @@ pub fn remesh(
             smooth(&mut m, &input, v);
         }
     }
+    align_sharp_edges(&mut m);
 
     finish(&m)
 }
@@ -628,12 +629,47 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64) -> bool {
 /// valence-optimal triangles are often missing from the tetrahedralization
 /// of their vertices and cost a cascade of Steiner points.
 fn try_flip(m: &mut Mesh, u: u32, v: u32) -> bool {
-    if m.feature.contains(&key(u, v)) {
+    let Some(f) = flippable(m, u, v) else {
         return false;
+    };
+    let angle = |at: u32, x: u32, y: u32| {
+        let p = m.pos[at as usize];
+        let (d0, d1) = (
+            unit(sub(m.pos[x as usize], p)),
+            unit(sub(m.pos[y as usize], p)),
+        );
+        libm::acos(dot(d0, d1).clamp(-1.0, 1.0))
+    };
+    // A small margin keeps cocircular quads from flipping back and forth.
+    if angle(f.a, u, v) + angle(f.b, u, v) <= std::f64::consts::PI + 1e-9 {
+        return false;
+    }
+    flip(m, &f);
+    true
+}
+
+/// A flip of edge `uv`: `t1` holds u → v with third vertex `a`, `t2` holds
+/// v → u with third vertex `b`; the flip makes `[a, u, b]` and `[b, v, a]`.
+#[derive(Debug, Clone, Copy)]
+struct Flip {
+    u: u32,
+    v: u32,
+    t1: u32,
+    t2: u32,
+    a: u32,
+    b: u32,
+}
+
+/// Whether edge `uv` may flip: not a feature, two triangles nearly
+/// coplanar, the new edge not already present, the ends keeping a valence
+/// over 3, and the new triangles facing the old ones' way.
+fn flippable(m: &Mesh, u: u32, v: u32) -> Option<Flip> {
+    if m.feature.contains(&key(u, v)) {
+        return None;
     }
     let tris = m.edge_tris(u, v);
     let &[t1, t2] = tris.as_slice() else {
-        return false;
+        return None;
     };
     // Orient: t1 holds u → v.
     let has = |t: u32, a: u32, b: u32| {
@@ -642,7 +678,7 @@ fn try_flip(m: &mut Mesh, u: u32, v: u32) -> bool {
     };
     let (t1, t2) = if has(t1, u, v) { (t1, t2) } else { (t2, t1) };
     if !has(t1, u, v) || !has(t2, v, u) {
-        return false;
+        return None;
     }
     let third = |t: u32| {
         m.tris[t as usize]
@@ -653,26 +689,14 @@ fn try_flip(m: &mut Mesh, u: u32, v: u32) -> bool {
     };
     let (a, b) = (third(t1), third(t2));
     if a == b || m.neighbours(a).contains(&b) {
-        return false;
+        return None;
     }
     if m.neighbours(u).len() <= 3 || m.neighbours(v).len() <= 3 {
-        return false;
-    }
-    let angle = |at: u32, x: u32, y: u32| {
-        let p = m.pos[at as usize];
-        let (d0, d1) = (
-            unit(sub(m.pos[x as usize], p)),
-            unit(sub(m.pos[y as usize], p)),
-        );
-        libm::acos(dot(d0, d1).clamp(-1.0, 1.0))
-    };
-    // A small margin keeps cocircular quads from flipping back and forth.
-    if angle(a, u, v) + angle(b, u, v) <= std::f64::consts::PI + 1e-9 {
-        return false;
+        return None;
     }
     let (n1, n2) = (unit(m.tri_normal(t1)), unit(m.tri_normal(t2)));
     if dot(n1, n2) < 0.94 {
-        return false;
+        return None;
     }
     let p = |w: u32| m.pos[w as usize];
     let (na, nb) = (
@@ -683,15 +707,110 @@ fn try_flip(m: &mut Mesh, u: u32, v: u32) -> bool {
         .iter()
         .any(|&n| dot(n, n1) < 0.5 || dot(n, n2) < 0.5)
     {
-        return false;
+        return None;
     }
+    Some(Flip { u, v, t1, t2, a, b })
+}
+
+fn flip(m: &mut Mesh, f: &Flip) {
+    let Flip { u, v, t1, t2, a, b } = *f;
     m.tris[t1 as usize] = [a, u, b];
     m.tris[t2 as usize] = [b, v, a];
     m.unlink(u, t2);
     m.unlink(v, t1);
     m.vt[a as usize].push(t2);
     m.vt[b as usize].push(t1);
-    true
+}
+
+/// The smallest angle of the triangle `tri`, radians.
+fn smallest_angle(m: &Mesh, tri: [u32; 3]) -> f64 {
+    let p = tri.map(|w| m.pos[w as usize]);
+    (0..3)
+        .map(|k| {
+            let (d0, d1) = (
+                unit(sub(p[(k + 1) % 3], p[k])),
+                unit(sub(p[(k + 2) % 3], p[k])),
+            );
+            libm::acos(dot(d0, d1).clamp(-1.0, 1.0))
+        })
+        .fold(std::f64::consts::PI, f64::min)
+}
+
+/// Along a sharp feature edge (the solid's angle there under
+/// `SHARP_DEGREES`), the cell standing on both walls is the tet of the edge
+/// and the two triangles' far vertices. It is flat whatever its size, and
+/// its faces are far from orthogonal when the far vertices sit at opposite
+/// ends of the edge (twisted); best when both sit over the edge's middle,
+/// next best over the same end (at a 15° wedge: 77.5°, 67.7° and 72.1°).
+/// On the narrow walls beside a sharp edge the remesher's vertices often
+/// line up across the wall, so either diagonal of each quad is as good a
+/// triangle: on either wall, flip the edge from an end of the feature edge
+/// to the far vertex where that brings the far vertices together, keeping
+/// the flipped triangles' smallest angle at least half the old.
+fn align_sharp_edges(m: &mut Mesh) {
+    const SHARP_DEGREES: f64 = 60.0;
+    let cos_sharp = libm::cos((180.0 - SHARP_DEGREES).to_radians());
+    let mut edges: Vec<(u32, u32)> = m.feature.iter().copied().collect();
+    edges.sort_unstable();
+    for (u, v) in edges {
+        let tris = m.edge_tris(u, v);
+        let &[t1, t2] = tris.as_slice() else {
+            continue;
+        };
+        // Outward normals turned back on each other: a sharp edge.
+        if dot(unit(m.tri_normal(t1)), unit(m.tri_normal(t2))) > cos_sharp {
+            continue;
+        }
+        let along = sub(m.pos[v as usize], m.pos[u as usize]);
+        let length2 = dot(along, along);
+        if length2 <= 0.0 || length2.is_nan() {
+            continue;
+        }
+        let param = |w: u32| dot(sub(m.pos[w as usize], m.pos[u as usize]), along) / length2;
+        // Each wall's options: keep its far vertex, or flip the edge from
+        // u or v to it, which makes the next triangle's far vertex the
+        // feature edge's.
+        let options = |t: u32| {
+            let w = m.tris[t as usize]
+                .iter()
+                .copied()
+                .find(|&w| w != u && w != v)
+                .unwrap_or(u);
+            let mut out: Vec<(f64, Option<Flip>)> = vec![(param(w), None)];
+            for end in [u, v] {
+                let Some(f) = flippable(m, end, w) else {
+                    continue;
+                };
+                // The thirds of the flipped edge's triangles: the feature
+                // edge's other end, and the far vertex across.
+                let x = if f.a == u || f.a == v { f.b } else { f.a };
+                let old = smallest_angle(m, m.tris[f.t1 as usize])
+                    .min(smallest_angle(m, m.tris[f.t2 as usize]));
+                let new =
+                    smallest_angle(m, [f.a, f.u, f.b]).min(smallest_angle(m, [f.b, f.v, f.a]));
+                if new >= 0.5 * old {
+                    out.push((param(x), Some(f)));
+                }
+            }
+            out
+        };
+        let (o1, o2) = (options(t1), options(t2));
+        let score = |a: f64, b: f64| (a - 0.5).powi(2) + (b - 0.5).powi(2) + (a - b).powi(2);
+        let mut best = (score(o1[0].0, o2[0].0) - 1e-3, None);
+        for (i, (a, _)) in o1.iter().enumerate() {
+            for (j, (b, _)) in o2.iter().enumerate() {
+                let s = score(*a, *b);
+                if s < best.0 {
+                    best = (s, Some((i, j)));
+                }
+            }
+        }
+        if let (_, Some((i, j))) = best {
+            for f in [o1[i].1, o2[j].1].into_iter().flatten() {
+                flip(m, &f);
+            }
+        }
+    }
 }
 
 /// Move a vertex halfway to the centroid of its neighbours, in its tangent
@@ -952,6 +1071,87 @@ mod tests {
         // The six corners off the chamfer are kept.
         for corner in [0, 1, 4, 5, 6, 9] {
             assert!(r.points.contains(&p[corner]), "lost corner {corner}");
+        }
+    }
+
+    /// A prism on a triangle with a corner of `degrees` at the z axis: walls
+    /// `r` wide meeting at a sharp edge, `l` long.
+    fn wedge(degrees: f64, r: f64, l: f64) -> (Vec<Point3>, Vec<[u32; 3]>) {
+        let a = degrees.to_radians() / 2.0;
+        let (c, s) = (r * libm::cos(a), r * libm::sin(a));
+        let p = vec![
+            [0.0, 0.0, 0.0],
+            [c, -s, 0.0],
+            [c, s, 0.0],
+            [0.0, 0.0, l],
+            [c, -s, l],
+            [c, s, l],
+        ];
+        let f = vec![
+            [0, 2, 1],
+            [3, 4, 5],
+            [0, 1, 4],
+            [0, 4, 3],
+            [1, 2, 5],
+            [1, 5, 4],
+            [2, 0, 3],
+            [2, 3, 5],
+        ];
+        (p, f)
+    }
+
+    /// Along each sharp edge segment (the outward normals of its two
+    /// triangles more than 120° apart), where each triangle's far vertex
+    /// lies along the segment (0 at one end, 1 at the other).
+    fn sharp_segments(r: &Remeshed) -> Vec<(f64, f64)> {
+        let mut by_edge: HashMap<(u32, u32), Vec<(Point3, u32)>> = HashMap::new();
+        for t in &r.triangles {
+            let [a, b, c] = t.map(|v| r.points[v as usize]);
+            let n = unit(normal(a, b, c));
+            for k in 0..3 {
+                by_edge
+                    .entry(key(t[k], t[(k + 1) % 3]))
+                    .or_default()
+                    .push((n, t[(k + 2) % 3]));
+            }
+        }
+        let mut out: Vec<((u32, u32), (f64, f64))> = by_edge
+            .iter()
+            .filter_map(|(&(u, v), around)| {
+                let &[(n1, w1), (n2, w2)] = around.as_slice() else {
+                    return None;
+                };
+                if dot(n1, n2) > -0.5 {
+                    return None;
+                }
+                let (pu, pv) = (r.points[u as usize], r.points[v as usize]);
+                let along = sub(pv, pu);
+                let t = |w: u32| dot(sub(r.points[w as usize], pu), along) / dot(along, along);
+                Some(((u, v), (t(w1), t(w2))))
+            })
+            .collect();
+        out.sort_unstable_by_key(|x| x.0);
+        out.into_iter().map(|x| x.1).collect()
+    }
+
+    /// Beside a sharp edge the far vertices of the two triangles on each
+    /// segment never sit at opposite ends of it, where the cell on both
+    /// walls would be twisted (`align_sharp_edges`).
+    #[test]
+    fn sharp_edges_are_not_twisted() {
+        // Without the alignment 11, 5 and 3 of the 16 segments are twisted.
+        for (degrees, r) in [(15.0, 1.0), (20.0, 0.6), (30.0, 0.4)] {
+            let (p, f) = wedge(degrees, r, 2.3);
+            let s = remesh(&p, &f, &[], &|_| 0.2, &RemeshParams::default()).unwrap();
+            let sharp = sharp_segments(&s);
+            assert!(
+                sharp.len() >= 8,
+                "{degrees}°: {} sharp segments",
+                sharp.len()
+            );
+            for &(a, b) in &sharp {
+                assert!((a - b).abs() <= 0.5, "{degrees}°: twisted {a} {b}");
+            }
         }
     }
 

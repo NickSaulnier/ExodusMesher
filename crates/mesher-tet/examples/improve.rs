@@ -372,7 +372,9 @@ fn main() {
             let diagonal = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f64>().sqrt();
             let h = 0.03 * diagonal;
             // `IMPROVE_SIZE_FLOOR=k`: the size field's floor h/k (default 4);
-            // `IMPROVE_BOUNDARY_FLOOR=k`: the kernel's h/k (default 16).
+            // `IMPROVE_BOUNDARY_FLOOR=k`: the kernel's h/k (default 16);
+            // `IMPROVE_SMALL_FEATURE=f`: remeshing's small-feature merge
+            // threshold, a fraction of the target size (default 0.1).
             let floor = |name: &str, default: f64| {
                 std::env::var(name)
                     .ok()
@@ -395,7 +397,10 @@ fn main() {
                         &triangles,
                         &vec![0; triangles.len()],
                         &|q| field.at(q),
-                        &RemeshParams::default(),
+                        &RemeshParams {
+                            small_feature: floor("IMPROVE_SMALL_FEATURE", 0.1),
+                            ..RemeshParams::default()
+                        },
                     )
                 });
             let (surface_points, surface, groups) = match remeshed {
