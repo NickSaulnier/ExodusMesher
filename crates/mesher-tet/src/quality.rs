@@ -81,6 +81,48 @@ pub struct FvQuality {
     pub wall_max_non_orthogonality_degrees: f64,
     /// The largest skewness over the interior faces of wall-adjacent cells.
     pub wall_max_skewness: f64,
+    /// Where the worst values are (`None` for a mesh without cells or
+    /// faces of the kind): the tet with the smallest dihedral angle, and the
+    /// faces with the largest non-orthogonality and skewness, over all
+    /// interior faces and over the faces of wall-adjacent cells.
+    pub worst_dihedral: Option<WorstAt>,
+    pub worst_non_orthogonality: Option<WorstAt>,
+    pub worst_skewness: Option<WorstAt>,
+    pub wall_worst_non_orthogonality: Option<WorstAt>,
+    pub wall_worst_skewness: Option<WorstAt>,
+}
+
+/// Where a measure's worst value is.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WorstAt {
+    pub value: f64,
+    /// The cell (its index in the tets), for a face measure the first of
+    /// its two cells.
+    pub tet: usize,
+    /// For an interior face, the cell across it.
+    pub neighbour: Option<usize>,
+    /// The cell's centroid, or the face's for a face measure.
+    pub point: Point3,
+}
+
+/// Keep `c` in `slot` if it is worse: larger when `larger`, else smaller;
+/// ties go to the lower cell indices, so the result does not depend on the
+/// order the faces are visited in.
+fn keep(slot: &mut Option<WorstAt>, c: WorstAt, larger: bool) {
+    let worse = match slot {
+        None => !c.value.is_nan(),
+        Some(w) => {
+            let (a, b) = if larger {
+                (c.value, w.value)
+            } else {
+                (w.value, c.value)
+            };
+            a > b || (a == b && (c.tet, c.neighbour) < (w.tet, w.neighbour))
+        }
+    };
+    if worse {
+        *slot = Some(c);
+    }
 }
 
 /// The signed volume of a tet in floating point, the way a solver computes it.
@@ -137,12 +179,25 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
         dihedral_histogram: vec![0; 18],
         ..FvQuality::default()
     };
-    for t in tets {
-        let v = volume(corners(t));
+    for (i, t) in tets.iter().enumerate() {
+        let p = corners(t);
+        let v = volume(p);
         if v <= 0.0 || v.is_nan() {
             q.flat_in_float += 1;
         }
-        for a in dihedral_angles(corners(t)) {
+        let angles = dihedral_angles(p);
+        let least = angles.iter().copied().fold(f64::INFINITY, f64::min);
+        keep(
+            &mut q.worst_dihedral,
+            WorstAt {
+                value: least,
+                tet: i,
+                neighbour: None,
+                point: centroid(p),
+            },
+            false,
+        );
+        for a in angles {
             q.min_dihedral_degrees = q.min_dihedral_degrees.min(a);
             q.max_dihedral_degrees = q.max_dihedral_degrees.max(a);
             let bin = ((a / 10.0).floor().max(0.0) as usize).min(17);
@@ -184,6 +239,16 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
         if nn > 0.0 && dd > 0.0 {
             let angle = libm::acos((dot(d, n) / (nn * dd)).clamp(-1.0, 1.0)).to_degrees();
             q.wall_max_non_orthogonality_degrees = q.wall_max_non_orthogonality_degrees.max(angle);
+            keep(
+                &mut q.wall_worst_non_orthogonality,
+                WorstAt {
+                    value: angle,
+                    tet: i,
+                    neighbour: None,
+                    point: fc,
+                },
+                true,
+            );
         }
     }
     q.wall_cells = wall.iter().filter(|&&w| w).count();
@@ -214,9 +279,19 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
             norm(sub(fc, cj)) / dd
         };
         q.max_skewness = q.max_skewness.max(skew);
+        let at = |value| WorstAt {
+            value,
+            tet: j,
+            neighbour: Some(i),
+            point: fc,
+        };
+        keep(&mut q.worst_non_orthogonality, at(angle), true);
+        keep(&mut q.worst_skewness, at(skew), true);
         if wall[i] || wall[j] {
             q.wall_max_non_orthogonality_degrees = q.wall_max_non_orthogonality_degrees.max(angle);
             q.wall_max_skewness = q.wall_max_skewness.max(skew);
+            keep(&mut q.wall_worst_non_orthogonality, at(angle), true);
+            keep(&mut q.wall_worst_skewness, at(skew), true);
         }
         // Flat cells are counted in `flat_in_float`; a ratio against one
         // would be unbounded.
@@ -293,6 +368,47 @@ mod tests {
         assert!(q.wall_max_non_orthogonality_degrees >= corner - 1e-9);
         assert!(q.wall_max_non_orthogonality_degrees < 90.0);
         assert_eq!(q.wall_max_skewness, q.max_skewness);
+        // The worst values are located: the one interior face, between
+        // cells 0 and 1, at its centroid.
+        let face = [1.0 / 3.0; 3];
+        for w in [q.worst_non_orthogonality, q.worst_skewness] {
+            let w = w.expect("an interior face");
+            assert_eq!((w.tet, w.neighbour), (0, Some(1)));
+            assert!(w.point.iter().zip(face).all(|(a, b)| (a - b).abs() < 1e-12));
+        }
+        assert_eq!(
+            q.worst_non_orthogonality.map(|w| w.value),
+            Some(q.max_non_orthogonality_degrees)
+        );
+        let wall = q.wall_worst_non_orthogonality.expect("a boundary face");
+        assert_eq!(wall.value, q.wall_max_non_orthogonality_degrees);
+        assert_eq!(wall.neighbour, None);
+        let d = q.worst_dihedral.expect("a cell");
+        assert_eq!(d.value, q.min_dihedral_degrees);
+        // Mirror images tie; the lower index wins.
+        assert_eq!(d.tet, 0);
+    }
+
+    #[test]
+    fn worst_values_are_located_independently_of_tet_order() {
+        // A sliver among good tets: wherever it is in the list, it is found.
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0],
+            [0.0, 0.0, -0.01],
+        ];
+        let tets = [[0, 1, 2, 3], [4, 1, 3, 2], [5, 2, 1, 0]];
+        let q = fv_quality(&p, &tets);
+        assert_eq!(q.worst_dihedral.map(|w| w.tet), Some(2));
+        let reversed: Vec<[u32; 4]> = tets.iter().rev().copied().collect();
+        let r = fv_quality(&p, &reversed);
+        assert_eq!(r.worst_dihedral.map(|w| w.tet), Some(0));
+        assert_eq!(q.min_dihedral_degrees, r.min_dihedral_degrees);
+        assert!(q.min_dihedral_degrees < 5.0);
+        assert!(fv_quality(&p, &[]).worst_dihedral.is_none());
     }
 
     /// A neighbour flat in floating point is counted, not divided by: the

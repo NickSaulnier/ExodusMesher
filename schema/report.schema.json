@@ -644,6 +644,13 @@
         "volume": {
           "type": "number",
           "format": "double"
+        },
+        "worst_cells": {
+          "description": "Where the worst cells are: the smallest dihedral angle, and the\nlargest non-orthogonality and skewness over interior faces and,\nseparately, over the faces of wall-adjacent cells.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorstCell"
+          }
         }
       },
       "required": [
@@ -783,6 +790,26 @@
         "shells",
         "bounds",
         "selected"
+      ]
+    },
+    "QualityMeasure": {
+      "description": "A quality measure whose worst value is located.",
+      "oneOf": [
+        {
+          "description": "A cell's smallest dihedral angle, in degrees (the worst is smallest).",
+          "type": "string",
+          "const": "min_dihedral"
+        },
+        {
+          "description": "A face's angle between its normal and the line joining the cell\ncentroids, in degrees (on the boundary, the line from the cell's\ncentroid to the face's).",
+          "type": "string",
+          "const": "non_orthogonality"
+        },
+        {
+          "description": "A face's distance from its centroid to where the centroid line\ncrosses it, over the centroid distance.",
+          "type": "string",
+          "const": "skewness"
+        }
       ]
     },
     "Record": {
@@ -992,6 +1019,54 @@
       "required": [
         "name",
         "version"
+      ]
+    },
+    "WorstCell": {
+      "description": "The worst cell or face for one measure.",
+      "type": "object",
+      "properties": {
+        "element": {
+          "description": "The cell: its 1-based element number in the part's element block.\nFor a face measure, the first of the face's two cells.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "measure": {
+          "$ref": "#/$defs/QualityMeasure"
+        },
+        "neighbour": {
+          "description": "For an interior face, the cell across it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "point": {
+          "description": "The cell's centroid, or the face's for a face measure.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "value": {
+          "type": "number",
+          "format": "double"
+        },
+        "wall": {
+          "description": "Over the wall-adjacent cells only (cells with a boundary face; their\nboundary faces count for non-orthogonality).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "measure",
+        "value",
+        "element",
+        "point"
       ]
     }
   }

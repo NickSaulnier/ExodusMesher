@@ -25,9 +25,9 @@ use mesher_tet::cdt::{
 };
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
 use mesher_tet::{
-    ConformingError, ConformingParams, ImproveParams, RemeshParams, SizeField, SizingParams,
-    StuffingError, StuffingParams, conforming_mesh, fv_quality, improve, remesh, stuff,
-    stuff_graded,
+    ConformingError, ConformingParams, FvQuality, ImproveParams, RemeshParams, SizeField,
+    SizingParams, StuffingError, StuffingParams, WorstAt, conforming_mesh, fv_quality, improve,
+    remesh, stuff, stuff_graded,
 };
 
 use crate::diagnose::{InternalError, Tolerances};
@@ -36,11 +36,19 @@ use crate::model::SurfaceModel;
 use crate::repair::{RepairedPart, passes_gate};
 use crate::report::{
     Action, Attempt, AttemptOutcome, DefectCode, JobConfig, Kernel, KernelChoice, MeshSummary,
-    Outcome, Record, RecordLog, Severity, Stage,
+    Outcome, QualityMeasure, Record, RecordLog, Severity, Stage, WorstCell,
 };
 
 /// Slivers below this dihedral angle in a conformal mesh earn a quality warning.
 pub const SLIVER_DEGREES: f64 = 10.0;
+
+/// Faces beyond this non-orthogonality earn a quality warning (the target
+/// of `ImproveParams`).
+pub const MAX_NON_ORTHOGONALITY_DEGREES: f64 = 70.0;
+
+/// Faces beyond this skewness earn a quality warning (the target of
+/// `ImproveParams`).
+pub const MAX_SKEWNESS: f64 = 2.0;
 
 /// A part's accepted volume mesh.
 #[derive(Debug, Clone)]
@@ -548,20 +556,20 @@ fn exact(
 /// candidate is left as it was.
 /// A candidate's worst cell against the volume gate's quality limits:
 /// the smallest of its smallest dihedral angle over `SLIVER_DEGREES`, (90°
-/// − its worst non-orthogonality) over (90° − the target of
-/// `ImproveParams`), and the skewness target over its worst skewness. So 1
-/// is at the limits and smaller is worse; 0 for a candidate with no cells.
+/// − its worst non-orthogonality) over (90° −
+/// `MAX_NON_ORTHOGONALITY_DEGREES`), and `MAX_SKEWNESS` over its worst
+/// skewness. So 1 is at the limits and smaller is worse; 0 for a candidate
+/// with no cells.
 fn worst_cell(c: &Candidate) -> f64 {
     if c.tets.is_empty() {
         return 0.0;
     }
-    let targets = ImproveParams::default();
     let q = fv_quality(&c.points, &c.tets);
     let dihedral = q.min_dihedral_degrees / SLIVER_DEGREES;
     let non_orthogonality =
-        (90.0 - q.max_non_orthogonality_degrees) / (90.0 - targets.max_non_orthogonality_degrees);
+        (90.0 - q.max_non_orthogonality_degrees) / (90.0 - MAX_NON_ORTHOGONALITY_DEGREES);
     let skewness = if q.max_skewness > 0.0 {
-        targets.max_skewness / q.max_skewness
+        MAX_SKEWNESS / q.max_skewness
     } else {
         f64::INFINITY
     };
@@ -777,16 +785,47 @@ fn volume_gate(
         Kernel::Stuffing => (DIHEDRAL_MIN_DEGREES, DIHEDRAL_MAX_DEGREES),
         Kernel::Delaunay | Kernel::Exact => (SLIVER_DEGREES, 180.0 - SLIVER_DEGREES),
     };
+    // The worst cell of each measure beyond its limit, located: the cell's
+    // 1-based element number in the part's block, and its centroid (the
+    // face's, for a face measure).
+    let located = |rec: Record, w: Option<WorstAt>| match w {
+        Some(w) => {
+            let rec = rec.measured("element", w.tet as u64 + 1).point(w.point);
+            match w.neighbour {
+                Some(n) => rec.measured("neighbour", n as u64 + 1),
+                None => rec,
+            }
+        }
+        None => rec,
+    };
     if !tets.is_empty() && (q.min_dihedral_degrees < lo || q.max_dihedral_degrees > hi) {
-        log.push(
+        log.push(located(
             gate(DefectCode::VolLowQuality)
                 .measured("min_dihedral_degrees", q.min_dihedral_degrees)
                 .measured("max_dihedral_degrees", q.max_dihedral_degrees)
-                .measured("max_non_orthogonality_degrees", q.max_non_orthogonality_degrees)
                 .threshold("min_dihedral_degrees", lo)
                 .threshold("max_dihedral_degrees", hi)
-                .hint("a few low-quality cells remain; a finite-volume solver will lose some accuracy there"),
-        );
+                .hint("flat cells remain (located: the one with the smallest dihedral angle); a finite-volume solver will lose some accuracy there"),
+            q.worst_dihedral,
+        ));
+    }
+    if q.max_non_orthogonality_degrees > MAX_NON_ORTHOGONALITY_DEGREES {
+        log.push(located(
+            gate(DefectCode::VolLowQuality)
+                .measured("max_non_orthogonality_degrees", q.max_non_orthogonality_degrees)
+                .threshold("max_non_orthogonality_degrees", MAX_NON_ORTHOGONALITY_DEGREES)
+                .hint("faces whose normal is far from the line joining their cells' centroids (located: the worst); a solver needs strong non-orthogonal correction there"),
+            q.worst_non_orthogonality,
+        ));
+    }
+    if q.max_skewness > MAX_SKEWNESS {
+        log.push(located(
+            gate(DefectCode::VolLowQuality)
+                .measured("max_skewness", q.max_skewness)
+                .threshold("max_skewness", MAX_SKEWNESS)
+                .hint("faces whose centroid is far from where the line joining their cells' centroids crosses them (located: the worst); interpolation to the face loses accuracy there"),
+            q.worst_skewness,
+        ));
     }
     let single = VolumeMesh {
         points: points.clone(),
@@ -848,8 +887,41 @@ fn volume_gate(
         max_volume_ratio: finite(q.max_volume_ratio),
         hausdorff: finite(distance),
         hausdorff_relative: finite(relative),
+        worst_cells: worst_cells(&q),
     };
     Ok((accepted, summary))
+}
+
+/// The located worst values of a mesh's quality, for its summary.
+fn worst_cells(q: &FvQuality) -> Vec<WorstCell> {
+    [
+        (QualityMeasure::MinDihedral, false, q.worst_dihedral),
+        (
+            QualityMeasure::NonOrthogonality,
+            false,
+            q.worst_non_orthogonality,
+        ),
+        (QualityMeasure::Skewness, false, q.worst_skewness),
+        (
+            QualityMeasure::NonOrthogonality,
+            true,
+            q.wall_worst_non_orthogonality,
+        ),
+        (QualityMeasure::Skewness, true, q.wall_worst_skewness),
+    ]
+    .into_iter()
+    .filter_map(|(measure, wall, w)| {
+        let w = w?;
+        w.value.is_finite().then(|| WorstCell {
+            measure,
+            wall,
+            value: w.value,
+            element: w.tet as u64 + 1,
+            neighbour: w.neighbour.map(|n| n as u64 + 1),
+            point: w.point,
+        })
+    })
+    .collect()
 }
 
 /// One volume mesh from the accepted parts: an element block and a

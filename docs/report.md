@@ -98,7 +98,7 @@ These carry the measurements most often needed to act on them:
 | `MESH_WORKER_FAILED` | `reason`: `timeout` (with `timeout_seconds`), `out_of_memory` (with `memory_limit_bytes`), `cancelled`, `spawn_failed` (with `io_error`), `died` (with `exit_status`) or `unreadable_result` (the worker finished but its result line did not parse, with `parse_error`; a bug, exit 70); `stderr_tail`. After a timeout or out-of-memory, the client retries with stuffing only and the record becomes a warning with `fallback` / `applied` if that produced a mesh |
 | `MESH_ROUNDING_REPAIRED` | One record per fix of the exact kernel's rounding (`--kernel exact`): `fix` is `vertex_move` (a constructed point moved within 64 ulps per coordinate of its exact position, by `moved`; two records when two points move together), `flip_2_3` or `edge_removal`; `location.point` is where. Action `untangle` / `applied` |
 | `MESH_ROUNDING_FAILED` | `tets_left` still turned over or flat in floating point after untangling, `turned_over_before`, `fixes`; `location.point` is the first one. The conformal kernel and stuffing follow |
-| `VOL_LOW_QUALITY` | `min_dihedral_degrees` and `max_dihedral_degrees` against the kernel's bounds (10° and 170° for the constrained Delaunay kernel; 10.7° and 164.8°, the proven bounds, for stuffing), and `max_non_orthogonality_degrees` |
+| `VOL_LOW_QUALITY` | One record per measure beyond its limit: `min_dihedral_degrees` and `max_dihedral_degrees` against the kernel's bounds (10° and 170° for the constrained Delaunay kernel; 10.7° and 164.8°, the proven bounds, for stuffing); `max_non_orthogonality_degrees` against 70°; `max_skewness` against 2. Each is located at the worst cell: `element` (its 1-based number in the part's element block), for a face measure `neighbour` (the cell across the face), and the location's `point` (the cell's centroid, or the face's). An `info` record with `remesh/applied` instead says the surface was remeshed for quality: `input_worst_cell` and `remeshed_worst_cell` (1 is at the limits, smaller is worse) |
 | `VOL_BOUNDARY_DEVIATION` | `hausdorff` and `hausdorff_relative` against `max_deviation_relative` |
 | `VOL_INVERTED_TET` | `tets` not positive by the exact predicate (a kernel bug), or `flat_in_float`: tets positive by the exact predicate but with no positive volume when computed in floating point, as a solver computes it (flat to rounding). Either rejects the candidate mesh, and the next step of the fallback ladder runs |
 
@@ -146,7 +146,7 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `EXO_CAPACITY_EXCEEDED` | error | Mesh too large for the 64-bit-offset format | Error |
 | `OUT_WRITE_FAILED` | fatal | An output file could not be written | Fatal |
 
-`VOL_LOW_QUALITY` is raised when a mesh's dihedral angles fall outside its kernel's bounds; the other finite-volume metrics are reported in the mesh summary but not gated.
+`VOL_LOW_QUALITY` is raised, a warning, for each of a mesh's dihedral angles outside its kernel's bounds, its worst non-orthogonality over 70° and its worst skewness over 2 (the targets the cell improvement aims at). The volume ratio is reported in the mesh summary but not gated.
 
 ## Attempts
 
@@ -170,6 +170,7 @@ Each meshing attempt, in the order tried: `part`, `kernel` (`delaunay`, the cons
 | `max_skewness` | On interior faces, the distance from the face centroid to where the line joining the two cell centroids crosses the face, over the distance between the cell centroids |
 | `max_volume_ratio` | Largest volume ratio between neighbouring cells, over pairs whose floating-point volumes are both positive |
 | `hausdorff`, `hausdorff_relative` | Two-sided distance between the input surface and the mesh boundary (sampled at vertices and face centroids), absolute and relative to the part's diagonal; zero to rounding for a conformal mesh of the repaired surface |
+| `worst_cells` | Where the worst cells are, one entry per measure: `measure` (`min_dihedral`, `non_orthogonality` or `skewness`), `wall` (present for the worst over the wall-adjacent cells, those with a boundary face; their boundary faces count for non-orthogonality, by the line from the cell's centroid to the face's), `value`, `element` (the cell's 1-based number in the part's element block; for a face, the first of its two cells), `neighbour` (for an interior face, the cell across it) and `point` (the cell's centroid, or the face's). Entries in order: smallest dihedral angle, then non-orthogonality and skewness over every interior face, then both over the wall-adjacent cells. Ties go to the lowest element number |
 
 Every number is finite: JSON has no infinity or NaN. A value that could not be measured (the deviation of an empty mesh, for one) is written as -1.
 

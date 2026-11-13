@@ -706,6 +706,45 @@ pub struct MeshSummary {
     /// relative to the part's bounding-box diagonal.
     pub hausdorff: f64,
     pub hausdorff_relative: f64,
+    /// Where the worst cells are: the smallest dihedral angle, and the
+    /// largest non-orthogonality and skewness over interior faces and,
+    /// separately, over the faces of wall-adjacent cells.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worst_cells: Vec<WorstCell>,
+}
+
+/// A quality measure whose worst value is located.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityMeasure {
+    /// A cell's smallest dihedral angle, in degrees (the worst is smallest).
+    MinDihedral,
+    /// A face's angle between its normal and the line joining the cell
+    /// centroids, in degrees (on the boundary, the line from the cell's
+    /// centroid to the face's).
+    NonOrthogonality,
+    /// A face's distance from its centroid to where the centroid line
+    /// crosses it, over the centroid distance.
+    Skewness,
+}
+
+/// The worst cell or face for one measure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WorstCell {
+    pub measure: QualityMeasure,
+    /// Over the wall-adjacent cells only (cells with a boundary face; their
+    /// boundary faces count for non-orthogonality).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wall: bool,
+    pub value: f64,
+    /// The cell: its 1-based element number in the part's element block.
+    /// For a face measure, the first of the face's two cells.
+    pub element: u64,
+    /// For an interior face, the cell across it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neighbour: Option<u64>,
+    /// The cell's centroid, or the face's for a face measure.
+    pub point: [f64; 3],
 }
 
 /// Face and vertex counts through repair, and the surface gate's verdict.
