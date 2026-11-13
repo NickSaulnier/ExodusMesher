@@ -5,6 +5,7 @@
 //! decide topology. Floating-point arithmetic ([`vec3`]) is used only for
 //! measurements: distances, ray parameters, solid angles.
 
+pub mod arrangement;
 pub mod bvh;
 pub mod halfedge;
 pub mod implicit;
