@@ -412,6 +412,23 @@ impl RecordLog {
         self.count(Severity::Fatal) > 0
     }
 
+    /// The step that `part`'s findings were deferred to (`action`) has now
+    /// been taken: each of its records with that action and outcome
+    /// `deferred` becomes `applied`, keeping its severity. Returns how many.
+    pub fn deferred_applied(&mut self, part: &str, action: Action) -> usize {
+        let mut n = 0;
+        for r in &mut self.records {
+            if r.part.as_deref() == Some(part)
+                && r.action == Some(action)
+                && r.outcome == Some(Outcome::Deferred)
+            {
+                r.outcome = Some(Outcome::Applied);
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// A later step of the fallback ladder (`action`: `remesh` or `fallback`)
     /// meshed `part` and its mesh passed the volume gate, so the part's errors
     /// that sent it down the ladder were worked around: those from diagnosis,
@@ -501,8 +518,8 @@ pub struct JobConfig {
     /// or the part is thin).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub uniform_size: bool,
-    /// When the conformal mesh of a part fails, do not remesh its surface
-    /// and retry before the stuffing fallback.
+    /// Never remesh a part's surface (by default it is remeshed when its
+    /// conformal mesh fails or its cells are beyond the quality limits).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub no_remesh: bool,
     /// The volume kernel tried first.
@@ -849,6 +866,44 @@ mod tests {
     /// A part's surface errors become warnings once the fallback meshed it,
     /// including those over the per-code cap; other parts, other stages and
     /// the repair guard keep theirs.
+    #[test]
+    fn a_deferred_remesh_becomes_applied() {
+        let mut log = RecordLog::new();
+        for part in ["a", "b"] {
+            log.push(
+                Record::new(DefectCode::QualSliverFace, Stage::Diagnose)
+                    .part(part)
+                    .action(Action::Remesh, Outcome::Deferred),
+            );
+        }
+        log.push(
+            Record::new(DefectCode::IntSelfIntersection, Stage::Diagnose)
+                .part("a")
+                .action(Action::Fallback, Outcome::Deferred),
+        );
+        assert_eq!(log.deferred_applied("a", Action::Remesh), 1);
+        assert_eq!(log.deferred_applied("a", Action::Remesh), 0);
+        let outcome = |part: &str, code| {
+            log.records()
+                .iter()
+                .find(|r| r.part.as_deref() == Some(part) && r.code == code)
+                .and_then(|r| r.outcome)
+        };
+        assert_eq!(
+            outcome("a", DefectCode::QualSliverFace),
+            Some(Outcome::Applied)
+        );
+        assert_eq!(
+            outcome("b", DefectCode::QualSliverFace),
+            Some(Outcome::Deferred)
+        );
+        assert_eq!(
+            outcome("a", DefectCode::IntSelfIntersection),
+            Some(Outcome::Deferred)
+        );
+        assert_eq!(log.count(Severity::Warning), 2);
+    }
+
     #[test]
     fn fallback_downgrades_the_errors_that_sent_a_part_there() {
         let mut log = RecordLog::new();

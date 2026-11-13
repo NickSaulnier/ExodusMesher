@@ -44,7 +44,7 @@ mesher: model.obj
 | `--max-deviation F` | Largest acceptable fallback deviation, relative to the diagonal (default 0.05) |
 | `--strict` | Conformal meshes only; never use the stuffing fallback |
 | `--uniform-size` | Mesh at the element size everywhere (by default the size is graded down to a quarter of it where the surface curves or the part is thin) |
-| `--no-remesh` | When a part's conformal mesh fails, skip remeshing its surface and retrying before the stuffing fallback |
+| `--no-remesh` | Keep each part's own surface triangulation: never remesh it (by default a part's surface is remeshed to the element size when its conformal mesh fails or its cells are beyond the quality limits) |
 | `--kernel exact` | Try the exact constrained Delaunay kernel first: the surface tetrahedralized exactly and rounded to f64, without refinement (so few, often thin, tets); the conformal kernel and stuffing follow if it fails. Default `conformal` |
 | `--no-repair` | Diagnose and report only (a linter) |
 | `--timeout S`, `--memory-limit MiB` | Limits for the worker (defaults 3600 s, 8192 MiB) |

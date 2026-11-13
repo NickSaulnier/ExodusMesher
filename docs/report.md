@@ -30,7 +30,7 @@ The same input and settings give a byte-identical report.
 | `max_deviation` | Largest acceptable distance between the mesh boundary and the surface, relative to the part's bounding-box diagonal (default 0.05) |
 | `element_size` | Target element size, relative to the part's bounding-box diagonal (default 0.03): the largest size anywhere |
 | `uniform_size` | Present (true) when the size was not graded |
-| `no_remesh` | Present (true) when the remesh-and-retry step was turned off |
+| `no_remesh` | Present (true) when remeshing a part's surface was turned off |
 | `stuffing_only` | Present (true) when the client retried a worker that timed out or ran out of memory with the stuffing fallback only |
 
 ## Parts

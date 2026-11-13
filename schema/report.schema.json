@@ -437,7 +437,7 @@
           "default": 0.05
         },
         "no_remesh": {
-          "description": "When the conformal mesh of a part fails, do not remesh its surface\nand retry before the stuffing fallback.",
+          "description": "Never remesh a part's surface (by default it is remeshed when its\nconformal mesh fails or its cells are beyond the quality limits).",
           "type": "boolean"
         },
         "no_repair": {

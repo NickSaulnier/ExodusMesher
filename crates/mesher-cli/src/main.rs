@@ -63,8 +63,9 @@ struct RunArgs {
     /// the surface curves or the part is thin.
     #[arg(long)]
     uniform_size: bool,
-    /// When a part's conformal mesh fails, go straight to the stuffing
-    /// fallback instead of remeshing its surface and retrying.
+    /// Keep each part's own surface triangulation: never remesh it (by
+    /// default a part's surface is remeshed to the element size when its
+    /// conformal mesh fails or its cells are beyond the quality limits).
     #[arg(long)]
     no_remesh: bool,
     /// The volume kernel tried first: `conformal` (refined to the element

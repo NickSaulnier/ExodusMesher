@@ -396,7 +396,7 @@ impl App {
                     ui.end_row();
                     ui.label("No remesh");
                     theme::switch(ui, &mut s.no_remesh);
-                    ui.label(theme::dim("no remesh-and-retry before the fallback").small());
+                    ui.label(theme::dim("keep the input's surface triangulation").small());
                     ui.end_row();
                     ui.label("Exact kernel").on_hover_text(
                         "Tetrahedralize the surface exactly and round to f64, before the \

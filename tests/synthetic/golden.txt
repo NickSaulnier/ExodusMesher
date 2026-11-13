@@ -61,8 +61,8 @@ non-manifold vertex (cubes sharing a corner) [x10000 +-50000]	MESH_RECOVERY_FAIL
 inconsistent orientation, one face [x1 +0]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 4268 15.0 20.5
 inconsistent orientation, one face [x0.001 +1000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 4374 15.0 20.6
 inconsistent orientation, one face [x10000 +-50000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 4394 15.0 20.6
-inconsistent orientation, five faces [x1 +0]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 1978 12.1 21.0
-inconsistent orientation, five faces [x0.001 +1000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 2023 15.1 21.5
+inconsistent orientation, five faces [x1 +0]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 1996 15.1 20.9
+inconsistent orientation, five faces [x0.001 +1000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 2027 15.1 21.3
 inconsistent orientation, five faces [x10000 +-50000]	TOP_INCONSISTENT_ORIENTATION info reorient/applied x1; TOP_INCONSISTENT_ORIENTATION warning reorient/deferred x1	0 delaunay accepted 1982 15.0 21.1
 inverted cube [x1 +0]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4268 15.0 20.5
 inverted cube [x0.001 +1000]	TOP_INVERTED_SHELL info flip/applied x1; TOP_INVERTED_SHELL warning flip/deferred x1	0 delaunay accepted 4374 15.0 20.6
@@ -94,8 +94,8 @@ part inside another part [x10000 +-50000]	PART_OVERLAP error x1	0 delaunay accep
 selecting a missing part [x1 +0]	PART_EMPTY_SELECTION fatal abort/applied x1	
 selecting a missing part [x0.001 +1000]	PART_EMPTY_SELECTION fatal abort/applied x1	
 selecting a missing part [x10000 +-50000]	PART_EMPTY_SELECTION fatal abort/applied x1	
-sliver face [x1 +0]	QUAL_SLIVER_FACE warning remesh/deferred x1; VOL_LOW_QUALITY warning x1	0 delaunay accepted 4407 6.9 20.9
-sliver face [x0.001 +1000]	QUAL_SLIVER_FACE warning remesh/deferred x1; VOL_LOW_QUALITY warning x1	0 delaunay accepted 4339 5.2 21.1
-sliver face [x10000 +-50000]	QUAL_SLIVER_FACE warning remesh/deferred x1; VOL_LOW_QUALITY warning x1	0 delaunay accepted 4353 3.5 20.7
+sliver face [x1 +0]	QUAL_SLIVER_FACE warning remesh/applied x1; VOL_LOW_QUALITY info remesh/applied x1	0 delaunay accepted 5891 15.0 22.4
+sliver face [x0.001 +1000]	QUAL_SLIVER_FACE warning remesh/applied x1; VOL_LOW_QUALITY info remesh/applied x1	0 delaunay accepted 5216 15.0 21.2
+sliver face [x10000 +-50000]	QUAL_SLIVER_FACE warning remesh/applied x1; VOL_LOW_QUALITY info remesh/applied x1	0 delaunay accepted 5902 15.0 22.4
 tiny model [x1 +0]	QUAL_SUSPECT_SCALE info x1	0 delaunay accepted 4374 15.0 20.7
 huge model [x1 +0]	QUAL_SUSPECT_SCALE info x1	0 delaunay accepted 4330 15.1 20.6

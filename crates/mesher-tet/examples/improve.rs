@@ -8,7 +8,10 @@
 //! the diagonal, graded by the size field; `IMPROVE_KERNEL=exact` for the
 //! exact kernel rounded to f64), then improves it (`IMPROVE_TARGET` degrees,
 //! 15 by default; `IMPROVE_NONORTH` and `IMPROVE_SKEW` for the face
-//! targets, `IMPROVE_FV=0` to turn them off). Prints, per file, before and
+//! targets, `IMPROVE_FV=0` to turn them off; `IMPROVE_SPLITS=0`,
+//! `IMPROVE_COLLAPSES=0` and `IMPROVE_INSERT=0` to leave those operations
+//! out). `IMPROVE_REMESH=1` remeshes the surface to the size field first,
+//! as the pipeline's fallback does. Prints, per file, before and
 //! after: tets, the smallest dihedral angle, tets under 1° and under 10°,
 //! tets flat in floating point, the largest non-orthogonality and skewness,
 //! and both over wall-adjacent cells; then the operations and the
@@ -28,8 +31,8 @@ use std::time::Instant;
 use mesher_geom::Point3;
 use mesher_tet::cdt::{mesh_region, round_region};
 use mesher_tet::{
-    ConformingParams, ImproveParams, SizeField, SizingParams, conforming_mesh, dihedral_angles,
-    fv_quality, improve,
+    ConformingParams, ImproveParams, RemeshParams, SizeField, SizingParams, conforming_mesh,
+    dihedral_angles, fv_quality, improve, remesh,
 };
 
 fn describe(points: &[Point3], tets: &[[u32; 4]]) -> String {
@@ -166,7 +169,39 @@ fn worst_face(points: &[Point3], tets: &[[u32; 4]]) -> String {
                     thick / edge
                 )
             };
-            let cells_text: Vec<String> = cells.iter().map(|&(t, _)| describe(t)).collect();
+            let mut cells_text: Vec<String> = cells.iter().map(|&(t, _)| describe(t)).collect();
+            // The free vertex of the face, and its star: per tet, the
+            // boundary vertices, the smallest angle and the free vertex's
+            // height over the opposite face, over that face's longest edge.
+            if let Some(&v) = key.iter().find(|&&v| !on_wall[v as usize]) {
+                let mut star = String::new();
+                for (t, tet) in tets.iter().enumerate() {
+                    let Some(m) = tet.iter().position(|&w| w == v) else {
+                        continue;
+                    };
+                    let q = p(t);
+                    let o: Vec<Point3> = (0..4).filter(|&k| k != m).map(|k| q[k]).collect();
+                    let (u, w) = (sub(o[1], o[0]), sub(o[2], o[0]));
+                    let n = [
+                        u[1] * w[2] - u[2] * w[1],
+                        u[2] * w[0] - u[0] * w[2],
+                        u[0] * w[1] - u[1] * w[0],
+                    ];
+                    let nl = n.iter().map(|x| x * x).sum::<f64>().sqrt();
+                    let d = sub(q[m], o[0]);
+                    let h = (n[0] * d[0] + n[1] * d[1] + n[2] * d[2]).abs() / nl;
+                    let e = (0..3)
+                        .map(|k| {
+                            let x = sub(o[(k + 1) % 3], o[k]);
+                            (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt()
+                        })
+                        .fold(0.0, f64::max);
+                    let fixed = tet.iter().filter(|&&w| on_wall[w as usize]).count();
+                    let min = dihedral_angles(q).into_iter().fold(180.0, f64::min);
+                    star += &format!(" ({fixed}w {min:.1}° h/e {:.3})", h / e);
+                }
+                cells_text.push(format!("star of {v}:{star}"));
+            }
             worst = (
                 angle,
                 format!(
@@ -245,11 +280,37 @@ fn main() {
             let diagonal = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f64>().sqrt();
             let h = 0.03 * diagonal;
             let field = SizeField::from_surface(&points, &triangles, &SizingParams::for_size(h));
+            // `IMPROVE_REMESH=1`: the surface remeshed to the size field
+            // first, each triangle its own facet, as the pipeline's
+            // fallback does.
+            let remeshed = std::env::var("IMPROVE_REMESH")
+                .is_ok_and(|s| s == "1")
+                .then(|| {
+                    remesh(
+                        &points,
+                        &triangles,
+                        &vec![0; triangles.len()],
+                        &|q| field.at(q),
+                        &RemeshParams::default(),
+                    )
+                });
+            let (surface_points, surface, groups) = match remeshed {
+                Some(Ok(r)) => {
+                    let n = r.triangles.len() as u32;
+                    (r.points, r.triangles, (0..n).collect())
+                }
+                Some(Err(e)) => {
+                    println!("{path}	failed	remesh: {e}	0");
+                    continue;
+                }
+                None => (points.clone(), triangles.clone(), Vec::new()),
+            };
             let params = ConformingParams {
                 size: (!field.is_uniform()).then(|| Arc::new(field)),
+                groups,
                 ..ConformingParams::with_size(h)
             };
-            conforming_mesh(&points, &triangles, &params)
+            conforming_mesh(&surface_points, &surface, &params)
                 .map_err(|e| e.to_string())
                 .map(|m| (m.points, m.tets))
         };
@@ -272,6 +333,7 @@ fn main() {
                 max_skewness: skewness,
                 collapses: std::env::var("IMPROVE_COLLAPSES").map_or(true, |s| s != "0"),
                 splits: std::env::var("IMPROVE_SPLITS").map_or(true, |s| s != "0"),
+                insertions: std::env::var("IMPROVE_INSERT").map_or(true, |s| s != "0"),
                 ..ImproveParams::default()
             },
         );
@@ -283,12 +345,13 @@ fn main() {
         let after = describe(&r.points, &r.tets);
         let s = r.stats;
         println!(
-            "{path}\tok\t{before}\t{after}\t{} flips, {} edge removals, {} moves, {} collapses, {} splits, {} passes, poor {} -> {}, min {:.4} -> {:.4}\t{t_mesh:.2}\t{t_improve:.2}",
+            "{path}\tok\t{before}\t{after}\t{} flips, {} edge removals, {} moves, {} collapses, {} splits, {} insertions, {} passes, poor {} -> {}, min {:.4} -> {:.4}\t{t_mesh:.2}\t{t_improve:.2}",
             s.flips,
             s.edge_removals,
             s.moves,
             s.collapses,
             s.splits,
+            s.insertions,
             s.passes,
             s.poor_before,
             s.poor_after,

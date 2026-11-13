@@ -170,89 +170,125 @@ fn mesh_part(
         }
     };
 
-    // 1. Direct: conforming Delaunay, for a surface that passed the gate.
+    // 1. The repaired surface as it is, conforming Delaunay, for a surface
+    // that passed the gate; and 2. the surface remeshed to the size field,
+    // when the first fails or its worst cell is beyond the quality limits
+    // (`worst_cell`). A remeshed surface has well-shaped, nearly Delaunay
+    // triangles, which the constrained kernel recovers far more easily than
+    // many inputs, and the cells on it are far better than on long, thin
+    // input triangles (Milestone 15: on the Thingi10k subset, wall-adjacent
+    // non-orthogonality 70° against 82°). But it follows the input only to
+    // the element size (a curved part loses some volume), so a clean input
+    // keeps its own triangulation. Of two meshes, the one with the better
+    // worst cell goes to the volume gate first; the remeshed one must be
+    // strictly better. `--no-remesh` keeps the input's triangulation.
     let mut conformal_failure: Option<Record> = None;
     if r.summary.gate_passed && !config.stuffing_only {
+        let mut candidates: Vec<(Candidate, Option<usize>)> = Vec::new();
+        let mut exact_worst = None;
         match conformal(model, r, h, config, false) {
             Ok(c) => {
-                let (accepted, summary) =
-                    volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;
-                outcome.attempts.push(attempt(Kernel::Delaunay, accepted));
-                outcome.summaries.push((r.part, summary));
-                if accepted {
-                    settle(log, exact_failure, true);
-                    outcome.meshed.push(MeshedPart {
-                        part: r.part,
-                        name: name.to_owned(),
-                        kernel: Kernel::Delaunay,
-                        points: c.points,
-                        tets: c.tets,
-                        face_groups: c.face_groups,
-                    });
-                    return Ok(());
-                }
-                conformal_failure = Some(
-                    Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
-                        .part(name)
-                        .hint("the conformal mesh failed the volume gate"),
-                );
+                exact_worst = Some(worst_cell(&c));
+                candidates.push((c, None));
             }
             Err(record) => {
                 outcome.attempts.push(attempt(Kernel::Delaunay, false));
                 conformal_failure = Some((*record).part(name));
             }
         }
-    }
-
-    // 1b. Remesh and retry once: a surface remeshed to the size field has
-    // well-shaped, nearly Delaunay triangles, which the constrained kernel
-    // recovers far more easily than many inputs. The mesh then conforms to
-    // the remeshed surface; the volume gate measures its deviation from the
-    // repaired one.
-    if conformal_failure.is_some() && !config.no_remesh {
-        match remeshed(model, r, h, config) {
-            Ok((triangles, c)) => {
-                let (accepted, summary) =
-                    volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;
-                outcome.attempts.push(Attempt {
-                    remeshed: true,
-                    ..attempt(Kernel::Delaunay, accepted)
-                });
-                outcome.summaries.retain(|(i, _)| *i != r.part);
-                outcome.summaries.push((r.part, summary));
-                if accepted {
-                    // A first candidate the volume gate rejected is now
-                    // worked around.
-                    log.worked_around(name, Action::Remesh);
-                    outcome.meshed.push(MeshedPart {
-                        part: r.part,
-                        name: name.to_owned(),
-                        kernel: Kernel::Delaunay,
-                        points: c.points,
-                        tets: c.tets,
-                        face_groups: c.face_groups,
+        let mut remesh_failure: Option<String> = None;
+        let mut remeshed_worst = None;
+        if !config.no_remesh && exact_worst.is_none_or(|w| w < 1.0) {
+            match remeshed(model, r, h, config) {
+                Ok((triangles, c)) => {
+                    let w = worst_cell(&c);
+                    remeshed_worst = Some(w);
+                    if exact_worst.is_some_and(|e| w > e) {
+                        candidates.insert(0, (c, Some(triangles)));
+                    } else {
+                        candidates.push((c, Some(triangles)));
+                    }
+                }
+                Err(reason) => {
+                    outcome.attempts.push(Attempt {
+                        remeshed: true,
+                        ..attempt(Kernel::Delaunay, false)
                     });
-                    if let Some(rec) = conformal_failure {
-                        log.push(
+                    remesh_failure = Some(reason);
+                }
+            }
+        }
+        for (i, (c, remeshed_triangles)) in candidates.into_iter().enumerate() {
+            let (accepted, summary) = volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;
+            outcome.attempts.push(Attempt {
+                remeshed: remeshed_triangles.is_some(),
+                ..attempt(Kernel::Delaunay, accepted)
+            });
+            outcome.summaries.retain(|(i, _)| *i != r.part);
+            outcome.summaries.push((r.part, summary));
+            if accepted {
+                if i > 0 {
+                    // The first candidate's gate rejections are worked
+                    // around by this one.
+                    log.worked_around(
+                        name,
+                        if remeshed_triangles.is_some() {
+                            Action::Remesh
+                        } else {
+                            Action::Fallback
+                        },
+                    );
+                }
+                if let Some(triangles) = remeshed_triangles {
+                    // Findings deferred to remeshing are now dealt with.
+                    log.deferred_applied(name, Action::Remesh);
+                    let rec = match conformal_failure.take() {
+                        // The repaired surface did not mesh: remeshing
+                        // worked around it.
+                        Some(rec) => {
                             rec.severity(Severity::Warning)
                                 .measured("remeshed_triangles", triangles as u64)
-                                .action(Action::Remesh, Outcome::Applied),
-                        );
-                    }
-                    settle(log, exact_failure, true);
-                    return Ok(());
+                                .action(Action::Remesh, Outcome::Applied)
+                        }
+                        // It meshed, with poor cells: the boundary
+                        // triangulation is no longer the input's, so say so.
+                        None => {
+                            Record::new(DefectCode::VolLowQuality, Stage::VolumeMesh)
+                                .part(name)
+                                .severity(Severity::Info)
+                                .measured("input_worst_cell", exact_worst.unwrap_or(0.0))
+                                .measured("remeshed_worst_cell", remeshed_worst.unwrap_or(0.0))
+                                .measured("remeshed_triangles", triangles as u64)
+                                .threshold("worst_cell", 1.0)
+                                .action(Action::Remesh, Outcome::Applied)
+                                .hint("the input's triangulation gave cells beyond the quality limits; the surface was remeshed to the element size, which gave better ones")
+                        }
+                    };
+                    log.push(rec);
                 }
-                conformal_failure = conformal_failure
-                    .map(|rec| rec.measured("remesh_retry", "rejected by the volume gate"));
-            }
-            Err(reason) => {
-                outcome.attempts.push(Attempt {
-                    remeshed: true,
-                    ..attempt(Kernel::Delaunay, false)
+                settle(log, exact_failure, true);
+                outcome.meshed.push(MeshedPart {
+                    part: r.part,
+                    name: name.to_owned(),
+                    kernel: Kernel::Delaunay,
+                    points: c.points,
+                    tets: c.tets,
+                    face_groups: c.face_groups,
                 });
-                conformal_failure =
-                    conformal_failure.map(|rec| rec.measured("remesh_retry", reason));
+                return Ok(());
             }
+            if remeshed_triangles.is_some() {
+                remesh_failure = Some("rejected by the volume gate".to_owned());
+            } else {
+                conformal_failure = Some(
+                    Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
+                        .part(name)
+                        .hint("the conformal mesh failed the volume gate"),
+                );
+            }
+        }
+        if let Some(reason) = remesh_failure {
+            conformal_failure = conformal_failure.map(|rec| rec.measured("remesh_retry", reason));
         }
     }
 
@@ -510,6 +546,29 @@ fn exact(
 /// (`mesher_tet::improve`). Boundary faces and their vertices never change,
 /// so the face groups only need renumbering; if one could not be, the
 /// candidate is left as it was.
+/// A candidate's worst cell against the volume gate's quality limits:
+/// the smallest of its smallest dihedral angle over `SLIVER_DEGREES`, (90°
+/// − its worst non-orthogonality) over (90° − the target of
+/// `ImproveParams`), and the skewness target over its worst skewness. So 1
+/// is at the limits and smaller is worse; 0 for a candidate with no cells.
+fn worst_cell(c: &Candidate) -> f64 {
+    if c.tets.is_empty() {
+        return 0.0;
+    }
+    let targets = ImproveParams::default();
+    let q = fv_quality(&c.points, &c.tets);
+    let dihedral = q.min_dihedral_degrees / SLIVER_DEGREES;
+    let non_orthogonality =
+        (90.0 - q.max_non_orthogonality_degrees) / (90.0 - targets.max_non_orthogonality_degrees);
+    let skewness = if q.max_skewness > 0.0 {
+        targets.max_skewness / q.max_skewness
+    } else {
+        f64::INFINITY
+    };
+    let w = dihedral.min(non_orthogonality).min(skewness);
+    if w.is_nan() { 0.0 } else { w }
+}
+
 fn improve_cells(c: &mut Candidate) {
     let r = improve(&c.points, &c.tets, &ImproveParams::default());
     let renumbered: Option<Vec<(String, Vec<[u32; 3]>)>> = c
