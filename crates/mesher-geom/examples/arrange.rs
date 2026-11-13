@@ -17,7 +17,10 @@
 //! kept, unbalanced edges, the volume against the input's, and, rounded to
 //! f64, the triangles left flat and the pairs that intersect again;
 //! `ARRANGE_PROPAGATE=1` also finds the windings from one cast per piece
-//! and says on stderr where that differs.
+//! and says on stderr where that differs. `ARRANGE_ROUND=1` adds a line
+//! for stage 4: rounds of resolving again, points merged, triangles
+//! removed and flat ones repaired, the result's triangles, unbalanced
+//! edges and flat triangles (both must be 0), volume, seconds.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -26,7 +29,7 @@ use std::time::Instant;
 
 use mesher_geom::Point3;
 use mesher_geom::arrangement::{
-    ArrangementError, arrangement, intersections, resolve, resolve_with,
+    ArrangementError, arrangement, intersections, resolve, resolve_rounded, resolve_with,
 };
 use mesher_geom::predicates::plane_axis;
 
@@ -215,6 +218,45 @@ fn main() {
                 println!("{path}\topen\t{edges} unbalanced edges");
             }
             Err(e) => println!("{path}\tresolve failed\t{e}"),
+        }
+        if std::env::var("ARRANGE_ROUND").is_err() {
+            continue;
+        }
+        // Stage 4.
+        let started = Instant::now();
+        match resolve_rounded(&points, &triangles) {
+            Ok(r) => {
+                let seconds = started.elapsed().as_secs_f64();
+                let flat = r
+                    .triangles
+                    .iter()
+                    .filter(|t| {
+                        let [a, b, c] = t.map(|v| r.points[v as usize]);
+                        plane_axis(a, b, c).is_none()
+                    })
+                    .count();
+                let volume: f64 = r
+                    .triangles
+                    .iter()
+                    .map(|t| {
+                        let [a, b, c] = t.map(|v| r.points[v as usize]);
+                        (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                            + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                            / 6.0
+                    })
+                    .sum();
+                println!(
+                    "{path}\trounded\trounds {}\tmerged {}\tremoved {}\tflat repaired {}\ttriangles {}\tunbalanced {}\tflat {flat}\tvolume {volume:.6e}\t{seconds:.3}",
+                    r.rounds,
+                    r.merged_points,
+                    r.removed_triangles,
+                    r.flat_repaired,
+                    r.triangles.len(),
+                    unbalanced(&r.triangles),
+                );
+            }
+            Err(ArrangementError::Open { .. }) => {}
+            Err(e) => println!("{path}\tround failed\t{e}"),
         }
     }
 }

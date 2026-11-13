@@ -27,6 +27,7 @@
 
 mod cdt;
 mod label;
+mod round;
 mod subdivide;
 
 use std::collections::BTreeMap;
@@ -34,6 +35,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub use label::{Resolved, resolve, resolve_with};
+pub use round::{Rounded, resolve_rounded};
 pub use subdivide::{Arrangement, arrangement};
 
 use crate::implicit::{self, ImplicitError, Point};
@@ -55,6 +57,8 @@ pub enum ArrangementError {
     Open { edges: usize },
     #[error("no segment could be cast clear of every edge and vertex")]
     Cast,
+    #[error("rounded to f64, the surface still has {pairs} intersecting triangle pairs")]
+    Rounding { pairs: usize },
 }
 
 /// What a constraint segment lies on besides its triangle's plane, so its

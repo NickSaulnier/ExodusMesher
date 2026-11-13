@@ -716,3 +716,106 @@ fn random_overlapping_solids_resolve_to_their_union() {
     }
     assert!(checked > 40, "{checked}");
 }
+
+// Stage 4: the resolved surface in f64.
+
+use mesher_geom::arrangement::{Rounded, resolve_rounded};
+
+fn rounded_volume(r: &Rounded) -> f64 {
+    r.triangles
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|v| r.points[v as usize]);
+            (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                / 6.0
+        })
+        .sum()
+}
+
+/// Closed, no zero-area triangle, and no two triangles meeting beyond
+/// their shared vertices and edges (exactly, on the f64 points).
+fn clean(r: &Rounded) {
+    assert!(balanced(&r.triangles));
+    for t in &r.triangles {
+        let [a, b, c] = t.map(|v| r.points[v as usize]);
+        assert!(
+            mesher_geom::predicates::plane_axis(a, b, c).is_some(),
+            "flat {t:?}"
+        );
+    }
+    assert_eq!(intersections(&r.points, &r.triangles).unwrap().pairs, 0);
+}
+
+#[test]
+fn overlapping_boxes_round_to_their_union() {
+    let (p, f) = union(&[
+        cuboid([0.0; 3], [1.0; 3], 0),
+        cuboid([0.5, 0.25, 0.25], [1.5, 1.25, 1.25], 0),
+    ]);
+    let r = resolve_rounded(&p, &f).unwrap();
+    clean(&r);
+    assert_eq!(r.rounds, 0);
+    assert!((rounded_volume(&r) - 1.71875).abs() < 1e-12);
+    assert!(r.origin.iter().all(|&o| (o as usize) < f.len()));
+}
+
+#[test]
+fn random_overlapping_solids_round_cleanly() {
+    let mut rng = Lcg(97);
+    let mut checked = 0;
+    for case in 0..60 {
+        let grid = case % 4 == 0;
+        let mut parts = Vec::new();
+        for _ in 0..3 {
+            let mut q = || {
+                let v = rng.next() * 4.0;
+                if grid { (2.0 * v).round() / 2.0 } else { v }
+            };
+            if case % 3 == 0 {
+                let lo = [q(), q(), q()];
+                let hi = [lo[0] + 0.5 + q(), lo[1] + 0.5 + q(), lo[2] + 0.5 + q()];
+                parts.push(cuboid(lo, hi, 0));
+            } else {
+                let c = [
+                    [q(), q(), q()],
+                    [q(), q(), q()],
+                    [q(), q(), q()],
+                    [q(), q(), q()],
+                ];
+                parts.push(tetrahedron(c));
+            }
+        }
+        let (p, f) = union(&parts);
+        let proper = f.iter().all(|t| {
+            let [a, b, c] = t.map(|i| p[i as usize]);
+            mesher_geom::predicates::plane_axis(a, b, c).is_some()
+        });
+        if !proper {
+            continue;
+        }
+        let mut welded: Vec<Point3> = Vec::new();
+        let ids: Vec<u32> = p
+            .iter()
+            .map(|q| match welded.iter().position(|w| w == q) {
+                Some(i) => i as u32,
+                None => {
+                    welded.push(*q);
+                    welded.len() as u32 - 1
+                }
+            })
+            .collect();
+        let f: Vec<[u32; 3]> = f.iter().map(|t| t.map(|v| ids[v as usize])).collect();
+        let exact = resolve(&welded, &f).unwrap();
+        let r = resolve_rounded(&welded, &f).unwrap_or_else(|e| panic!("case {case}: {e}"));
+        clean(&r);
+        let (v0, v1) = (volume(&exact), rounded_volume(&r));
+        assert!(
+            (v0 - v1).abs() <= 1e-9 * v0.abs().max(1.0),
+            "case {case}: {v1} against {v0}"
+        );
+        assert!(r.origin.iter().all(|&o| (o as usize) < f.len()));
+        checked += 1;
+    }
+    assert!(checked > 40, "{checked}");
+}
