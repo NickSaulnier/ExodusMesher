@@ -25,9 +25,14 @@
 //! point. A point on an input edge is given to both triangles of the edge,
 //! so their subdivisions agree along it.
 
+mod cdt;
+mod subdivide;
+
 use std::collections::BTreeMap;
 
 use thiserror::Error;
+
+pub use subdivide::{Arrangement, arrangement};
 
 use crate::implicit::{self, ImplicitError, Point};
 use crate::predicates::{Sign, orient3d, plane_axis};
@@ -42,15 +47,36 @@ pub enum ArrangementError {
     Degenerate { triangle: u32 },
     #[error("an intersection point could not be built: {0}")]
     Implicit(#[from] ImplicitError),
+    #[error("a triangle could not be subdivided: {0}")]
+    Triangulation(String),
+}
+
+/// What a constraint segment lies on besides its triangle's plane, so its
+/// crossings with other segments can be built exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Support {
+    /// The plane through three explicit points (the other triangle's).
+    Plane([Point3; 3]),
+    /// The line through two explicit points (an edge of a coplanar
+    /// triangle).
+    Line([Point3; 2]),
+}
+
+/// A constraint segment: its ends by global point index (lower first) and
+/// what it lies on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Segment {
+    pub ends: [u32; 2],
+    pub support: Support,
 }
 
 /// What a triangle must be subdivided by: points on it other than its
 /// corners (inside it or on its edges), and segments across it, by global
-/// point index. Sorted and without repeats.
+/// point index. Sorted and without repeats (one segment per pair of ends).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Constraints {
     pub points: Vec<u32>,
-    pub segments: Vec<[u32; 2]>,
+    pub segments: Vec<Segment>,
 }
 
 impl Constraints {
@@ -72,8 +98,8 @@ pub struct Intersections {
     /// The pairs of triangles that meet beyond their shared vertices and
     /// edges.
     pub pairs: usize,
-    /// Of those, coplanar pairs.
-    pub coplanar_pairs: usize,
+    /// Of those, the coplanar pairs, sorted.
+    pub coplanar: Vec<(u32, u32)>,
 }
 
 /// A point of a triangle's boundary, and where on the triangle it lies.
@@ -118,7 +144,8 @@ pub fn intersections(
         edge_points: BTreeMap::new(),
     };
     let bvh = Bvh::new(soup);
-    let (mut pairs, mut coplanar_pairs) = (0, 0);
+    let mut pairs = 0;
+    let mut coplanar = Vec::new();
     for (f, g) in bvh.self_overlaps() {
         let (tf, tg) = (triangles[f as usize], triangles[g as usize]);
         if !faces_intersect(tf, pos(tf), tg, pos(tg)) {
@@ -139,7 +166,7 @@ pub fn intersections(
         };
         let sides = tb.p.map(|q| orient3d(ta.p[0], ta.p[1], ta.p[2], q));
         if sides.iter().all(|&s| s == Sign::Zero) {
-            coplanar_pairs += 1;
+            coplanar.push((f, g));
             b.coplanar(&ta, &tb)?;
             b.coplanar(&tb, &ta)?;
         } else {
@@ -148,7 +175,7 @@ pub fn intersections(
     }
     let mut out = b.finish(triangles);
     out.pairs = pairs;
-    out.coplanar_pairs = coplanar_pairs;
+    out.coplanar = coplanar;
     Ok(out)
 }
 
@@ -280,8 +307,11 @@ impl Builder {
             self.place(b, id, on_b);
         }
         if let [(p, ..), (q, ..)] = ends.as_slice() {
-            for t in [a, b] {
-                self.constraints[t.index as usize].segments.push([*p, *q]);
+            for (t, other) in [(a, b), (b, a)] {
+                self.constraints[t.index as usize].segments.push(Segment {
+                    ends: [*p, *q],
+                    support: Support::Plane(other.p),
+                });
             }
         }
         Ok(())
@@ -337,7 +367,10 @@ impl Builder {
                 self.place(a, id, on);
             }
             if let [(p, _), (q, _)] = ends.as_slice() {
-                self.constraints[a.index as usize].segments.push([*p, *q]);
+                self.constraints[a.index as usize].segments.push(Segment {
+                    ends: [*p, *q],
+                    support: Support::Line([pu, pw]),
+                });
             }
         }
         Ok(())
@@ -365,17 +398,21 @@ impl Builder {
             ps.retain(|i| !corners.contains(i));
             ps.sort_unstable();
             ps.dedup();
-            let mut ss: Vec<[u32; 2]> = c
+            let mut ss: Vec<Segment> = c
                 .segments
                 .iter()
                 .map(|s| {
-                    let [p, q] = s.map(r);
-                    [p.min(q), p.max(q)]
+                    let [p, q] = s.ends.map(r);
+                    Segment {
+                        ends: [p.min(q), p.max(q)],
+                        support: s.support,
+                    }
                 })
-                .filter(|s| s[0] != s[1])
+                .filter(|s| s.ends[0] != s.ends[1])
                 .collect();
-            ss.sort_unstable();
-            ss.dedup();
+            // One segment per pair of ends (any support will do).
+            ss.sort_by_key(|s| s.ends);
+            ss.dedup_by_key(|s| s.ends);
             *c = Constraints {
                 points: ps,
                 segments: ss,
@@ -386,7 +423,11 @@ impl Builder {
         // renumbering them.
         let mut used = vec![false; self.points.len()];
         for c in &constraints {
-            for &i in c.points.iter().chain(c.segments.iter().flatten()) {
+            for &i in c
+                .points
+                .iter()
+                .chain(c.segments.iter().flat_map(|s| &s.ends))
+            {
                 used[i as usize] = true;
             }
         }
@@ -404,21 +445,21 @@ impl Builder {
                 *i = renumber(*i);
             }
             for s in &mut c.segments {
-                *s = s.map(renumber);
+                s.ends = s.ends.map(renumber);
             }
         }
         Intersections {
             points,
             constraints,
             pairs: 0,
-            coplanar_pairs: 0,
+            coplanar: Vec::new(),
         }
     }
 }
 
 /// The plane through edge `ab` parallel to axis `k`, by three explicit
 /// points: `a`, `b`, and `a` moved along `k` only.
-fn vertical_plane([a, b]: [Point3; 2], k: usize) -> [Point3; 3] {
+pub(crate) fn vertical_plane([a, b]: [Point3; 2], k: usize) -> [Point3; 3] {
     let mut c = a;
     c[k] = a[k] + a[k].abs().max(1.0);
     [a, b, c]
@@ -426,7 +467,7 @@ fn vertical_plane([a, b]: [Point3; 2], k: usize) -> [Point3; 3] {
 
 /// Each point's representative: the lowest index of the points it
 /// coincides with. Candidates are pairs whose certain bounds overlap.
-fn dedupe(points: &[Point]) -> Vec<u32> {
+pub(crate) fn dedupe(points: &[Point]) -> Vec<u32> {
     let n = points.len();
     let mut rep: Vec<u32> = (0..n as u32).collect();
     let bounds: Vec<[[f64; 2]; 3]> = points.iter().map(Point::bounds).collect();

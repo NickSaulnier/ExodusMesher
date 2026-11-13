@@ -1,14 +1,18 @@
-//! The intersections of OBJ files' triangle soups (Milestone 16, stage 1):
+//! The arrangement of OBJ files' triangle soups (Milestone 16, stages 1 and
+//! 2):
 //!
 //! ```text
 //! cargo run --release -p mesher-geom --example arrange -- a.obj b.obj ...
 //! ```
 //!
 //! Prints a line per file: triangles (and zero-area ones left out),
-//! intersecting pairs (coplanar ones), new points, segments, curve ends
-//! (points where an odd number of segments meet: none when every
-//! intersection curve closes), and seconds; or the error. `ARRANGE_DUMP=1`
-//! lists each curve end with the triangles holding it, on stderr.
+//! intersecting pairs (coplanar ones), pieces, unbalanced edges of the
+//! input and of the arrangement (an edge is balanced when it is used as
+//! often in each direction: every edge of a closed oriented surface is, and
+//! the arrangement of one must keep that), the largest error in a
+//! triangle's area covered by its pieces (over the squared diagonal), and
+//! seconds; or the error. `ARRANGE_DUMP=1` lists, on stderr, the triangles
+//! whose pieces miss more than 1e-12 of that.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -16,12 +20,34 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use mesher_geom::Point3;
-use mesher_geom::arrangement::intersections;
+use mesher_geom::arrangement::arrangement;
 use mesher_geom::predicates::plane_axis;
+
+fn area(p: Point3, q: Point3, r: Point3) -> f64 {
+    let u = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+    let v = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+    let c = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    0.5 * (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()
+}
+
+fn unbalanced(triangles: &[[u32; 3]]) -> usize {
+    let mut net: BTreeMap<(u32, u32), i64> = BTreeMap::new();
+    for t in triangles {
+        for k in 0..3 {
+            let (u, v) = (t[k], t[(k + 1) % 3]);
+            *net.entry((u.min(v), u.max(v))).or_insert(0) += if u < v { 1 } else { -1 };
+        }
+    }
+    net.values().filter(|&&n| n != 0).count()
+}
 
 fn main() {
     println!(
-        "file\ttriangles\tdegenerate\tpairs\tcoplanar\tnew_points\tsegments\topen_ends\tseconds"
+        "file\ttriangles\tdegenerate\tpairs\tcoplanar\tpieces\tunbalanced_in\tunbalanced_out\tarea_error\tseconds"
     );
     for path in std::env::args().skip(1) {
         let text = std::fs::read_to_string(&path).unwrap();
@@ -52,46 +78,79 @@ fn main() {
         });
         let degenerate = total - triangles.len();
         let started = Instant::now();
-        match intersections(&points, &triangles) {
-            Ok(x) => {
+        match arrangement(&points, &triangles) {
+            Ok(a) => {
                 let seconds = started.elapsed().as_secs_f64();
-                let mut segments: Vec<[u32; 2]> = x
-                    .constraints
-                    .iter()
-                    .flat_map(|c| c.segments.iter().copied())
-                    .collect();
-                segments.sort_unstable();
-                segments.dedup();
-                let mut degree: BTreeMap<u32, usize> = BTreeMap::new();
-                for s in &segments {
-                    for &v in s {
-                        *degree.entry(v).or_insert(0) += 1;
-                    }
+                let mut covered = vec![0.0; triangles.len()];
+                for (t, &o) in a.triangles.iter().zip(&a.origin) {
+                    let [x, y, z] = t.map(|v| a.points[v as usize].approx());
+                    covered[o as usize] += area(x, y, z);
                 }
-                let open = degree.values().filter(|&&d| d % 2 == 1).count();
+                // Against the square of the diagonal: a sliver's pieces,
+                // measured at rounded positions, lose its tiny area to
+                // cancellation.
+                let (lo, hi) = points.iter().fold(
+                    ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
+                    |(lo, hi), p| {
+                        (
+                            [0, 1, 2].map(|k| lo[k].min(p[k])),
+                            [0, 1, 2].map(|k| hi[k].max(p[k])),
+                        )
+                    },
+                );
+                let d2: f64 = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum();
+                let error = triangles
+                    .iter()
+                    .zip(&covered)
+                    .map(|(t, c)| {
+                        let [x, y, z] = t.map(|v| points[v as usize]);
+                        (c - area(x, y, z)).abs() / d2
+                    })
+                    .fold(0.0, f64::max);
                 if std::env::var("ARRANGE_DUMP").is_ok() {
-                    for (&v, &d) in &degree {
-                        if d % 2 == 0 {
-                            continue;
-                        }
-                        let p = &x.points[v as usize];
-                        eprintln!("end {v} degree {d} at {:?} {:?}", p.approx(), p.kind());
-                        for (t, c) in x.constraints.iter().enumerate() {
-                            let segs: Vec<_> =
-                                c.segments.iter().filter(|s| s.contains(&v)).collect();
-                            if !segs.is_empty() || c.points.contains(&v) {
-                                eprintln!("   triangle {t} {:?}: segments {segs:?}", triangles[t]);
+                    for (o, (t, c)) in triangles.iter().zip(&covered).enumerate() {
+                        let [x, y, z] = t.map(|v| points[v as usize]);
+                        let want = area(x, y, z);
+                        if (c - want).abs() / d2 > 1e-12 {
+                            let pieces: Vec<[u32; 3]> = a
+                                .triangles
+                                .iter()
+                                .zip(&a.origin)
+                                .filter(|(_, g)| **g as usize == o)
+                                .map(|(t, _)| *t)
+                                .collect();
+                            eprintln!(
+                                "triangle {o} {t:?} at {x:?} {y:?} {z:?}: area {want:.3e}, covered {c:.3e}, pieces {pieces:?}"
+                            );
+                            let mut new: Vec<u32> = pieces
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .filter(|&v| v as usize >= points.len())
+                                .collect();
+                            new.sort_unstable();
+                            new.dedup();
+                            for v in new {
+                                let q = &a.points[v as usize];
+                                let b = q.bounds();
+                                eprintln!(
+                                    "   point {v} approx {:?} bounds width {:?} {:?}",
+                                    q.approx(),
+                                    b.map(|r| r[1] - r[0]),
+                                    q.kind()
+                                );
                             }
                         }
                     }
                 }
                 println!(
-                    "{path}\t{}\t{degenerate}\t{}\t{}\t{}\t{}\t{open}\t{seconds:.3}",
+                    "{path}\t{}\t{degenerate}\t{}\t{}\t{}\t{}\t{}\t{error:.1e}\t{seconds:.3}",
                     triangles.len(),
-                    x.pairs,
-                    x.coplanar_pairs,
-                    x.points.len() - points.len(),
-                    segments.len(),
+                    a.pairs,
+                    a.coplanar_pairs,
+                    a.triangles.len(),
+                    unbalanced(&triangles),
+                    unbalanced(&a.triangles),
                 );
             }
             Err(e) => println!("{path}\tfailed\t{e}"),

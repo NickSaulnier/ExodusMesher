@@ -5,6 +5,7 @@
 
 use num_bigint::BigInt;
 use num_bigint::Sign as BigSign;
+use num_traits::ToPrimitive;
 
 use crate::Sign;
 
@@ -41,6 +42,11 @@ impl Filtered {
     /// The approximate value.
     pub(crate) fn value(&self) -> f64 {
         self.v
+    }
+
+    /// The bound on its distance from the exact value.
+    pub(crate) fn error(&self) -> f64 {
+        self.e
     }
 }
 
@@ -229,6 +235,26 @@ impl Exact {
 
     fn is_zero(&self) -> bool {
         self.m.sign() == BigSign::NoSign
+    }
+
+    /// `self / w` as an f64 within an ulp or so (the truncated quotient of
+    /// the mantissas to at least 66 bits, then rounded); `None` when `w` is
+    /// zero or the result is not finite.
+    pub(crate) fn quotient(&self, w: &Exact) -> Option<f64> {
+        if w.is_zero() {
+            return None;
+        }
+        if self.is_zero() {
+            return Some(0.0);
+        }
+        let (bx, bw) = (self.m.bits() as i64, w.m.bits() as i64);
+        let shift = (bw - bx + 66).max(0);
+        let q = (&self.m << (shift as usize)) / &w.m;
+        let f = q.to_f64()?;
+        let e = self.e - w.e - shift;
+        let e = i32::try_from(e.clamp(-4000, 4000)).ok()?;
+        let r = libm::scalbn(f, e);
+        r.is_finite().then_some(r)
     }
 }
 

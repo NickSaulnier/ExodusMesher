@@ -54,8 +54,8 @@ fn approx_eq(a: Point3, b: Point3) -> bool {
 fn segments(x: &Intersections) -> BTreeMap<[u32; 2], usize> {
     let mut out = BTreeMap::new();
     for c in &x.constraints {
-        for &s in &c.segments {
-            *out.entry(s).or_insert(0) += 1;
+        for s in &c.segments {
+            *out.entry(s.ends).or_insert(0) += 1;
         }
     }
     out
@@ -110,7 +110,8 @@ fn two_crossing_triangles_meet_in_a_segment() {
         "{new:?}"
     );
     for c in &x.constraints {
-        assert_eq!(c.segments, vec![[6, 7]]);
+        let ends: Vec<[u32; 2]> = c.segments.iter().map(|s| s.ends).collect();
+        assert_eq!(ends, vec![[6, 7]]);
     }
     // Inside the first triangle; on the second's edges.
     assert_eq!(x.constraints[0].points, vec![6, 7]);
@@ -148,7 +149,7 @@ fn coplanar_triangles_take_each_others_edges() {
     ];
     let f = vec![[0, 1, 2], [3, 4, 5]];
     let x = intersections(&p, &f).unwrap();
-    assert_eq!(x.coplanar_pairs, 1);
+    assert_eq!(x.coplanar, vec![(0, 1)]);
     distinct(&x);
     // The second's corner 3 is inside the first; the edges 3-4 and 3-5
     // cross the first's hypotenuse at (3, 1) and (1, 3).
@@ -161,7 +162,8 @@ fn coplanar_triangles_take_each_others_edges() {
     // the first that enters it.
     assert_eq!(x.constraints[0].segments.len(), 2);
     assert_eq!(x.constraints[0].points, vec![3, 6, 7]);
-    assert_eq!(x.constraints[1].segments, vec![[6, 7]]);
+    assert_eq!(x.constraints[1].segments.len(), 1);
+    assert_eq!(x.constraints[1].segments[0].ends, [6, 7]);
     assert_eq!(x.constraints[1].points, vec![6, 7]);
 }
 
@@ -260,4 +262,263 @@ fn a_degenerate_triangle_is_refused() {
         intersections(&p, &[[0, 1, 2]]),
         Err(ArrangementError::Degenerate { triangle: 0 })
     ));
+}
+
+// Stage 2: the arrangement.
+
+use mesher_geom::arrangement::{Arrangement, arrangement};
+
+fn area(p: Point3, q: Point3, r: Point3) -> f64 {
+    let u = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+    let v = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+    let c = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    0.5 * (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()
+}
+
+fn normal(a: Point3, b: Point3, c: Point3) -> Point3 {
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let e = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    [
+        d[1] * e[2] - d[2] * e[1],
+        d[2] * e[0] - d[0] * e[2],
+        d[0] * e[1] - d[1] * e[0],
+    ]
+}
+
+/// Each input triangle's pieces cover its area and face its way; for a
+/// closed input, every directed edge has its reverse as often.
+fn check(p: &[Point3], f: &[[u32; 3]], a: &Arrangement, closed: bool) {
+    let pos = |i: u32| a.points[i as usize].approx();
+    let mut covered = vec![0.0; f.len()];
+    for (t, &o) in a.triangles.iter().zip(&a.origin) {
+        let [x, y, z] = t.map(pos);
+        covered[o as usize] += area(x, y, z);
+        let [u, v, w] = f[o as usize].map(|i| p[i as usize]);
+        let (n1, n2) = (normal(x, y, z), normal(u, v, w));
+        assert!(
+            n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2] > 0.0,
+            "piece {t:?} of {o} is turned over"
+        );
+    }
+    for (o, t) in f.iter().enumerate() {
+        let [u, v, w] = t.map(|i| p[i as usize]);
+        let want = area(u, v, w);
+        assert!(
+            (covered[o] - want).abs() <= 1e-9 * want.max(1.0),
+            "triangle {o}: pieces cover {} of {want}",
+            covered[o]
+        );
+    }
+    if closed {
+        let mut directed: BTreeMap<(u32, u32), i64> = BTreeMap::new();
+        for t in &a.triangles {
+            for k in 0..3 {
+                let (u, v) = (t[k], t[(k + 1) % 3]);
+                *directed.entry((u.min(v), u.max(v))).or_insert(0) += if u < v { 1 } else { -1 };
+            }
+        }
+        for (e, n) in directed {
+            assert_eq!(n, 0, "edge {e:?} is not balanced");
+        }
+    }
+}
+
+#[test]
+fn crossing_triangles_are_cut_along_their_segment() {
+    let p = vec![
+        [0.0, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+        [0.0, 4.0, 0.0],
+        [1.0, 1.0, -1.0],
+        [1.0, 1.0, 1.0],
+        [3.0, 1.0, 1.0],
+    ];
+    let f = vec![[0, 1, 2], [3, 4, 5]];
+    let a = arrangement(&p, &f).unwrap();
+    check(&p, &f, &a, false);
+    // The segment is an edge of pieces on both triangles.
+    for o in 0..2 {
+        assert!(
+            a.triangles
+                .iter()
+                .zip(&a.origin)
+                .any(|(t, &g)| g == o && t.contains(&6) && t.contains(&7))
+        );
+    }
+}
+
+#[test]
+fn overlapping_boxes_make_a_closed_arrangement() {
+    for second in [
+        ([0.5, 0.25, 0.25], [1.5, 1.25, 1.25]),
+        ([0.3, 0.2, 0.1], [1.4, 0.7, 0.6]),
+        // Sharing the planes z = 0 and x = 0: coplanar overlaps.
+        ([0.0, 0.5, 0.0], [0.5, 1.5, 1.0]),
+    ] {
+        let (p, f) = union(&[cuboid([0.0; 3], [1.0; 3], 0), cuboid(second.0, second.1, 0)]);
+        let a = arrangement(&p, &f).unwrap();
+        check(&p, &f, &a, true);
+    }
+}
+
+#[test]
+fn coplanar_overlap_gives_the_same_pieces_to_both() {
+    let p = vec![
+        [0.0, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+        [0.0, 4.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [5.0, 1.0, 0.0],
+        [1.0, 5.0, 0.0],
+    ];
+    // The second faces the other way.
+    let f = vec![[0, 1, 2], [3, 5, 4]];
+    let a = arrangement(&p, &f).unwrap();
+    check(&p, &f, &a, false);
+    let key = |t: [u32; 3]| {
+        let mut k = t;
+        k.sort_unstable();
+        k
+    };
+    let of = |o: u32| -> Vec<[u32; 3]> {
+        a.triangles
+            .iter()
+            .zip(&a.origin)
+            .filter(|(_, g)| **g == o)
+            .map(|(t, _)| key(*t))
+            .collect()
+    };
+    let (first, second) = (of(0), of(1));
+    let overlap: f64 = first
+        .iter()
+        .filter(|k| second.contains(k))
+        .map(|k| {
+            let [x, y, z] = k.map(|i| a.points[i as usize].approx());
+            area(x, y, z)
+        })
+        .sum();
+    // The overlap is the triangle (1, 1), (3, 1), (1, 3): area 2.
+    assert!((overlap - 2.0).abs() < 1e-12, "{overlap}");
+}
+
+#[test]
+fn a_pushed_through_vertex_makes_a_closed_arrangement() {
+    // An octahedron with its top vertex pushed through to other places.
+    let mut p = vec![
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    let f = vec![
+        [0, 2, 4],
+        [2, 1, 4],
+        [1, 3, 4],
+        [3, 0, 4],
+        [2, 0, 5],
+        [1, 2, 5],
+        [3, 1, 5],
+        [0, 3, 5],
+    ];
+    let mut crossed = 0;
+    for top in [
+        [0.1, 0.05, -1.7],
+        [1.5, 0.0, -0.2],
+        [0.6, 0.7, -0.4],
+        [-0.3, 1.4, -0.6],
+        [0.2, 0.1, -0.5],
+    ] {
+        p[4] = top;
+        let a = arrangement(&p, &f).unwrap();
+        crossed += usize::from(a.pairs > 0);
+        check(&p, &f, &a, true);
+    }
+    assert!(crossed >= 2, "{crossed}");
+}
+
+/// A deterministic generator for the random cases.
+struct Lcg(u64);
+impl Lcg {
+    fn next(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+fn tetrahedron(c: [Point3; 4]) -> (Vec<Point3>, Vec<[u32; 3]>) {
+    let n = normal(c[0], c[1], c[2]);
+    let d = [c[3][0] - c[0][0], c[3][1] - c[0][1], c[3][2] - c[0][2]];
+    // Corner 3 above the base 0 1 2 (counter-clockwise from above): the base
+    // faces down.
+    let f = if n[0] * d[0] + n[1] * d[1] + n[2] * d[2] > 0.0 {
+        vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]]
+    } else {
+        vec![[0, 1, 2], [0, 3, 1], [1, 3, 2], [0, 2, 3]]
+    };
+    (c.to_vec(), f)
+}
+
+#[test]
+fn random_overlapping_solids_make_closed_arrangements() {
+    let mut rng = Lcg(16);
+    let mut checked = 0;
+    for case in 0..80 {
+        let grid = case % 2 == 0;
+        let mut parts = Vec::new();
+        for _ in 0..3 {
+            // On a coarse grid in half the cases, so coplanar and collinear
+            // contacts happen.
+            let mut q = || {
+                let v = rng.next() * 4.0;
+                if grid { (2.0 * v).round() / 2.0 } else { v }
+            };
+            if case % 3 == 0 {
+                let lo = [q(), q(), q()];
+                let hi = [lo[0] + 0.5 + q(), lo[1] + 0.5 + q(), lo[2] + 0.5 + q()];
+                parts.push(cuboid(lo, hi, 0));
+            } else {
+                let c = [
+                    [q(), q(), q()],
+                    [q(), q(), q()],
+                    [q(), q(), q()],
+                    [q(), q(), q()],
+                ];
+                parts.push(tetrahedron(c));
+            }
+        }
+        let (p, f) = union(&parts);
+        let proper = f.iter().all(|t| {
+            let [a, b, c] = t.map(|i| p[i as usize]);
+            mesher_geom::predicates::plane_axis(a, b, c).is_some()
+        });
+        if !proper {
+            continue;
+        }
+        // Weld coincident corners, so touching solids share vertices.
+        let mut welded: Vec<Point3> = Vec::new();
+        let ids: Vec<u32> = p
+            .iter()
+            .map(|q| match welded.iter().position(|w| w == q) {
+                Some(i) => i as u32,
+                None => {
+                    welded.push(*q);
+                    welded.len() as u32 - 1
+                }
+            })
+            .collect();
+        let f: Vec<[u32; 3]> = f.iter().map(|t| t.map(|v| ids[v as usize])).collect();
+        let a = arrangement(&welded, &f).unwrap_or_else(|e| panic!("case {case}: {e}"));
+        check(&welded, &f, &a, true);
+        checked += 1;
+    }
+    assert!(checked > 40, "{checked}");
 }

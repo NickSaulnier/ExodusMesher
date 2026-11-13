@@ -204,8 +204,11 @@ impl Point {
         matches!(self.kind, Kind::Explicit(_))
     }
 
-    /// The nearest f64 position, approximately (for spatial queries and
-    /// output only).
+    /// The f64 position, within a few ulps of the exact one (for spatial
+    /// queries and output only, never a topological decision). The f64
+    /// evaluation is kept when its error bound puts it within 2^-42 of the
+    /// configuration's size; otherwise (a line nearly parallel to its plane,
+    /// planes nearly sharing a line) the exact coordinates are divided.
     #[must_use]
     pub fn approx(&self) -> Point3 {
         if let Kind::Explicit(p) = self.kind {
@@ -213,8 +216,23 @@ impl Point {
         }
         let o = self.kind.origin();
         let h = homog::<Filtered>(&self.kind, o);
-        let w = h[3].value();
-        [0, 1, 2].map(|k| o[k] + h[k].value() / w)
+        let (w, we) = (h[3].value(), h[3].error());
+        if w.is_finite() && we.is_finite() && w.abs() > 2.0 * we {
+            let size = self.kind.size();
+            let fast = [0, 1, 2].map(|k| {
+                let x = h[k].value() / w;
+                let err = (h[k].error() + x.abs() * we) / (w.abs() - we);
+                (
+                    x,
+                    err <= libm::ldexp(1.0, -42) * size.max(x.abs()) && err.is_finite(),
+                )
+            });
+            if fast.iter().all(|&(x, ok)| ok && x.is_finite()) {
+                return [0, 1, 2].map(|k| o[k] + fast[k].0);
+            }
+        }
+        let h = homog::<Exact>(&self.kind, o);
+        [0, 1, 2].map(|k| o[k] + h[k].quotient(&h[3]).unwrap_or(f64::NAN))
     }
 
     /// A box certainly holding the point: `[lo, hi]` per axis, from interval
@@ -246,6 +264,24 @@ impl From<Point3> for Point {
 }
 
 impl Kind {
+    /// The largest distance (per axis) of a defining point from the origin:
+    /// the size of the configuration.
+    fn size(&self) -> f64 {
+        let o = self.origin();
+        let far = |ps: &[Point3]| {
+            ps.iter()
+                .flat_map(|p| (0..3).map(move |k| (p[k] - o[k]).abs()))
+                .fold(0.0, f64::max)
+        };
+        match *self {
+            Kind::Explicit(_) => 0.0,
+            Kind::Lnc { a, b, .. } => far(&[a, b]),
+            Kind::Bpt { tri, .. } => far(&tri),
+            Kind::Lpi { line, plane } => far(&[line[0], line[1], plane[0], plane[1], plane[2]]),
+            Kind::Tpi { planes } => far(&planes.concat()),
+        }
+    }
+
     /// An explicit point the coordinates are translated by: one of the
     /// defining points.
     fn origin(&self) -> Point3 {

@@ -751,6 +751,60 @@ fn approximate_positions_are_close() {
     }
 }
 
+/// Positions stay accurate where the construction is ill-conditioned: lines
+/// nearly parallel to their plane and planes nearly through one line, where
+/// a plain f64 evaluation can land anywhere (Milestone 16: the arrangement
+/// rounds such points to f64).
+#[test]
+fn approximate_positions_are_close_when_nearly_degenerate() {
+    let mut rng = Rng(0x510e_527f_ade6_82d1);
+    let mut checked = 0;
+    for i in 0..2000 {
+        let (c, size) = centre(&mut rng);
+        let tilt = 10f64.powi(-(i % 14) - 2);
+        let tri = [0; 3].map(|_| rng.point(c, size));
+        let a = rng.point(c, size);
+        // b: a moved nearly within the plane of tri.
+        let n = {
+            let u = [0, 1, 2].map(|k| tri[1][k] - tri[0][k]);
+            let w = [0, 1, 2].map(|k| tri[2][k] - tri[0][k]);
+            [
+                u[1] * w[2] - u[2] * w[1],
+                u[2] * w[0] - u[0] * w[2],
+                u[0] * w[1] - u[1] * w[0],
+            ]
+        };
+        let nn = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        let dir = [0, 1, 2].map(|k| tri[1][k] - tri[0][k]);
+        let b = [0, 1, 2].map(|k| a[k] + dir[k] + tilt * size * n[k] / nn);
+        let candidates = [
+            Point::lpi([a, b], tri),
+            Point::tpi([
+                tri,
+                [
+                    tri[0],
+                    tri[1],
+                    [0, 1, 2].map(|k| tri[2][k] + tilt * size * rng.range(-1.0, 1.0)),
+                ],
+                [a, b, rng.point(c, size)],
+            ]),
+        ];
+        for p in candidates.into_iter().flatten() {
+            let x = exact(&p);
+            let got = p.approx();
+            for k in 0..3 {
+                let want = x[k].to_f64().unwrap();
+                assert!(
+                    (got[k] - want).abs() <= 1e-12 * want.abs() + 1e-15 * size,
+                    "{p:?}: {got:?}, exactly {want} on axis {k}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 1000, "{checked}");
+}
+
 /// Every point lies in its box: random points, and nearly degenerate line
 /// and plane intersections, whose boxes may be loose but never miss.
 #[test]
