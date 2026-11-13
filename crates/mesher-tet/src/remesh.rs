@@ -30,6 +30,10 @@ pub struct RemeshParams {
     pub iterations: usize,
     /// Refuse to grow beyond this many triangles.
     pub max_triangles: usize,
+    /// A feature edge between two corners shorter than this fraction of the
+    /// target size is a feature too small to mesh: one corner merges into
+    /// the other (moving the surface by at most the edge's length).
+    pub small_feature: f64,
 }
 
 impl Default for RemeshParams {
@@ -38,6 +42,7 @@ impl Default for RemeshParams {
             feature_degrees: 40.0,
             iterations: 6,
             max_triangles: 2_000_000,
+            small_feature: 0.1,
         }
     }
 }
@@ -49,6 +54,10 @@ pub struct Remeshed {
     pub triangles: Vec<[u32; 3]>,
     /// The input triangle each triangle lies on (for its group).
     pub origin: Vec<u32>,
+    /// Features too small to mesh that were merged away
+    /// (`RemeshParams::small_feature`): corners merged into corners, and
+    /// feature vertices merged across a strip into another line.
+    pub merged_small_features: usize,
 }
 
 /// Why a surface could not be remeshed.
@@ -201,6 +210,8 @@ struct Mesh {
     /// Live triangles at each vertex.
     vt: Vec<Vec<u32>>,
     feature: HashSet<(u32, u32)>,
+    /// Collapses that merged a feature too small to mesh.
+    merged: usize,
 }
 
 impl Mesh {
@@ -392,6 +403,7 @@ pub fn remesh(
         origin: Vec::new(),
         vt: vec![Vec::new(); points.len()],
         feature: input.segments.iter().map(|&(u, v)| key(u, v)).collect(),
+        merged: 0,
     };
     for v in 0..points.len() {
         let segs = &input.vertex_segments[v];
@@ -481,7 +493,8 @@ pub fn remesh(
                 continue;
             }
             let h = target(&m, u, v);
-            if !(try_collapse(&mut m, u, v, h) || try_collapse(&mut m, v, u, h)) {
+            let small = params.small_feature * h;
+            if !(try_collapse(&mut m, u, v, h, small) || try_collapse(&mut m, v, u, h, small)) {
                 continue;
             }
         }
@@ -504,13 +517,27 @@ pub fn remesh(
 }
 
 /// Collapse `x` into `y` if that keeps the surface valid and its edges no
-/// longer than 4h/3.
-fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64) -> bool {
+/// longer than 4h/3. A corner collapses only into another corner along a
+/// feature edge shorter than `small`; a feature vertex along its line, or
+/// into a feature vertex or corner of another line closer than `small`.
+fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64) -> bool {
     let (kx, ky) = (m.kind[x as usize], m.kind[y as usize]);
     match kx {
-        Kind::Corner => return false,
+        Kind::Corner => {
+            if ky != Kind::Corner
+                || !m.feature.contains(&key(x, y))
+                || norm(sub(m.pos[x as usize], m.pos[y as usize])) >= small
+            {
+                return false;
+            }
+        }
         Kind::Feature => {
-            if ky == Kind::Smooth || !m.feature.contains(&key(x, y)) {
+            // Along its line, or across to another line closer than
+            // `small` (the two sides of a strip too narrow to mesh).
+            if ky == Kind::Smooth
+                || !(m.feature.contains(&key(x, y))
+                    || norm(sub(m.pos[x as usize], m.pos[y as usize])) < small)
+            {
                 return false;
             }
         }
@@ -560,6 +587,9 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64) -> bool {
         }
     }
     // Do it.
+    if kx == Kind::Corner || (kx == Kind::Feature && !m.feature.contains(&key(x, y))) {
+        m.merged += 1;
+    }
     for &t in &edge {
         m.alive[t as usize] = false;
         for w in m.tris[t as usize] {
@@ -753,6 +783,7 @@ fn finish(m: &Mesh) -> Result<Remeshed, RemeshError> {
         points,
         triangles,
         origin,
+        merged_small_features: m.merged,
     })
 }
 
@@ -836,6 +867,92 @@ mod tests {
         );
         let mean = lengths.iter().sum::<f64>() / lengths.len() as f64;
         assert!((0.12..0.3).contains(&mean), "{mean}");
+    }
+
+    /// The unit cube with the edge at x = 1, z = 1 cut by a 45° chamfer `w`
+    /// wide, each convex face triangulated as a fan and oriented outwards.
+    fn chamfered_cube(w: f64) -> (Vec<Point3>, Vec<[u32; 3]>) {
+        let mut p = Vec::new();
+        for y in [0.0, 1.0] {
+            p.extend([
+                [0.0, y, 0.0],
+                [1.0, y, 0.0],
+                [1.0, y, 1.0 - w],
+                [1.0 - w, y, 1.0],
+                [0.0, y, 1.0],
+            ]);
+        }
+        let faces: [&[u32]; 7] = [
+            &[0, 1, 2, 3, 4],
+            &[5, 6, 7, 8, 9],
+            &[0, 4, 9, 5],
+            &[0, 1, 6, 5],
+            &[1, 2, 7, 6],
+            &[2, 3, 8, 7],
+            &[3, 4, 9, 8],
+        ];
+        let centre = [0.5; 3];
+        let mut f = Vec::new();
+        for poly in faces {
+            for k in 1..poly.len() - 1 {
+                let t = [poly[0], poly[k], poly[k + 1]];
+                let [a, b, c] = t.map(|v| p[v as usize]);
+                f.push(if dot(normal(a, b, c), sub(a, centre)) > 0.0 {
+                    t
+                } else {
+                    [t[0], t[2], t[1]]
+                });
+            }
+        }
+        (p, f)
+    }
+
+    fn smallest_angle(r: &Remeshed) -> f64 {
+        let angle = |a: Point3, b: Point3, c: Point3| {
+            let (u, w) = (sub(b, a), sub(c, a));
+            libm::acos((dot(u, w) / (norm(u) * norm(w))).clamp(-1.0, 1.0)).to_degrees()
+        };
+        r.triangles
+            .iter()
+            .map(|t| {
+                let [a, b, c] = t.map(|v| r.points[v as usize]);
+                angle(a, b, c).min(angle(b, c, a)).min(angle(c, a, b))
+            })
+            .fold(180.0, f64::min)
+    }
+
+    /// A chamfer far narrower than the size is merged away (its two lines
+    /// into one, its end corners into each other), so no needle triangles
+    /// run along it; the surface moves by at most the chamfer's width.
+    #[test]
+    fn a_feature_too_small_to_mesh_is_merged() {
+        let w = 0.005;
+        let (p, f) = chamfered_cube(w);
+        assert!((volume(&p, &f) - (1.0 - w * w / 2.0)).abs() < 1e-12);
+        let kept = remesh(
+            &p,
+            &f,
+            &[],
+            &|_| 0.2,
+            &RemeshParams {
+                small_feature: 0.0,
+                ..RemeshParams::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(kept.merged_small_features, 0);
+        assert!(smallest_angle(&kept) < 5.0, "{}", smallest_angle(&kept));
+        let r = remesh(&p, &f, &[], &|_| 0.2, &RemeshParams::default()).unwrap();
+        assert!(r.merged_small_features > 0);
+        assert!(smallest_angle(&r) > 20.0, "{}", smallest_angle(&r));
+        // A merged corner tilts the faces at it by up to `w`: the volume
+        // moves by at most w times their area (here one unit face).
+        let moved = (volume(&r.points, &r.triangles) - volume(&p, &f)).abs();
+        assert!(moved <= w, "{moved}");
+        // The six corners off the chamfer are kept.
+        for corner in [0, 1, 4, 5, 6, 9] {
+            assert!(r.points.contains(&p[corner]), "lost corner {corner}");
+        }
     }
 
     #[test]

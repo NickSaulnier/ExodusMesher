@@ -114,7 +114,99 @@ fn worst_face(points: &[Point3], tets: &[[u32; 4]]) -> String {
                 // plane, the nearest boundary face on each side.
                 let q = p(t);
                 let Some(free) = (0..4).find(|&m| !on_wall[tets[t][m] as usize]) else {
-                    return format!("{fixed} wall vertices, min dihedral {min:.2}");
+                    // Every vertex on the wall: its boundary faces (by the
+                    // opposite vertex), the cell's dihedral angle between
+                    // each two of them (the domain's angle at that edge),
+                    // and, across each other face, the opposite vertex's
+                    // height over it, over its longest edge.
+                    let opposite: Vec<usize> = (0..4)
+                        .filter(|&m| {
+                            let mut key = OUT[m].map(|j| tets[t][j]);
+                            key.sort_unstable();
+                            faces.get(&key).is_some_and(|c| c.len() == 1)
+                        })
+                        .collect();
+                    let angles = dihedral_angles(p(t));
+                    // dihedral_angles' order: edges 01, 02, 03, 12, 13, 23;
+                    // the faces opposite a and b meet at the edge of the
+                    // other two vertices.
+                    let edge_index = |a: usize, b: usize| {
+                        let mut e: Vec<usize> = (0..4).filter(|&m| m != a && m != b).collect();
+                        e.sort_unstable();
+                        match (e[0], e[1]) {
+                            (0, 1) => 0,
+                            (0, 2) => 1,
+                            (0, 3) => 2,
+                            (1, 2) => 3,
+                            (1, 3) => 4,
+                            _ => 5,
+                        }
+                    };
+                    let mut between = Vec::new();
+                    for (x, &a) in opposite.iter().enumerate() {
+                        for &b in &opposite[x + 1..] {
+                            between.push(format!("{:.1}°", angles[edge_index(a, b)]));
+                        }
+                    }
+                    let q = p(t);
+                    let heights: Vec<String> = (0..4)
+                        .filter(|m| !opposite.contains(m))
+                        .map(|m| {
+                            let o: Vec<Point3> = OUT[m].iter().map(|&j| q[j]).collect();
+                            let (u, w) = (sub(o[1], o[0]), sub(o[2], o[0]));
+                            let n = [
+                                u[1] * w[2] - u[2] * w[1],
+                                u[2] * w[0] - u[0] * w[2],
+                                u[0] * w[1] - u[1] * w[0],
+                            ];
+                            let nl = n.iter().map(|x| x * x).sum::<f64>().sqrt();
+                            let d = sub(q[m], o[0]);
+                            let h = (n[0] * d[0] + n[1] * d[1] + n[2] * d[2]).abs() / nl;
+                            let e = (0..3)
+                                .map(|k| {
+                                    let x = sub(o[(k + 1) % 3], o[k]);
+                                    (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt()
+                                })
+                                .fold(0.0, f64::max);
+                            format!("{:.3}", h / e)
+                        })
+                        .collect();
+                    // Each boundary face's smallest angle, and the cell's
+                    // vertices.
+                    let face_angles: Vec<String> = opposite
+                        .iter()
+                        .map(|&m| {
+                            let o: Vec<Point3> = OUT[m].iter().map(|&j| q[j]).collect();
+                            let angle = |a: Point3, b: Point3, c: Point3| {
+                                let (u, w) = (sub(b, a), sub(c, a));
+                                let d = u[0] * w[0] + u[1] * w[1] + u[2] * w[2];
+                                let l = (u.iter().map(|x| x * x).sum::<f64>()
+                                    * w.iter().map(|x| x * x).sum::<f64>())
+                                .sqrt();
+                                libm::acos((d / l).clamp(-1.0, 1.0)).to_degrees()
+                            };
+                            let a = angle(o[0], o[1], o[2])
+                                .min(angle(o[1], o[2], o[0]))
+                                .min(angle(o[2], o[0], o[1]));
+                            format!("{a:.1}°")
+                        })
+                        .collect();
+                    let corners: Vec<String> = q
+                        .iter()
+                        .map(|c| format!("({:.4}, {:.4}, {:.4})", c[0], c[1], c[2]))
+                        .collect();
+                    return format!(
+                        "{fixed} wall vertices, min dihedral {min:.2}, {} boundary faces at {} (smallest angles {}), interior faces' h/e {}, at {}",
+                        opposite.len(),
+                        if between.is_empty() {
+                            "-".to_owned()
+                        } else {
+                            between.join(" ")
+                        },
+                        face_angles.join(" "),
+                        heights.join(" "),
+                        corners.join(" ")
+                    );
                 };
                 let o: Vec<Point3> = (0..4).filter(|&m| m != free).map(|m| q[m]).collect();
                 let (u, w) = (sub(o[1], o[0]), sub(o[2], o[0]));
@@ -279,7 +371,19 @@ fn main() {
             );
             let diagonal = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f64>().sqrt();
             let h = 0.03 * diagonal;
-            let field = SizeField::from_surface(&points, &triangles, &SizingParams::for_size(h));
+            // `IMPROVE_SIZE_FLOOR=k`: the size field's floor h/k (default 4);
+            // `IMPROVE_BOUNDARY_FLOOR=k`: the kernel's h/k (default 16).
+            let floor = |name: &str, default: f64| {
+                std::env::var(name)
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(default)
+            };
+            let sizing = SizingParams {
+                min_size: h / floor("IMPROVE_SIZE_FLOOR", 4.0),
+                ..SizingParams::for_size(h)
+            };
+            let field = SizeField::from_surface(&points, &triangles, &sizing);
             // `IMPROVE_REMESH=1`: the surface remeshed to the size field
             // first, each triangle its own facet, as the pipeline's
             // fallback does.
@@ -308,6 +412,7 @@ fn main() {
             let params = ConformingParams {
                 size: (!field.is_uniform()).then(|| Arc::new(field)),
                 groups,
+                min_boundary_size: h / floor("IMPROVE_BOUNDARY_FLOOR", 16.0),
                 ..ConformingParams::with_size(h)
             };
             conforming_mesh(&surface_points, &surface, &params)

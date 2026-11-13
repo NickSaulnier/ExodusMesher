@@ -203,7 +203,7 @@ fn mesh_part(
     // strictly better. `--no-remesh` keeps the input's triangulation.
     let mut conformal_failure: Option<Record> = None;
     if r.summary.gate_passed && !config.stuffing_only {
-        let mut candidates: Vec<(Candidate, Option<usize>)> = Vec::new();
+        let mut candidates: Vec<(Candidate, Option<Remeshing>)> = Vec::new();
         let mut exact_worst = None;
         match conformal(model, r, h, config, false) {
             Ok(c) => {
@@ -219,13 +219,13 @@ fn mesh_part(
         let mut remeshed_worst = None;
         if !config.no_remesh && exact_worst.is_none_or(|w| w < 1.0) {
             match remeshed(model, r, h, config) {
-                Ok((triangles, c)) => {
+                Ok((remeshing, c)) => {
                     let w = worst_cell(&c);
                     remeshed_worst = Some(w);
                     if exact_worst.is_some_and(|e| w > e) {
-                        candidates.insert(0, (c, Some(triangles)));
+                        candidates.insert(0, (c, Some(remeshing)));
                     } else {
-                        candidates.push((c, Some(triangles)));
+                        candidates.push((c, Some(remeshing)));
                     }
                 }
                 Err(reason) => {
@@ -257,9 +257,9 @@ fn mesh_part(
                     };
                     if accepted && volume_error <= FAR_MAX_VOLUME_ERROR {
                         // The conformal meshes are not kept.
-                        for (_, remeshed_triangles) in &candidates {
+                        for (_, remeshing) in &candidates {
                             outcome.attempts.push(Attempt {
-                                remeshed: remeshed_triangles.is_some(),
+                                remeshed: remeshing.is_some(),
                                 ..attempt(Kernel::Delaunay, false)
                             });
                         }
@@ -304,10 +304,10 @@ fn mesh_part(
                 outcome.attempts.push(attempt(Kernel::Stuffing, false));
             }
         }
-        for (i, (c, remeshed_triangles)) in candidates.into_iter().enumerate() {
+        for (i, (c, remeshing)) in candidates.into_iter().enumerate() {
             let (accepted, summary) = volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;
             outcome.attempts.push(Attempt {
-                remeshed: remeshed_triangles.is_some(),
+                remeshed: remeshing.is_some(),
                 ..attempt(Kernel::Delaunay, accepted)
             });
             outcome.summaries.retain(|(i, _)| *i != r.part);
@@ -318,37 +318,35 @@ fn mesh_part(
                     // around by this one.
                     log.worked_around(
                         name,
-                        if remeshed_triangles.is_some() {
+                        if remeshing.is_some() {
                             Action::Remesh
                         } else {
                             Action::Fallback
                         },
                     );
                 }
-                if let Some(triangles) = remeshed_triangles {
+                if let Some(remeshing) = remeshing {
                     // Findings deferred to remeshing are now dealt with.
                     log.deferred_applied(name, Action::Remesh);
                     let rec = match conformal_failure.take() {
                         // The repaired surface did not mesh: remeshing
                         // worked around it.
-                        Some(rec) => {
-                            rec.severity(Severity::Warning)
-                                .measured("remeshed_triangles", triangles as u64)
-                                .action(Action::Remesh, Outcome::Applied)
-                        }
+                        Some(rec) => remeshing
+                            .measure(rec.severity(Severity::Warning))
+                            .action(Action::Remesh, Outcome::Applied),
                         // It meshed, with poor cells: the boundary
                         // triangulation is no longer the input's, so say so.
-                        None => {
-                            Record::new(DefectCode::VolLowQuality, Stage::VolumeMesh)
-                                .part(name)
-                                .severity(Severity::Info)
-                                .measured("input_worst_cell", exact_worst.unwrap_or(0.0))
-                                .measured("remeshed_worst_cell", remeshed_worst.unwrap_or(0.0))
-                                .measured("remeshed_triangles", triangles as u64)
-                                .threshold("worst_cell", 1.0)
+                        None => remeshing
+                            .measure(
+                                Record::new(DefectCode::VolLowQuality, Stage::VolumeMesh)
+                                    .part(name)
+                                    .severity(Severity::Info)
+                                    .measured("input_worst_cell", exact_worst.unwrap_or(0.0))
+                                    .measured("remeshed_worst_cell", remeshed_worst.unwrap_or(0.0)),
+                            )
+                            .threshold("worst_cell", 1.0)
                                 .action(Action::Remesh, Outcome::Applied)
-                                .hint("the input's triangulation gave cells beyond the quality limits; the surface was remeshed to the element size, which gave better ones")
-                        }
+                            .hint("the input's triangulation gave cells beyond the quality limits; the surface was remeshed to the element size, which gave better ones"),
                     };
                     log.push(rec);
                 }
@@ -363,7 +361,7 @@ fn mesh_part(
                 });
                 return Ok(());
             }
-            if remeshed_triangles.is_some() {
+            if remeshing.is_some() {
                 remesh_failure = Some("rejected by the volume gate".to_owned());
             } else {
                 conformal_failure = Some(
@@ -697,12 +695,32 @@ fn improve_cells(c: &mut Candidate) {
 /// why not.
 /// The repaired surface remeshed to the size field, and its conformal mesh:
 /// the number of remeshed triangles and the candidate, or why not.
+/// What remeshing did to a part's surface, for its records.
+#[derive(Debug, Clone, Copy)]
+struct Remeshing {
+    triangles: usize,
+    /// Features too small to mesh that were merged away (each moves the
+    /// surface by at most a tenth of the local size).
+    merged_small_features: usize,
+}
+
+impl Remeshing {
+    fn measure(self, rec: Record) -> Record {
+        let rec = rec.measured("remeshed_triangles", self.triangles as u64);
+        if self.merged_small_features > 0 {
+            rec.measured("merged_small_features", self.merged_small_features as u64)
+        } else {
+            rec
+        }
+    }
+}
+
 fn remeshed(
     model: &SurfaceModel,
     r: &RepairedPart,
     h: f64,
     config: &JobConfig,
-) -> Result<(usize, Candidate), String> {
+) -> Result<(Remeshing, Candidate), String> {
     let field = if config.uniform_size {
         SizeField::uniform(h)
     } else {
@@ -726,7 +744,10 @@ fn remeshed(
         &RemeshParams::default(),
     )
     .map_err(|e| e.to_string())?;
-    let faces = s.triangles.len();
+    let remeshing = Remeshing {
+        triangles: s.triangles.len(),
+        merged_small_features: s.merged_small_features,
+    };
     let surface = RepairedPart {
         points: s.points,
         faces: s.triangles,
@@ -751,7 +772,7 @@ fn remeshed(
             .unwrap_or_else(|| "conformal meshing failed".to_owned())
     })?;
     c.remeshed = true;
-    Ok((faces, c))
+    Ok((remeshing, c))
 }
 
 /// The conformal mesh of a surface. With `own_facets`, every triangle is
