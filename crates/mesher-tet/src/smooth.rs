@@ -139,7 +139,8 @@ fn positive(p: [Point3; 4]) -> Option<f64> {
 /// Try candidate positions for `v`; keep the best if it improves.
 fn improve(points: &mut [Point3], tets: &[[u32; 4]], star: &[u32], v: u32) -> bool {
     let at = |x: Point3| quality_at(points, tets, star, v, x, &positive);
-    match best_position(points, tets, star, v, &at) {
+    let pos = |w: u32| points[w as usize];
+    match best_position(&pos, tets, star, v, &at) {
         Some((q0, q, x)) if q > q0 + 1e-9 => {
             points[v as usize] = x;
             true
@@ -155,15 +156,16 @@ pub(crate) type At<'a> = &'a dyn Fn(Point3) -> Option<f64>;
 /// The quality around `v` where it is (negative infinity if a tet there is
 /// not usable), and the best of the candidate positions with its quality
 /// (`v`'s own position if none is better), by `at`. `None` if `v` has no
-/// neighbours. `star` indexes `tets`; every tet in it has `v`.
+/// neighbours. `star` indexes `tets`; every tet in it has `v`; `pos` gives
+/// each vertex's position.
 pub(crate) fn best_position(
-    points: &[Point3],
+    pos: &dyn Fn(u32) -> Point3,
     tets: &[[u32; 4]],
     star: &[u32],
     v: u32,
     at: At<'_>,
 ) -> Option<(f64, f64, Point3)> {
-    let p = points[v as usize];
+    let p = pos(v);
     let q0 = at(p).unwrap_or(f64::NEG_INFINITY);
     // Neighbours and the local edge length.
     let mut neighbours: Vec<u32> = star
@@ -178,7 +180,7 @@ pub(crate) fn best_position(
     }
     let length = neighbours
         .iter()
-        .map(|&w| norm(sub(points[w as usize], p)))
+        .map(|&w| norm(sub(pos(w), p)))
         .sum::<f64>()
         / neighbours.len() as f64;
     if !(length > 0.0 && length.is_finite()) {
@@ -186,7 +188,7 @@ pub(crate) fn best_position(
     }
     let mut centroid = [0.0; 3];
     for &w in &neighbours {
-        centroid = add(centroid, points[w as usize]);
+        centroid = add(centroid, pos(w));
     }
     centroid = scale(centroid, 1.0 / neighbours.len() as f64);
 
@@ -215,13 +217,13 @@ pub(crate) fn best_position(
     // Away from the face opposite `v` in its worst tet: a sliver standing on
     // a face with its apex nearly in the face's plane.
     if let Some(&worst) = star.iter().min_by(|&&a, &&b| {
-        let q = |t: u32| min_dihedral(tets[t as usize].map(|w| points[w as usize]));
+        let q = |t: u32| min_dihedral(tets[t as usize].map(pos));
         q(a).total_cmp(&q(b)).then(a.cmp(&b))
     }) {
         let others: Vec<Point3> = tets[worst as usize]
             .iter()
             .filter(|&&w| w != v)
-            .map(|&w| points[w as usize])
+            .map(|&w| pos(w))
             .collect();
         let n = cross(sub(others[1], others[0]), sub(others[2], others[0]));
         let l = norm(n);

@@ -38,10 +38,25 @@
 //! the volume is unchanged, and a mesh positive before stays positive
 //! after. Deterministic: the poor cells go in order of quality and index,
 //! and every choice is by a fixed order.
+//!
+//! **In parallel, with the serial result.** The poor cells of a pass are
+//! taken in batches. Each cell of a batch is evaluated (its best operation
+//! found) in parallel against the mesh as it is at the batch's start, and
+//! the evaluation records what it read: the tets (their vertices, quality
+//! and wall flag) and the vertex stars. The operations are then applied in
+//! the serial order; one whose evaluation read a tet or a star that an
+//! operation applied before it in the batch changed is evaluated again
+//! first. So every operation is the one the serial pass would choose, and
+//! the mesh is the same at any number of threads. A new vertex (a split's
+//! or an insertion's) is a placeholder until its operation is applied, when
+//! it gets the next index, as it would serially.
+
+use std::cell::RefCell;
 
 use mesher_geom::predicates::{insphere, orient3d};
 use mesher_geom::vec3::{add, cross, dot, norm, scale, sub};
 use mesher_geom::{Point3, Sign};
+use rayon::prelude::*;
 
 use crate::fxhash::FxHashMap;
 use crate::quality::float_volume;
@@ -57,6 +72,55 @@ const MAX_RING: usize = 10;
 
 /// Most tets an insertion replaces.
 const MAX_CAVITY: usize = 128;
+
+/// Poor cells evaluated together, per thread. Larger batches leave threads
+/// less idle at the batch's end but go stale more often (on 894834 with 32
+/// threads: 1, 2, 4, 8 and 16 a thread took 28, 24, 24, 27 and 33 s).
+const BATCH_PER_THREAD: usize = 2;
+
+/// An operation's new vertex (a split's or an insertion's) until the
+/// operation is applied, when it gets the next index.
+const NEW: u32 = u32::MAX;
+
+/// What an evaluation read: tets (their vertices, quality and wall flag)
+/// and vertex stars. Points need no record: a point is read only for a
+/// vertex of a tet read, or one whose star was read, and moving a vertex
+/// changes every tet of its star.
+#[derive(Default)]
+struct Reads {
+    tets: Vec<u32>,
+    stars: Vec<u32>,
+}
+
+thread_local! {
+    /// The reads of the evaluation running on this thread, while one is
+    /// recorded.
+    static READS: RefCell<Option<Reads>> = const { RefCell::new(None) };
+}
+
+fn read_tet(t: u32) {
+    READS.with(|r| {
+        if let Some(r) = r.borrow_mut().as_mut() {
+            r.tets.push(t);
+        }
+    });
+}
+
+fn read_star(v: u32) {
+    READS.with(|r| {
+        if let Some(r) = r.borrow_mut().as_mut() {
+            r.stars.push(v);
+        }
+    });
+}
+
+/// `f`'s result and what it read.
+fn recording<T>(f: impl FnOnce() -> T) -> (T, Reads) {
+    READS.with(|r| *r.borrow_mut() = Some(Reads::default()));
+    let out = f();
+    let reads = READS.with(|r| r.borrow_mut().take()).unwrap_or_default();
+    (out, reads)
+}
 
 /// The six edges of a tet, by local index.
 const EDGES: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
@@ -331,17 +395,57 @@ struct Mesh {
     /// On a boundary face.
     fixed: Vec<bool>,
     targets: Targets,
+    /// The batch that last changed each tet (removed it, or changed its
+    /// quality or wall flag) and each vertex (moved it or changed its star).
+    tet_batch: Vec<u32>,
+    vertex_batch: Vec<u32>,
+    batch: u32,
 }
 
 impl Mesh {
+    /// Tet `t`'s vertices, recorded as read.
+    fn tet(&self, t: u32) -> [u32; 4] {
+        read_tet(t);
+        self.tets[t as usize]
+    }
+
+    fn q_of(&self, t: u32) -> Score {
+        read_tet(t);
+        self.q[t as usize]
+    }
+
+    fn wall_of(&self, t: u32) -> bool {
+        read_tet(t);
+        self.wall[t as usize]
+    }
+
+    /// The live tets around vertex `v`, recorded as read.
+    fn star_of(&self, v: u32) -> &[u32] {
+        read_star(v);
+        &self.star[v as usize]
+    }
+
+    /// Whether an evaluation that read `reads` may have read something an
+    /// operation of this batch changed since.
+    fn stale(&self, reads: &Reads) -> bool {
+        reads
+            .tets
+            .iter()
+            .any(|&t| self.tet_batch[t as usize] == self.batch)
+            || reads
+                .stars
+                .iter()
+                .any(|&v| self.vertex_batch[v as usize] == self.batch)
+    }
+
     fn corners(&self, t: [u32; 4]) -> [Point3; 4] {
         t.map(|v| self.points[v as usize])
     }
 
     /// The live tet with face `f`, other than those in `skip`.
     fn across(&self, f: [u32; 3], skip: &[u32]) -> Option<u32> {
-        self.star[f[0] as usize].iter().copied().find(|&u| {
-            let t = self.tets[u as usize];
+        self.star_of(f[0]).iter().copied().find(|&u| {
+            let t = self.tet(u);
             !skip.contains(&u) && t.contains(&f[1]) && t.contains(&f[2])
         })
     }
@@ -391,6 +495,7 @@ impl Mesh {
         all.sort_unstable();
         all.dedup();
         for t in all {
+            self.tet_batch[t as usize] = self.batch;
             (self.q[t as usize], self.wall[t as usize]) = self.cell(t);
         }
     }
@@ -399,6 +504,7 @@ impl Mesh {
         let id = self.tets.len() as u32;
         self.q.push(UNUSABLE);
         self.wall.push(false);
+        self.tet_batch.push(0);
         self.tets.push(t);
         self.alive.push(true);
         for v in t {
@@ -414,19 +520,34 @@ impl Mesh {
         }
     }
 
-    fn apply(&mut self, op: Op) {
+    fn apply(&mut self, mut op: Op) {
         if let Some((v, x)) = op.moved {
             self.points[v as usize] = x;
+            self.vertex_batch[v as usize] = self.batch;
             self.refresh(&op.old);
             return;
         }
         if let Some(x) = op.point {
+            let m = self.points.len() as u32;
             self.points.push(x);
             self.star.push(Vec::new());
             self.fixed.push(false);
+            self.vertex_batch.push(0);
+            for v in op.new.iter_mut().flatten() {
+                if *v == NEW {
+                    *v = m;
+                }
+            }
         }
         for &t in &op.old {
+            self.tet_batch[t as usize] = self.batch;
+            for v in self.tets[t as usize] {
+                self.vertex_batch[v as usize] = self.batch;
+            }
             self.remove(t);
+        }
+        for &v in op.new.iter().flatten() {
+            self.vertex_batch[v as usize] = self.batch;
         }
         let ids: Vec<u32> = op.new.into_iter().map(|t| self.add(t)).collect();
         self.refresh(&ids);
@@ -436,7 +557,7 @@ impl Mesh {
     fn worst(&self, ids: &[u32]) -> Score {
         ids.iter()
             .fold([f64::INFINITY, f64::INFINITY, 0.0], |w, &t| {
-                let q = self.q[t as usize];
+                let q = self.q_of(t);
                 [w[0].min(q[0]), w[1].min(q[1]), 0.0]
             })
     }
@@ -444,7 +565,7 @@ impl Mesh {
     /// The score of tets `ids` and their faces as they are, with the
     /// shortfall.
     fn region(&self, ids: &[u32]) -> Option<Score> {
-        let tets: Vec<[u32; 4]> = ids.iter().map(|&t| self.tets[t as usize]).collect();
+        let tets: Vec<[u32; 4]> = ids.iter().map(|&t| self.tet(t)).collect();
         let frame = self.frame(ids, &tets)?;
         Some(self.eval(&tets, &frame, None))
     }
@@ -478,12 +599,12 @@ impl Mesh {
                 i += 2;
                 continue;
             }
-            let kept = self.star[k[0] as usize].iter().copied().find(|&u| {
-                let t = self.tets[u as usize];
+            let kept = self.star_of(k[0]).iter().copied().find(|&u| {
+                let t = self.tet(u);
                 t.contains(&k[1]) && t.contains(&k[2]) && old.binary_search(&u).is_err()
             });
             let across = match kept {
-                Some(u) => Across::Cell(centroid(self.corners(self.tets[u as usize]))),
+                Some(u) => Across::Cell(centroid(self.corners(self.tet(u)))),
                 None if k
                     .iter()
                     .all(|&v| self.fixed.get(v as usize).copied().unwrap_or(false)) =>
@@ -577,7 +698,7 @@ impl Mesh {
     /// leaves the mesh or does not end.
     fn locate(&self, mut t: u32, p: Point3) -> Option<u32> {
         'walk: for _ in 0..4096 {
-            let tet = self.tets[t as usize];
+            let tet = self.tet(t);
             for f in INWARD {
                 let f = f.map(|k| tet[k]);
                 let [a, b, c] = f.map(|v| self.points[v as usize]);
@@ -603,7 +724,7 @@ impl Mesh {
         while next < cavity.len() && cavity.len() < MAX_CAVITY {
             let c = cavity[next];
             next += 1;
-            let tet = self.tets[c as usize];
+            let tet = self.tet(c);
             for f in INWARD {
                 let Some(u) = self.across(f.map(|k| tet[k]), &[c]) else {
                     continue;
@@ -611,7 +732,7 @@ impl Mesh {
                 if cavity.contains(&u) || cavity.len() >= MAX_CAVITY {
                     continue;
                 }
-                let [a, b, d, e] = self.corners(self.tets[u as usize]);
+                let [a, b, d, e] = self.corners(self.tet(u));
                 if insphere(a, b, d, e, p) == Sign::Positive {
                     cavity.push(u);
                 }
@@ -622,7 +743,7 @@ impl Mesh {
             let mut hidden = Vec::new();
             let mut new = Vec::new();
             for &c in &cavity {
-                let tet = self.tets[c as usize];
+                let tet = self.tet(c);
                 for f in INWARD {
                     let f = f.map(|k| tet[k]);
                     if self.across(f, &[c]).is_some_and(|u| cavity.contains(&u)) {
@@ -643,13 +764,13 @@ impl Mesh {
             }
             cavity.retain(|c| !hidden.contains(c));
         };
-        let m = self.points.len() as u32;
+        let m = NEW;
         let new: Vec<[u32; 4]> = new.into_iter().map(|[a, b, c]| [a, b, c, m]).collect();
         // The cone must fill the cavity exactly: a cavity that is not
         // star-shaped from `p` would overlap itself.
         let before: f64 = cavity
             .iter()
-            .map(|&c| float_volume(self.corners(self.tets[c as usize])))
+            .map(|&c| float_volume(self.corners(self.tet(c))))
             .sum();
         let after: f64 = new
             .iter()
@@ -666,7 +787,7 @@ impl Mesh {
     /// the line through the face's centroid along its inward normal, at a
     /// few fractions of a regular tet's height on that face.
     fn insertions(&self, t: u32) -> Vec<Op> {
-        let tet = self.tets[t as usize];
+        let tet = self.tet(t);
         let mut ops = Vec::new();
         for f in INWARD {
             let f = f.map(|k| tet[k]);
@@ -692,10 +813,10 @@ impl Mesh {
     }
 
     fn edge_tets(&self, a: u32, b: u32) -> Vec<u32> {
-        self.star[a as usize]
+        self.star_of(a)
             .iter()
             .copied()
-            .filter(|&t| self.tets[t as usize].contains(&b))
+            .filter(|&t| self.tet(t).contains(&b))
             .collect()
     }
 
@@ -709,7 +830,7 @@ impl Mesh {
         }
         let mut pairs = Vec::with_capacity(around.len());
         for &t in &around {
-            let tet = self.tets[t as usize];
+            let tet = self.tet(t);
             let mut others = tet.iter().copied().filter(|&x| x != a && x != b);
             let (Some(x), Some(y), None) = (others.next(), others.next(), others.next()) else {
                 return None;
@@ -759,7 +880,7 @@ impl Mesh {
             let mut f = [apex, r[i], r[(i + 1) % k]];
             f.sort_unstable();
             match self.across(f, old) {
-                Some(u) => Some(Some(centroid(self.corners(self.tets[u as usize])))),
+                Some(u) => Some(Some(centroid(self.corners(self.tet(u))))),
                 None => f.iter().all(|&v| self.fixed[v as usize]).then_some(None),
             }
         };
@@ -855,11 +976,12 @@ impl Mesh {
     /// The 2-3 flip of the face of tet `t` opposite its vertex `i`.
     fn flip(&self, t: u32, i: usize) -> Option<Op> {
         let _prof = crate::prof::scope("improve::flip");
-        let tet = self.tets[t as usize];
+        let tet = self.tet(t);
         let d = tet[i];
         let [a, b, c] = INWARD[i].map(|k| tet[k]);
         let u = self.across([a, b, c], &[t])?;
-        let e = self.tets[u as usize]
+        let e = self
+            .tet(u)
             .into_iter()
             .find(|&x| x != a && x != b && x != c)?;
         if e == d {
@@ -871,10 +993,10 @@ impl Mesh {
     /// Collapse free vertex `v` into its neighbour `w`.
     fn collapse(&self, v: u32, w: u32) -> Option<Op> {
         let _prof = crate::prof::scope("improve::collapse");
-        let old = self.star[v as usize].clone();
+        let old = self.star_of(v).to_vec();
         let new: Vec<[u32; 4]> = old
             .iter()
-            .map(|&t| self.tets[t as usize])
+            .map(|&t| self.tet(t))
             .filter(|t| !t.contains(&w))
             .map(|t| t.map(|x| if x == v { w } else { x }))
             .collect();
@@ -886,17 +1008,17 @@ impl Mesh {
 
     /// Split interior edge `ab` at a new vertex, placed at the best of the
     /// candidate positions around the midpoint.
-    fn split(&mut self, a: u32, b: u32) -> Option<Op> {
+    fn split(&self, a: u32, b: u32) -> Option<Op> {
         let _prof = crate::prof::scope("improve::split");
         let (old, _) = self.ring(a, b)?;
         let before = self.region(&old)?;
-        let m = self.points.len() as u32;
+        let m = NEW;
         let (pa, pb) = (self.points[a as usize], self.points[b as usize]);
         let mid = [0, 1, 2].map(|k| 0.5 * (pa[k] + pb[k]));
         let new: Vec<[u32; 4]> = old
             .iter()
             .flat_map(|&t| {
-                let tet = self.tets[t as usize];
+                let tet = self.tet(t);
                 [
                     tet.map(|x| if x == a { m } else { x }),
                     tet.map(|x| if x == b { m } else { x }),
@@ -905,12 +1027,9 @@ impl Mesh {
             .collect();
         let frame = self.frame(&old, &new)?;
         let star: Vec<u32> = (0..new.len() as u32).collect();
-        self.points.push(mid);
-        let this = &*self;
-        let at = |x: Point3| this.admissible(before, this.eval(&new, &frame, Some((m, x))));
-        let found = best_position(&this.points, &new, &star, m, &at);
-        self.points.pop();
-        let (_, _, x) = found?;
+        let pos = |v: u32| if v == m { mid } else { self.points[v as usize] };
+        let at = |x: Point3| self.admissible(before, self.eval(&new, &frame, Some((m, x))));
+        let (_, _, x) = best_position(&pos, &new, &star, m, &at)?;
         let after = self.eval(&new, &frame, Some((m, x)));
         improves(before, after).then_some(Op {
             old,
@@ -937,13 +1056,14 @@ impl Mesh {
         if self.fixed[v as usize] {
             return None;
         }
-        let star = self.star[v as usize].clone();
-        let tets: Vec<[u32; 4]> = star.iter().map(|&t| self.tets[t as usize]).collect();
+        let star = self.star_of(v).to_vec();
+        let tets: Vec<[u32; 4]> = star.iter().map(|&t| self.tet(t)).collect();
         let frame = self.frame(&star, &tets)?;
         let before = self.eval(&tets, &frame, None);
         let at = |x: Point3| self.admissible(before, self.eval(&tets, &frame, Some((v, x))));
         let local: Vec<u32> = (0..tets.len() as u32).collect();
-        let (_, _, x) = best_position(&self.points, &tets, &local, v, &at)?;
+        let pos = |w: u32| self.points[w as usize];
+        let (_, _, x) = best_position(&pos, &tets, &local, v, &at)?;
         let after = self.eval(&tets, &frame, Some((v, x)));
         improves(before, after).then_some(Op {
             old: star,
@@ -955,11 +1075,13 @@ impl Mesh {
         })
     }
 
-    /// Improve poor tet `t`: flips first; if none raises the worst of its
-    /// region, every kind of operation (flips, vertex moves, collapses,
-    /// splits, insertions above its boundary faces), the best by `key`.
-    fn fix(&mut self, t: u32, params: &ImproveParams, stats: &mut ImproveStats) -> bool {
-        let tet = self.tets[t as usize];
+    /// The operation that improves poor tet `t`: flips first; if none
+    /// raises the worst of its region, every kind of operation (flips,
+    /// vertex moves, collapses, splits, insertions above its boundary
+    /// faces), the best by `key`.
+    fn evaluate(&self, t: u32, params: &ImproveParams) -> Option<(Op, Kind)> {
+        let _prof = crate::prof::scope("improve::evaluate");
+        let tet = self.tet(t);
         let mut best: Option<(Op, Kind)> = None;
         let offer = |op: Option<Op>, kind: Kind, best: &mut Option<(Op, Kind)>| {
             if let Some(op) = op {
@@ -988,9 +1110,10 @@ impl Mesh {
                 if self.fixed[v as usize] || !params.collapses {
                     continue;
                 }
-                let mut neighbours: Vec<u32> = self.star[v as usize]
+                let mut neighbours: Vec<u32> = self
+                    .star_of(v)
                     .iter()
-                    .flat_map(|&s| self.tets[s as usize])
+                    .flat_map(|&s| self.tet(s))
                     .filter(|&w| w != v)
                     .collect();
                 neighbours.sort_unstable();
@@ -1005,15 +1128,17 @@ impl Mesh {
                     offer(op, Kind::Split, &mut best);
                 }
             }
-            if params.insertions && self.wall[t as usize] {
+            if params.insertions && self.wall_of(t) {
                 for op in self.insertions(t) {
                     offer(Some(op), Kind::Insertion, &mut best);
                 }
             }
         }
-        let Some((op, kind)) = best else {
-            return false;
-        };
+        best
+    }
+
+    /// Apply an operation `evaluate` chose, counting it.
+    fn commit(&mut self, op: Op, kind: Kind, stats: &mut ImproveStats) {
         match kind {
             Kind::Flip => stats.flips += 1,
             Kind::EdgeRemoval => stats.edge_removals += 1,
@@ -1023,7 +1148,6 @@ impl Mesh {
             Kind::Insertion => stats.insertions += 1,
         }
         self.apply(op);
-        true
     }
 
     /// The smallest dihedral angle (-1 if a tet is not usable), the worst
@@ -1068,6 +1192,9 @@ pub fn improve(points: &[Point3], tets: &[[u32; 4]], params: &ImproveParams) -> 
         star: vec![Vec::new(); points.len()],
         fixed: vec![false; points.len()],
         targets: Targets::new(params),
+        tet_batch: Vec::with_capacity(tets.len()),
+        vertex_batch: vec![0; points.len()],
+        batch: 0,
     };
     for &t in tets {
         mesh.add(t);
@@ -1111,13 +1238,42 @@ pub fn improve(points: &[Point3], tets: &[[u32; 4]], params: &ImproveParams) -> 
                 .then(low(mesh.q[a]).total_cmp(&low(mesh.q[b])))
                 .then(a.cmp(&b))
         });
+        let live = |mesh: &Mesh, t: u32| mesh.alive[t as usize] && low(mesh.q[t as usize]) < 1.0;
         let mut changed = 0;
-        for t in poor {
-            if mesh.alive[t as usize]
-                && low(mesh.q[t as usize]) < 1.0
-                && mesh.fix(t, params, &mut stats)
-            {
-                changed += 1;
+        let threads = rayon::current_num_threads();
+        if threads <= 1 {
+            for t in poor {
+                if live(&mesh, t) {
+                    if let Some((op, kind)) = mesh.evaluate(t, params) {
+                        mesh.commit(op, kind, &mut stats);
+                        changed += 1;
+                    }
+                }
+            }
+        } else {
+            for chunk in poor.chunks(BATCH_PER_THREAD * threads) {
+                mesh.batch += 1;
+                let m = &mesh;
+                let speculated: Vec<_> = chunk
+                    .par_iter()
+                    .map(|&t| live(m, t).then(|| recording(|| m.evaluate(t, params))))
+                    .collect();
+                for (&t, speculated) in chunk.iter().zip(speculated) {
+                    if !live(&mesh, t) {
+                        continue;
+                    }
+                    let found = match speculated {
+                        Some((found, reads)) if !mesh.stale(&reads) => found,
+                        _ => {
+                            let _prof = crate::prof::scope("improve::reevaluate");
+                            mesh.evaluate(t, params)
+                        }
+                    };
+                    if let Some((op, kind)) = found {
+                        mesh.commit(op, kind, &mut stats);
+                        changed += 1;
+                    }
+                }
             }
         }
         if changed == 0 {
@@ -1345,6 +1501,37 @@ mod tests {
             let again = improve(&p, &t, &params);
             assert_eq!(again.points, r.points);
             assert_eq!(again.tets, r.tets);
+        }
+    }
+
+    /// The parallel pass gives the serial pass's mesh, bit for bit, at any
+    /// number of threads; the meshes are dense in poor cells, so many
+    /// speculative evaluations go stale and are redone.
+    #[test]
+    fn the_same_mesh_at_any_thread_count() {
+        for seed in [4, 5] {
+            let (p, t) = random_mesh(600, seed);
+            let params = ImproveParams {
+                target_degrees: 25.0,
+                ..ImproveParams::default()
+            };
+            let at = |threads: usize| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(|| improve(&p, &t, &params))
+            };
+            let serial = at(1);
+            let s = serial.stats;
+            assert!(s.splits + s.insertions + s.collapses > 0, "{s:?}");
+            for threads in [2, 4, 16] {
+                let r = at(threads);
+                assert_eq!(r.points, serial.points, "{threads} threads");
+                assert_eq!(r.tets, serial.tets, "{threads} threads");
+                assert_eq!(r.map, serial.map, "{threads} threads");
+                assert_eq!(r.stats, serial.stats, "{threads} threads");
+            }
         }
     }
 
