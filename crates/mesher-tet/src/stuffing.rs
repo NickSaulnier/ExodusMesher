@@ -32,12 +32,17 @@ use mesher_geom::vec3::{add, distance_squared, scale, sub};
 use mesher_geom::{Aabb, Point3, Sign};
 use rayon::prelude::*;
 
-/// Warping thresholds from the paper.
+/// Warping thresholds from the paper: Table 1's "minimum dihedral angle,
+/// safe" row, for which no BCC tetrahedron can be inverted by warping.
 pub const ALPHA_LONG: f64 = 0.24999;
 pub const ALPHA_SHORT: f64 = 0.41189;
-/// The dihedral-angle bounds the paper proves for these thresholds.
-pub const DIHEDRAL_MIN_DEGREES: f64 = 10.7;
-pub const DIHEDRAL_MAX_DEGREES: f64 = 164.8;
+/// The dihedral-angle bounds the paper proves for these thresholds (Table 1,
+/// computer-verified, tight to 0.0001°). The abstract's 10.7° and 164.8°
+/// belong to the "unsafe" row (α 0.28511 and 0.39882), whose warping can
+/// invert BCC tetrahedra; they do not hold here (a whole BCC tetrahedron
+/// with three warped vertices reaches 10.23°).
+pub const DIHEDRAL_MIN_DEGREES: f64 = 9.3171;
+pub const DIHEDRAL_MAX_DEGREES: f64 = 161.6432;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StuffingParams {

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 6a79c59cdcb08cfc35f7b5dad2c82eb08a0786c21d18be44461fb5adac481010 # shrinks to s = Torus { c: [0.0, 0.0, 0.0], big: 1.929974734231209, small: 0.3949855383338231 }, cells = 16.60121184962572
+cc c24e00bcd7e297c30c7159d9b63db9fe2f3f461270c30f0a90addc40c4e9677f # shrinks to s = Ellipsoid { c: [0.0, 0.0, 0.0], axes: [0.6753579388893078, 1.5299716293872885, 1.3110366635851445] }, cells = 15.862503793006688
