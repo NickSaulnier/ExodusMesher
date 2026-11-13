@@ -2,20 +2,30 @@
 //! sliver face, meshed on its own triangulation (`--no-remesh`), keeps poor
 //! cells at the sliver; each measure beyond its limit gets a
 //! `VOL_LOW_QUALITY` warning located at the worst cell, and the summary
-//! locates the worst of every measure.
+//! locates the worst of every measure. Far beyond the limits, stuffing is
+//! kept instead if its cells are better.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
 use mesher_core::repair::repair;
 use mesher_core::volume::{MeshOutcome, mesh_parts};
-use mesher_core::{DefectCode, JobConfig, QualityMeasure, Record, RecordLog, Severity};
+use mesher_core::{
+    Action, AttemptOutcome, DefectCode, JobConfig, Kernel, Outcome, QualityMeasure, Record,
+    RecordLog, Severity,
+};
 use mesher_io::parse_obj;
 use mesher_synthetic::{Scene, Solid};
 use mesher_tet::fv_quality;
 
 /// The cube with a sliver face, and the sliver's apex.
 fn sliver_cube() -> (Scene, [f64; 3]) {
+    sliver_cube_at(0.002)
+}
+
+/// The cube with a sliver face whose apex is `t` of the way from the
+/// middle of its long edge to the opposite corner.
+fn sliver_cube_at(t: f64) -> (Scene, [f64; 3]) {
     let mut s = Solid::unit_cube();
     let [a, b, c] = s.tris[0];
     let (pa, pb, pc) = (
@@ -25,7 +35,7 @@ fn sliver_cube() -> (Scene, [f64; 3]) {
     );
     let mid = [0, 1, 2].map(|k| (pa[k] + pb[k]) / 2.0);
     s.points
-        .push([0, 1, 2].map(|k| mid[k] + 0.002 * (pc[k] - mid[k])));
+        .push([0, 1, 2].map(|k| mid[k] + t * (pc[k] - mid[k])));
     let m = s.points.len() as u32 - 1;
     s.tris[0] = [a, b, m];
     s.tris.push([b, c, m]);
@@ -35,12 +45,16 @@ fn sliver_cube() -> (Scene, [f64; 3]) {
 }
 
 fn mesh(scene: &Scene, no_remesh: bool) -> (Vec<Record>, MeshOutcome) {
+    mesh_at(scene, no_remesh, 0.06)
+}
+
+fn mesh_at(scene: &Scene, no_remesh: bool, element_size: f64) -> (Vec<Record>, MeshOutcome) {
     let obj = scene.to_obj();
     let mut log = RecordLog::new();
     let model = parse_obj(obj.as_bytes(), &mut log, &mut |_| {});
     let diagnosis = diagnose(&model, &Tolerances::default(), &mut log).unwrap();
     let config = JobConfig {
-        element_size: 0.06,
+        element_size,
         no_remesh,
         ..JobConfig::default()
     };
@@ -143,6 +157,58 @@ fn a_remeshed_sliver_cube_has_no_quality_warning() {
         !records
             .iter()
             .any(|r| r.code == DefectCode::VolLowQuality && r.severity == Severity::Warning),
+        "{records:#?}"
+    );
+}
+
+/// A sliver far thinner, meshed on its own triangulation: the conformal
+/// mesh's worst cell is far beyond the limits, so stuffing is tried and
+/// kept, with a `VOL_LOW_QUALITY` warning (`fallback` / `applied`) giving
+/// both worst cells, and attempts saying the conformal mesh was not kept.
+#[test]
+fn far_beyond_the_limits_stuffing_is_kept() {
+    // Fine enough that stuffing keeps the cube's volume to 1 % despite
+    // rounding its sharp edges.
+    let (records, outcome) = mesh_at(&sliver_cube_at(1e-5).0, true, 0.03);
+    let (_, summary) = outcome.summaries.first().expect("a summary");
+    assert_eq!(summary.kernel, Kernel::Stuffing);
+    assert!(summary.accepted);
+    let part = outcome.meshed.first().expect("meshed");
+    assert_eq!(part.kernel, Kernel::Stuffing);
+    let kinds: Vec<(Kernel, AttemptOutcome)> = outcome
+        .attempts
+        .iter()
+        .map(|a| (a.kernel, a.outcome))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (Kernel::Delaunay, AttemptOutcome::Failed),
+            (Kernel::Stuffing, AttemptOutcome::Succeeded)
+        ]
+    );
+    let switched: Vec<&Record> = records
+        .iter()
+        .filter(|r| {
+            r.code == DefectCode::VolLowQuality
+                && r.action == Some(Action::Fallback)
+                && r.outcome == Some(Outcome::Applied)
+        })
+        .collect();
+    assert_eq!(switched.len(), 1, "{records:#?}");
+    let m = &switched[0].measured;
+    let (conformal, stuffing) = (
+        m["conformal_worst_cell"].as_f64().unwrap(),
+        m["stuffing_worst_cell"].as_f64().unwrap(),
+    );
+    assert!(conformal < 0.25 && stuffing > conformal, "{m:?}");
+    assert!(m["volume_error"].as_f64().unwrap() <= 0.01, "{m:?}");
+    // No quality warning is left about the conformal mesh, which was not
+    // written; the stuffing mesh is within the limits.
+    assert!(
+        !records.iter().any(|r| r.code == DefectCode::VolLowQuality
+            && r.severity == Severity::Warning
+            && r.action.is_none()),
         "{records:#?}"
     );
 }

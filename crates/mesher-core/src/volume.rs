@@ -50,6 +50,17 @@ pub const MAX_NON_ORTHOGONALITY_DEGREES: f64 = 70.0;
 /// `ImproveParams`).
 pub const MAX_SKEWNESS: f64 = 2.0;
 
+/// A conformal mesh whose worst cell (`worst_cell`) is below this is far
+/// beyond the quality limits (a dihedral angle under 2.5°, a
+/// non-orthogonality over 85° or a skewness over 8): stuffing is tried too,
+/// and kept if its worst cell is better.
+pub const FAR_WORST_CELL: f64 = 0.25;
+
+/// Stuffing kept for its cells must hold the surface's volume to this
+/// fraction: its boundary approximates the surface, and thin features it
+/// misses would be lost (on the Thingi10k subset, 135674 by 12.5 %).
+pub const FAR_MAX_VOLUME_ERROR: f64 = 0.01;
+
 /// A part's accepted volume mesh.
 #[derive(Debug, Clone)]
 pub struct MeshedPart {
@@ -226,6 +237,73 @@ fn mesh_part(
                 }
             }
         }
+        // 3. Far beyond the limits: stuffing too, if its cells are better
+        // and it keeps the volume. Its boundary only approximates the
+        // surface, so it is kept only for a mesh no conformal candidate
+        // comes near the limits on. Gated into
+        // a scratch log: its records count only if it is kept.
+        let best = candidates.first().map(|(c, _)| worst_cell(c));
+        if let Some(conformal_worst) = best.filter(|&w| w < FAR_WORST_CELL && !config.strict) {
+            let mut trial = RecordLog::new();
+            if let Ok(s) = stuffing_candidate(r, h, config, &winding, &bounds)? {
+                let stuffing_worst = worst_cell(&s);
+                if stuffing_worst > conformal_worst {
+                    let (accepted, summary) =
+                        volume_gate(name, &s, r, &winding, diagonal, h, config, &mut trial)?;
+                    let volume_error = if summary.surface_volume > 0.0 {
+                        (summary.volume / summary.surface_volume - 1.0).abs()
+                    } else {
+                        f64::INFINITY
+                    };
+                    if accepted && volume_error <= FAR_MAX_VOLUME_ERROR {
+                        // The conformal meshes are not kept.
+                        for (_, remeshed_triangles) in &candidates {
+                            outcome.attempts.push(Attempt {
+                                remeshed: remeshed_triangles.is_some(),
+                                ..attempt(Kernel::Delaunay, false)
+                            });
+                        }
+                        outcome.attempts.push(attempt(Kernel::Stuffing, true));
+                        outcome.summaries.retain(|(i, _)| *i != r.part);
+                        outcome.summaries.push((r.part, summary));
+                        for rec in trial.records() {
+                            log.push(rec.clone());
+                        }
+                        log.worked_around(name, Action::Fallback);
+                        if let Some(rec) = conformal_failure.take() {
+                            log.push(
+                                rec.severity(Severity::Warning)
+                                    .action(Action::Fallback, Outcome::Applied),
+                            );
+                        }
+                        log.push(
+                            Record::new(DefectCode::VolLowQuality, Stage::VolumeMesh)
+                                .part(name)
+                                .severity(Severity::Warning)
+                                .measured("conformal_worst_cell", conformal_worst)
+                                .measured("stuffing_worst_cell", stuffing_worst)
+                                .measured("volume_error", volume_error)
+                                .threshold("worst_cell", FAR_WORST_CELL)
+                                .threshold("volume_error", FAR_MAX_VOLUME_ERROR)
+                                .action(Action::Fallback, Outcome::Applied)
+                                .hint("every conformal mesh had cells far beyond the quality limits; the stuffing fallback gave better ones, with a boundary that only approximates the surface (see the mesh's hausdorff)"),
+                        );
+                        settle(log, exact_failure, true);
+                        outcome.meshed.push(MeshedPart {
+                            part: r.part,
+                            name: name.to_owned(),
+                            kernel: Kernel::Stuffing,
+                            points: s.points,
+                            tets: s.tets,
+                            face_groups: Vec::new(),
+                        });
+                        return Ok(());
+                    }
+                }
+                // Tried, not kept.
+                outcome.attempts.push(attempt(Kernel::Stuffing, false));
+            }
+        }
         for (i, (c, remeshed_triangles)) in candidates.into_iter().enumerate() {
             let (accepted, summary) = volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;
             outcome.attempts.push(Attempt {
@@ -319,74 +397,17 @@ fn mesh_part(
         return Ok(());
     }
 
-    // 2. Fallback: isosurface stuffing. Where the size field asks for less
-    // than the element size, the lattice is graded: uniformly fine at the
-    // surface (h halved until it reaches the field's smallest size, at most
-    // twice), coarsening to h inside, which keeps the proven angle bounds.
-    let levels = if config.uniform_size {
-        0
-    } else {
-        let field = SizeField::from_surface(&r.points, &r.faces, &SizingParams::for_size(h));
-        if field.is_uniform() {
-            0
-        } else {
-            libm::log2(h / field.min()).ceil().clamp(0.0, 2.0) as u32
-        }
-    };
-    let leaf = h / f64::from(1u32 << levels);
-    let level_fn = |p: Point3| 0.5 - winding.winding_number(p);
-    let stuffed = if levels == 0 {
-        stuff(level_fn, &bounds, &StuffingParams::with_cell_size(h))
-    } else {
-        // Every surface vertex and face centroid seeds the search for the
-        // cubes the surface passes through.
-        let seeds: Vec<Point3> = r
-            .points
-            .iter()
-            .copied()
-            .chain(r.faces.iter().map(|t| {
-                let [a, b, c] = t.map(|v| r.points[v as usize]);
-                [0, 1, 2].map(|k| (a[k] + b[k] + c[k]) / 3.0)
-            }))
-            .collect();
-        stuff_graded(
-            level_fn,
-            &bounds,
-            &seeds,
-            &StuffingParams::with_cell_size(leaf),
-            levels,
-        )
-    };
-    let stuffed = match stuffed {
-        Ok(s) => Some(s),
-        Err(StuffingError::Budget {
-            lattice_vertices,
-            limit,
-        }) => {
-            log.push(
-                Record::new(DefectCode::MeshBudgetExceeded, Stage::VolumeMesh)
-                    .part(name)
-                    .measured("lattice_vertices", lattice_vertices)
-                    .threshold("max_lattice_vertices", limit)
-                    .hint("raise --element-size"),
-            );
+    // 4. Fallback: isosurface stuffing.
+    let stuffed = match stuffing_candidate(r, h, config, &winding, &bounds)? {
+        Ok(c) => Some(c),
+        Err(rec) => {
+            log.push(rec.part(name));
             outcome.attempts.push(attempt(Kernel::Stuffing, false));
             None
         }
-        Err(e) => return Err(internal(e.to_string())),
     };
     let mut fallback_ok = false;
-    if let Some(s) = stuffed {
-        let c = Candidate {
-            kernel: Kernel::Stuffing,
-            points: s.points,
-            tets: s.tets,
-            dropped: s.dropped,
-            steiner: 0,
-            face_groups: Vec::new(),
-            min_size: (levels > 0).then_some(leaf),
-            remeshed: false,
-        };
+    if let Some(c) = stuffed {
         let (accepted, summary) = volume_gate(name, &c, r, &winding, diagonal, h, config, log)?;
         outcome.attempts.push(attempt(Kernel::Stuffing, accepted));
         outcome.summaries.retain(|(i, _)| *i != r.part);
@@ -416,6 +437,78 @@ fn mesh_part(
         });
     }
     Ok(())
+}
+
+/// The part meshed by isosurface stuffing of its winding number, or the
+/// budget record (without its part) if the lattice is too large. Where the
+/// size field asks for less than the element size, the lattice is graded:
+/// uniformly fine at the surface (h halved until it reaches the field's
+/// smallest size, at most twice), coarsening to h inside, which keeps the
+/// proven angle bounds.
+fn stuffing_candidate(
+    r: &RepairedPart,
+    h: f64,
+    config: &JobConfig,
+    winding: &FastWindingNumber<'_>,
+    bounds: &Aabb,
+) -> Result<Result<Candidate, Record>, InternalError> {
+    let levels = if config.uniform_size {
+        0
+    } else {
+        let field = SizeField::from_surface(&r.points, &r.faces, &SizingParams::for_size(h));
+        if field.is_uniform() {
+            0
+        } else {
+            libm::log2(h / field.min()).ceil().clamp(0.0, 2.0) as u32
+        }
+    };
+    let leaf = h / f64::from(1u32 << levels);
+    let level_fn = |p: Point3| 0.5 - winding.winding_number(p);
+    let stuffed = if levels == 0 {
+        stuff(level_fn, bounds, &StuffingParams::with_cell_size(h))
+    } else {
+        // Every surface vertex and face centroid seeds the search for the
+        // cubes the surface passes through.
+        let seeds: Vec<Point3> = r
+            .points
+            .iter()
+            .copied()
+            .chain(r.faces.iter().map(|t| {
+                let [a, b, c] = t.map(|v| r.points[v as usize]);
+                [0, 1, 2].map(|k| (a[k] + b[k] + c[k]) / 3.0)
+            }))
+            .collect();
+        stuff_graded(
+            level_fn,
+            bounds,
+            &seeds,
+            &StuffingParams::with_cell_size(leaf),
+            levels,
+        )
+    };
+    match stuffed {
+        Ok(s) => Ok(Ok(Candidate {
+            kernel: Kernel::Stuffing,
+            points: s.points,
+            tets: s.tets,
+            dropped: s.dropped,
+            steiner: 0,
+            face_groups: Vec::new(),
+            min_size: (levels > 0).then_some(leaf),
+            remeshed: false,
+        })),
+        Err(StuffingError::Budget {
+            lattice_vertices,
+            limit,
+        }) => Ok(Err(Record::new(
+            DefectCode::MeshBudgetExceeded,
+            Stage::VolumeMesh,
+        )
+        .measured("lattice_vertices", lattice_vertices)
+        .threshold("max_lattice_vertices", limit)
+        .hint("raise --element-size"))),
+        Err(e) => Err(InternalError(format!("part {}: {e}", r.name))),
+    }
 }
 
 /// The exact constrained mesh of a part's repaired surface, rounded to f64,
