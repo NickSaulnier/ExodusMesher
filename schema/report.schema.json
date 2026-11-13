@@ -85,6 +85,11 @@
           "description": "A tet rounding turned over, fixed by moving a constructed vertex\nwithin its rounding or by a flip.",
           "type": "string",
           "const": "untangle"
+        },
+        {
+          "description": "Repair rung 2: a surface that intersects itself or whose shells\noverlap, cut along its intersections and replaced by the boundary of\nthe solid it encloses.",
+          "type": "string",
+          "const": "resolve"
         }
       ]
     },
@@ -880,6 +885,29 @@
       "description": "Face and vertex counts through repair, and the surface gate's verdict.",
       "type": "object",
       "properties": {
+        "components_after": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "components_before": {
+          "description": "Connected pieces of the surface (by shared vertices) and its Euler\ncharacteristic (vertices − edges + faces; 2 per sphere-like shell),\nentering repair and after it.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "euler_after": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "euler_before": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
         "faces_after": {
           "type": "integer",
           "format": "uint64",
@@ -893,6 +921,14 @@
         },
         "gate_passed": {
           "type": "boolean"
+        },
+        "rung": {
+          "description": "The highest repair rung that changed the surface: 1 for local fixes\n(or none), 2 when its intersections were resolved.",
+          "type": "integer",
+          "format": "uint8",
+          "default": 1,
+          "maximum": 255,
+          "minimum": 0
         },
         "vertices_after": {
           "type": "integer",

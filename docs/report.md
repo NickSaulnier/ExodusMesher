@@ -45,7 +45,7 @@ Each part is an OBJ object (`o`), or in a file without objects an OBJ group (`g`
 | `shells` | Edge-connected surface pieces |
 | `bounds` | Bounding box `[min, max]` |
 | `selected` | Whether the job meshed it |
-| `repair` | `faces_before`, `faces_after`, `vertices_before`, `vertices_after`, and `gate_passed`: whether the repaired surface is a valid closed solid |
+| `repair` | `faces_before`, `faces_after`, `vertices_before`, `vertices_after`, and `gate_passed`: whether the repaired surface is a valid closed solid; `rung`: the highest repair rung that changed the surface (1 for local fixes or none, 2 when its intersections were resolved); `components_before`, `components_after`, `euler_before`, `euler_after`: the surface's connected pieces and Euler characteristic (vertices − edges + faces, 2 per sphere-like shell, 0 for a ring) entering repair and after it |
 | `mesh` | Present when a volume mesh was attempted; see [Mesh quality](#mesh-quality) |
 
 ## Records
@@ -80,12 +80,16 @@ A record is one finding:
 | `part` | The part, once parts exist |
 | `location` | Where it is: `vertices` (0-based indices into the parsed vertex list), `faces` (0-based indices into the triangulated face list; a polygon of n corners becomes n − 2 consecutive triangles), `obj_lines` (1-based lines of the input file), `point` (a position, when one stands for the finding). Each list holds at most 256 entries; a longer one keeps its full length in `measured` as `vertices_total`, `faces_total` or `obj_lines_total` |
 | `measured`, `threshold` | What was measured, and the limit it was held against, by name |
-| `action`, `outcome` | What was done (`skip_line`, `drop_face`, `fan_triangulate`, `remesh`, `merge`, `remove`, `fill_hole`, `split_edge`, `duplicate_vertex`, `reorient`, `flip`, `truncate`, `fallback`, `abort`, `untangle`) and whether it was `applied`, `failed` or `deferred` to a later stage |
+| `action`, `outcome` | What was done (`skip_line`, `drop_face`, `fan_triangulate`, `remesh`, `merge`, `remove`, `fill_hole`, `split_edge`, `duplicate_vertex`, `reorient`, `flip`, `truncate`, `fallback`, `abort`, `untangle`, `resolve`) and whether it was `applied`, `failed` or `deferred` to a later stage |
 | `hint` | A sentence on what it means or what to try |
 
 At most 100 records are kept per code; `summary.by_code` still counts every occurrence. A finding is never repaired without a record.
 
 The same records are in `defects.vtp` (open it in ParaView beside the mesh) and are drawn by the GUI, which shows each record's OBJ lines.
+
+### Records from repair rung 2
+
+A closed part whose surface intersects itself or whose shells overlap is cut along its intersections and replaced by the boundary of the solid it encloses (exact arithmetic, then rounded to f64 and checked; nested shells inside the solid and interfaces between solids touching face to face go). One `INT_SELF_INTERSECTION` or `INT_SHELL_OVERLAP` record per code found, stage `repair`, severity `info`, action `resolve` / `applied`, with `rung` (2), `intersecting_pairs` and `coplanar_pairs` (pairs of input triangles that meet), `faces_before`, `faces_after`, `pieces_dropped` (pieces of the cut surface inside or outside the solid), `components_before`, `components_after`, `euler_before`, `euler_after`, `rounding_rounds` (times the rounded surface had to be resolved again); the first also `faces_removed`, `faces_added` and `vertices_added` (net). Diagnosis's findings of those codes become warnings with `resolve` / `applied`. When it cannot be done (the part is open, or rounding cannot make it clean), the records have `resolve` / `failed` and `reason`, and the part goes to the fallback. The part's `repair` summary carries `rung` and the counts too, since the per-code cap can leave a record out.
 
 ### Records from meshing
 
@@ -127,8 +131,8 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `TOP_INCONSISTENT_ORIENTATION` | warning | Neighbouring faces disagree on winding | Reorient, warning |
 | `TOP_INVERTED_SHELL` | warning | Shell with negative signed volume | Flip, warning |
 | `TOP_OPEN_SHEET` | fatal | Surface encloses no volume | Fatal for that part |
-| `INT_SELF_INTERSECTION` | error | Faces of one shell intersect | Error, triggers fallback |
-| `INT_SHELL_OVERLAP` | error | Two shells of one part intersect | Error, triggers fallback |
+| `INT_SELF_INTERSECTION` | error | Faces of one shell intersect | Resolve (repair rung 2) for a closed part, warning; else error, triggers fallback |
+| `INT_SHELL_OVERLAP` | error | Two shells of one part intersect | Resolve (repair rung 2) for a closed part, warning; else error, triggers fallback |
 | `QUAL_SLIVER_FACE` | warning | Minimum angle below threshold | Remesh, warning |
 | `QUAL_SUSPECT_SCALE` | info | Bounding box suggests wrong units | Info; tolerances are relative |
 | `MESH_RECOVERY_FAILED` | error | Constrained Delaunay could not recover a facet | Error, triggers fallback |

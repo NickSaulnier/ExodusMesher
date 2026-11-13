@@ -55,8 +55,24 @@ pub fn arrangement(
     points: &[Point3],
     triangles: &[[u32; 3]],
 ) -> Result<Arrangement, ArrangementError> {
-    let x = intersections(points, triangles)?;
-    subdivide(points, triangles, x)
+    // Input points at one position (a vertex split so shells touching
+    // there stay apart) are one point of the arrangement: the lowest index.
+    let mut first: BTreeMap<[u64; 3], u32> = BTreeMap::new();
+    let canonical: Vec<u32> = points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            *first
+                .entry(p.map(|x| (x + 0.0).to_bits()))
+                .or_insert(i as u32)
+        })
+        .collect();
+    let welded: Vec<[u32; 3]> = triangles
+        .iter()
+        .map(|t| t.map(|v| canonical.get(v as usize).copied().unwrap_or(v)))
+        .collect();
+    let x = intersections(points, &welded)?;
+    subdivide(points, &welded, x)
 }
 
 fn subdivide(

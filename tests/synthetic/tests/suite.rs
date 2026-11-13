@@ -378,24 +378,46 @@ fn cases() -> Vec<Case> {
     {
         let mut s = Solid::icosphere(1);
         s.points[0] = s.points[0].map(|c| -1.5 * c);
-        out.push(Case {
-            gate_fails: vec![IntSelfIntersection],
-            ..case(
-                "self-intersection (vertex pushed through)",
-                Scene::single(s),
-                vec![(IntSelfIntersection, Key::Any)],
-            )
-        });
+        // Rung 2 resolves it: the gate passes on the resolved surface.
+        out.push(case(
+            "self-intersection (vertex pushed through)",
+            Scene::single(s),
+            vec![(IntSelfIntersection, Key::Any)],
+        ));
     }
     let shifted = || Solid::cuboid([0.5, 0.25, 0.25], [1.5, 1.25, 1.25]);
-    out.push(Case {
-        gate_fails: vec![IntShellOverlap],
-        ..case(
-            "shell overlap within one part",
-            Scene::default().with(Some("pair"), cube().union(&shifted())),
-            vec![(IntShellOverlap, Key::Any)],
-        )
-    });
+    out.push(case(
+        "shell overlap within one part",
+        Scene::default().with(Some("pair"), cube().union(&shifted())),
+        vec![(IntShellOverlap, Key::Any)],
+    ));
+    // Rung 2 on more ways shells meet: a bar through a cube, boxes
+    // overlapping on a common floor (coplanar faces), and boxes touching
+    // face to face (their interface goes).
+    out.push(case(
+        "bar through a cube",
+        Scene::default().with(
+            Some("cross"),
+            cube().union(&Solid::cuboid([-0.5, 0.3, 0.35], [1.5, 0.7, 0.65])),
+        ),
+        vec![(IntShellOverlap, Key::Any)],
+    ));
+    out.push(case(
+        "boxes overlapping on a common floor",
+        Scene::default().with(
+            Some("floor"),
+            cube().union(&Solid::cuboid([0.4, 0.3, 0.0], [1.6, 0.8, 0.7])),
+        ),
+        vec![(IntShellOverlap, Key::Any)],
+    ));
+    out.push(case(
+        "boxes touching face to face",
+        Scene::default().with(
+            Some("touch"),
+            cube().union(&Solid::cuboid([1.0, 0.25, 0.2], [1.8, 0.75, 0.9])),
+        ),
+        vec![(IntShellOverlap, Key::Any)],
+    ));
 
     // PART_
     out.push(case(

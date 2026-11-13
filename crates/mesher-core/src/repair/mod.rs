@@ -9,8 +9,12 @@
 //! 3. split non-manifold edges and vertices;
 //! 4. fill small holes.
 //!
-//! Then two guards (the shell count and the enclosed volume must not change
-//! beyond a limit) and the surface gate: watertight, edge- and vertex-manifold,
+//! These are rung 1. Then two guards (the shell count and the enclosed
+//! volume must not change beyond a limit). Rung 2 follows for a closed
+//! surface that intersects itself or whose shells overlap: it is cut along
+//! its intersections and replaced by the boundary of the solid it encloses
+//! (`mesher_geom::arrangement::resolve_rounded`, exact, then rounded to f64
+//! and checked). Then the surface gate: watertight, edge- and vertex-manifold,
 //! consistently and outwardly oriented, enclosing a volume, free of
 //! intersections. Repair records have stage `repair`: severity `info` for a
 //! fix applied (the finding itself already carries the warning) and `error`
@@ -21,6 +25,7 @@ mod nonmanifold;
 
 use std::collections::BTreeMap;
 
+use mesher_geom::arrangement::resolve_rounded;
 use mesher_geom::{GeomError, Point3};
 use serde_json::Value;
 
@@ -156,6 +161,8 @@ fn repair_part(
     };
 
     let a0 = analyze_surface(&points, &faces, &contact(&faces, &origin), tol).map_err(err)?;
+    let (components_entering, euler_entering) =
+        (components(&contact(&faces, &origin)), euler(&faces));
     let volume_before: f64 = a0.volume.iter().map(|v| v.abs()).sum();
     let shells_before = components(&contact(&faces, &origin));
     faces.clone_from(&a0.oriented);
@@ -180,37 +187,47 @@ fn repair_part(
     }
 
     // 3. Split non-manifold edges and vertices.
-    let (edge_splits, vertex_splits) =
-        nonmanifold::split(&mut points, &mut faces, &mut origin).map_err(err)?;
+    let split_records = |points: &mut Vec<Point3>,
+                         faces: &mut Vec<[u32; 3]>,
+                         origin: &mut Vec<Option<u32>>,
+                         face_origin: &[Option<u32>],
+                         log: &mut RecordLog|
+     -> Result<(), InternalError> {
+        let (edge_splits, vertex_splits) =
+            nonmanifold::split(points, faces, origin).map_err(err)?;
+        let vorigin = |v: u32, origin: &[Option<u32>]| origin.get(v as usize).copied().flatten();
+        for s in &edge_splits {
+            let fs = origin_faces(&s.faces, face_origin);
+            let vs: Vec<u32> = s.edge.iter().filter_map(|&v| vorigin(v, origin)).collect();
+            let record = if s.paired {
+                applied(DefectCode::TopNonmanifoldEdge, Action::SplitEdge)
+                    .measured("sheets", s.faces.len() as u64 / 2)
+                    .measured("vertices_added", s.vertices_added)
+            } else {
+                failed(DefectCode::TopNonmanifoldEdge, Action::SplitEdge)
+                    .hint("the faces around this edge do not pair up into separate solids")
+            };
+            log.push(
+                record
+                    .vertex_set(vs)
+                    .faces(fs.iter().copied())
+                    .lines(fs.iter().map(|&t| line(t))),
+            );
+        }
+        for s in &vertex_splits {
+            let fs = origin_faces(&s.faces, face_origin);
+            log.push(
+                applied(DefectCode::TopNonmanifoldVertex, Action::DuplicateVertex)
+                    .vertex_set(vorigin(s.vertex, origin))
+                    .faces(fs)
+                    .measured("fans", s.fans as u64)
+                    .measured("vertices_added", s.fans as u64 - 1),
+            );
+        }
+        Ok(())
+    };
+    split_records(&mut points, &mut faces, &mut origin, &face_origin, log)?;
     let vorigin = |v: u32, origin: &[Option<u32>]| origin.get(v as usize).copied().flatten();
-    for s in &edge_splits {
-        let fs = origin_faces(&s.faces, &face_origin);
-        let vs: Vec<u32> = s.edge.iter().filter_map(|&v| vorigin(v, &origin)).collect();
-        let record = if s.paired {
-            applied(DefectCode::TopNonmanifoldEdge, Action::SplitEdge)
-                .measured("sheets", s.faces.len() as u64 / 2)
-                .measured("vertices_added", s.vertices_added)
-        } else {
-            failed(DefectCode::TopNonmanifoldEdge, Action::SplitEdge)
-                .hint("the faces around this edge do not pair up into separate solids")
-        };
-        log.push(
-            record
-                .vertex_set(vs)
-                .faces(fs.iter().copied())
-                .lines(fs.iter().map(|&t| line(t))),
-        );
-    }
-    for s in &vertex_splits {
-        let fs = origin_faces(&s.faces, &face_origin);
-        log.push(
-            applied(DefectCode::TopNonmanifoldVertex, Action::DuplicateVertex)
-                .vertex_set(vorigin(s.vertex, &origin))
-                .faces(fs)
-                .measured("fans", s.fans as u64)
-                .measured("vertices_added", s.fans as u64 - 1),
-        );
-    }
 
     // 4. Fill small holes.
     let a1 = analyze_surface(&points, &faces, &contact(&faces, &origin), tol).map_err(err)?;
@@ -300,6 +317,111 @@ fn repair_part(
                 .threshold("max_relative_change", tol.max_volume_change),
         );
     }
+
+    // Rung 2: resolve intersections.
+    let mut rung = 1;
+    let mut a2 = a2;
+    let codes: Vec<DefectCode> = [
+        (!a2.self_pairs.is_empty()).then_some(DefectCode::IntSelfIntersection),
+        (!a2.shell_overlaps.is_empty()).then_some(DefectCode::IntShellOverlap),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !codes.is_empty() {
+        let (components_before, euler_before) = (components(&ids), euler(&faces));
+        match resolve_rounded(&points, &faces) {
+            Ok(r) => {
+                // Vertices keep their model vertex where they did not move.
+                let at: BTreeMap<[u64; 3], usize> = points
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (p.map(|x| (x + 0.0).to_bits()), i))
+                    .collect();
+                let new_origin: Vec<Option<u32>> = r
+                    .points
+                    .iter()
+                    .map(|p| {
+                        at.get(&p.map(|x| (x + 0.0).to_bits()))
+                            .and_then(|&i| origin.get(i).copied().flatten())
+                    })
+                    .collect();
+                let new_face_origin: Vec<Option<u32>> = r
+                    .origin
+                    .iter()
+                    .map(|&o| face_origin.get(o as usize).copied().flatten())
+                    .collect();
+                let (components_after, euler_after) =
+                    (components(&r.triangles), euler(&r.triangles));
+                for (i, &code) in codes.iter().enumerate() {
+                    let mut record = applied(code, Action::Resolve);
+                    // The surface is replaced: the first record accounts
+                    // for the change in faces and vertices.
+                    if i == 0 {
+                        record = record
+                            .measured("faces_removed", faces.len() as u64)
+                            .measured("faces_added", r.triangles.len() as u64)
+                            .measured(
+                                "vertices_added",
+                                r.points.len() as i64 - points.len() as i64,
+                            );
+                    }
+                    log.push(
+                        record
+                            .measured("rung", 2u64)
+                            .measured("intersecting_pairs", r.pairs as u64)
+                            .measured("coplanar_pairs", r.coplanar_pairs as u64)
+                            .measured("faces_before", faces.len() as u64)
+                            .measured("faces_after", r.triangles.len() as u64)
+                            .measured("pieces_dropped", r.dropped as u64)
+                            .measured("components_before", components_before as u64)
+                            .measured("components_after", components_after as u64)
+                            .measured("euler_before", euler_before)
+                            .measured("euler_after", euler_after)
+                            .measured("rounding_rounds", r.rounds as u64)
+                            .hint("the surface was cut along its intersections and replaced by the boundary of the solid it encloses"),
+                    );
+                }
+                log.repaired(name, &codes, Action::Resolve);
+                points = r.points;
+                faces = r.triangles;
+                origin = new_origin;
+                face_origin = new_face_origin;
+                // Shells the resolution joined where they touch along an
+                // edge or at a vertex are split there again, as in rung 1.
+                split_records(&mut points, &mut faces, &mut origin, &face_origin, log)?;
+                let ids = contact(&faces, &origin);
+                a2 = analyze_surface(&points, &faces, &ids, tol).map_err(err)?;
+                // Non-manifold edges and vertices rung 1 could not split are
+                // gone too when the resolved surface has none: their errors
+                // become warnings (a failed split keeps its action and
+                // outcome).
+                let gone: Vec<DefectCode> = [
+                    a2.nonmanifold_edges
+                        .is_empty()
+                        .then_some(DefectCode::TopNonmanifoldEdge),
+                    a2.nonmanifold_vertices
+                        .is_empty()
+                        .then_some(DefectCode::TopNonmanifoldVertex),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                log.repaired(name, &gone, Action::Resolve);
+                rung = 2;
+            }
+            Err(e) => {
+                for &code in &codes {
+                    log.push(
+                        failed(code, Action::Resolve)
+                            .measured("rung", 2u64)
+                            .measured("reason", e.to_string())
+                            .hint("the intersections could not be resolved; the part goes to the fallback"),
+                    );
+                }
+            }
+        }
+    }
     let gate_passed = gate(name, &a2, &origin, &face_origin, model, log);
 
     let summary = RepairSummary {
@@ -308,6 +430,11 @@ fn repair_part(
         vertices_before,
         vertices_after: points.len() as u64,
         gate_passed,
+        rung,
+        components_before: components_entering as u64,
+        components_after: components(&contact(&faces, &origin)) as u64,
+        euler_before: euler_entering,
+        euler_after: euler(&faces),
     };
     Ok(RepairedPart {
         part: index,
@@ -352,6 +479,20 @@ pub(crate) fn gate_failures(
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// The Euler characteristic of a surface: vertices − edges + faces.
+fn euler(faces: &[[u32; 3]]) -> i64 {
+    let mut vertices: Vec<u32> = faces.iter().flatten().copied().collect();
+    vertices.sort_unstable();
+    vertices.dedup();
+    let mut edges: Vec<(u32, u32)> = faces
+        .iter()
+        .flat_map(|t| (0..3).map(move |k| (t[k].min(t[(k + 1) % 3]), t[k].max(t[(k + 1) % 3]))))
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    vertices.len() as i64 - edges.len() as i64 + faces.len() as i64
 }
 
 /// Connected pieces of a surface by its vertex ids.

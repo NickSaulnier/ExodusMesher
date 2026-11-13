@@ -819,3 +819,27 @@ fn random_overlapping_solids_round_cleanly() {
     }
     assert!(checked > 40, "{checked}");
 }
+
+/// Input points at one position with different indices (as rung 1 leaves
+/// them when it splits a vertex) are one point of the arrangement.
+#[test]
+fn coincident_input_points_are_one_point() {
+    let p = vec![
+        [0.0, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+        [0.0, 4.0, 0.0],
+        // b rests on a at (1, 1, 0).
+        [1.0, 1.0, 0.0],
+        [1.0, 1.0, 1.0],
+        [2.0, 1.0, 1.0],
+        // c starts at the same point, under another index, and crosses a.
+        [1.0, 1.0, 0.0],
+        [2.0, 2.0, -1.0],
+        [0.0, 3.0, 1.0],
+    ];
+    let f = vec![[0, 1, 2], [3, 4, 5], [6, 7, 8]];
+    let a = arrangement(&p, &f).unwrap();
+    check(&p, &f, &a, false);
+    // c's corner and b's are one point: no piece uses index 6.
+    assert!(a.triangles.iter().all(|t| !t.contains(&6)));
+}

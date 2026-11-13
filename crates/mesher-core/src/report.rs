@@ -156,6 +156,10 @@ pub enum Action {
     /// A tet rounding turned over, fixed by moving a constructed vertex
     /// within its rounding or by a flip.
     Untangle,
+    /// Repair rung 2: a surface that intersects itself or whose shells
+    /// overlap, cut along its intersections and replaced by the boundary of
+    /// the solid it encloses.
+    Resolve,
 }
 
 /// Result of the action.
@@ -427,6 +431,40 @@ impl RecordLog {
             }
         }
         n
+    }
+
+    /// A repair (`action`) dealt with `part`'s findings of the codes in
+    /// `codes`: each of its errors with one of them, from diagnosis, repair
+    /// or the surface gate, becomes a warning, and one left for later or
+    /// with no action gets `action` / `applied`. Returns how many errors were
+    /// downgraded, including those over the per-code cap.
+    pub fn repaired(&mut self, part: &str, codes: &[DefectCode], action: Action) -> u64 {
+        let mut moved = 0;
+        self.part_errors.retain(|(p, stage, code), n| {
+            if p == part && LADDER_STAGES.contains(stage) && codes.contains(code) {
+                moved += *n;
+                false
+            } else {
+                true
+            }
+        });
+        for r in &mut self.records {
+            if r.severity == Severity::Error
+                && r.part.as_deref() == Some(part)
+                && LADDER_STAGES.contains(&r.stage)
+                && codes.contains(&r.code)
+            {
+                r.severity = Severity::Warning;
+                if matches!(r.outcome, None | Some(Outcome::Deferred)) {
+                    r.action = Some(action);
+                    r.outcome = Some(Outcome::Applied);
+                }
+            }
+        }
+        let errors = self.severity_counts.entry(Severity::Error).or_default();
+        *errors = errors.saturating_sub(moved);
+        *self.severity_counts.entry(Severity::Warning).or_default() += moved;
+        moved
     }
 
     /// A later step of the fallback ladder (`action`: `remesh` or `fallback`)
@@ -757,6 +795,25 @@ pub struct RepairSummary {
     pub vertices_before: u64,
     pub vertices_after: u64,
     pub gate_passed: bool,
+    /// The highest repair rung that changed the surface: 1 for local fixes
+    /// (or none), 2 when its intersections were resolved.
+    #[serde(default = "rung_one")]
+    pub rung: u8,
+    /// Connected pieces of the surface (by shared vertices) and its Euler
+    /// characteristic (vertices − edges + faces; 2 per sphere-like shell),
+    /// entering repair and after it.
+    #[serde(default)]
+    pub components_before: u64,
+    #[serde(default)]
+    pub components_after: u64,
+    #[serde(default)]
+    pub euler_before: i64,
+    #[serde(default)]
+    pub euler_after: i64,
+}
+
+fn rung_one() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
