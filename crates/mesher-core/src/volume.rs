@@ -33,7 +33,7 @@ use mesher_tet::{
 use crate::diagnose::{InternalError, Tolerances};
 use crate::mesh::{Block, SideSet, VolumeMesh, tet_side_nodes};
 use crate::model::SurfaceModel;
-use crate::repair::{RepairedPart, passes_gate};
+use crate::repair::{RepairedPart, gate_failures};
 use crate::report::{
     Action, Attempt, AttemptOutcome, DefectCode, JobConfig, Kernel, KernelChoice, MeshSummary,
     Outcome, QualityMeasure, Record, RecordLog, Severity, Stage, WorstCell,
@@ -645,8 +645,12 @@ fn remeshed(
             .collect(),
         ..r.clone()
     };
-    if !passes_gate(&surface.points, &surface.faces, &Tolerances::default()) {
-        return Err("the remeshed surface failed the surface gate".to_owned());
+    let failures = gate_failures(&surface.points, &surface.faces, &Tolerances::default());
+    if !failures.is_empty() {
+        return Err(format!(
+            "the remeshed surface failed the surface gate: {}",
+            failures.join(", ")
+        ));
     }
     let mut c = conformal(model, &surface, h, config, true).map_err(|rec| {
         rec.hint

@@ -93,7 +93,7 @@ These carry the measurements most often needed to act on them:
 
 | Code | `measured` (and `threshold`) |
 | --- | --- |
-| `MESH_RECOVERY_FAILED` | `missing_faces`; after a remesh retry, `remeshed_triangles` (it succeeded: the record is then a warning with `remesh` / `applied`) or `remesh_retry` (why the retry did not help) |
+| `MESH_RECOVERY_FAILED` | `missing_faces`; after a remesh retry, `remeshed_triangles` (it succeeded: the record is then a warning with `remesh` / `applied`) or `remesh_retry` (why the retry did not help; for a remeshed surface that failed the surface gate, each failed check with its count, such as `3 self-intersecting triangle pairs`) |
 | `MESH_BUDGET_EXCEEDED` | `points` against `max_points`, `work_steps` against `max_work_steps` (the constrained kernel), or `lattice_vertices` against `max_lattice_vertices` (stuffing) |
 | `MESH_WORKER_FAILED` | `reason`: `timeout` (with `timeout_seconds`), `out_of_memory` (with `memory_limit_bytes`), `cancelled`, `spawn_failed` (with `io_error`), `died` (with `exit_status`) or `unreadable_result` (the worker finished but its result line did not parse, with `parse_error`; a bug, exit 70); `stderr_tail`. After a timeout or out-of-memory, the client retries with stuffing only and the record becomes a warning with `fallback` / `applied` if that produced a mesh |
 | `MESH_ROUNDING_REPAIRED` | One record per fix of the exact kernel's rounding (`--kernel exact`): `fix` is `vertex_move` (a constructed point moved within 64 ulps per coordinate of its exact position, by `moved`; two records when two points move together), `flip_2_3` or `edge_removal`; `location.point` is where. Action `untangle` / `applied` |

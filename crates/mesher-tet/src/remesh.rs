@@ -108,6 +108,9 @@ struct Input<'a> {
     /// Feature segments (input vertex pairs) and those at each input vertex.
     segments: Vec<(u32, u32)>,
     vertex_segments: Vec<Vec<u32>>,
+    /// Whether an input vertex is on one smooth feature line (two segments,
+    /// not turning sharply), so a feature vertex may slide past it.
+    line: Vec<bool>,
 }
 
 impl Input<'_> {
@@ -135,22 +138,37 @@ impl Input<'_> {
         best
     }
 
-    /// The closest point on the feature lines, searching outward from
-    /// segment `home` along them.
-    fn project_feature(&self, p: Point3, home: u32) -> (Point3, u32) {
+    /// The closest point on the feature lines of segments `starts` (at
+    /// least one), searching outward along them but never past a corner: a
+    /// vertex stays on its own line, never jumping to a nearby one (the
+    /// other side of a thin slot).
+    fn project_feature(&self, p: Point3, starts: &[u32]) -> (Point3, u32) {
         let seg = |s: u32| {
             let (a, b) = self.segments[s as usize];
             closest_point_on_segment(p, self.points[a as usize], self.points[b as usize])
         };
+        let home = starts.first().copied().unwrap_or(0);
         let mut best = (seg(home), home);
-        let mut seen: HashSet<u32> = HashSet::from([home]);
-        let mut queue: VecDeque<u32> = VecDeque::from([home]);
+        let mut seen: HashSet<u32> = HashSet::new();
+        let mut queue: VecDeque<u32> = VecDeque::new();
+        for &s in starts {
+            if seen.insert(s) {
+                let q = seg(s);
+                if distance_squared(p, q) < distance_squared(p, best.0) {
+                    best = (q, s);
+                }
+                queue.push_back(s);
+            }
+        }
         while let Some(s) = queue.pop_front() {
             if seen.len() > 512 {
                 break;
             }
             let (a, b) = self.segments[s as usize];
             for &v in &[a, b] {
+                if !self.line[v as usize] {
+                    continue;
+                }
                 for &t in &self.vertex_segments[v as usize] {
                     if seen.insert(t) {
                         let q = seg(t);
@@ -336,6 +354,23 @@ pub fn remesh(
         vertex_segments[u as usize].push(s as u32);
         vertex_segments[v as usize].push(s as u32);
     }
+    // A vertex on one line through it, unless the line turns sharply there.
+    let line: Vec<bool> = (0..points.len())
+        .map(|v| {
+            let segs = &vertex_segments[v];
+            if segs.len() != 2 {
+                return false;
+            }
+            let other = |s: u32| {
+                let (a, b) = segments[s as usize];
+                if a as usize == v { b } else { a }
+            };
+            let p = points[v];
+            let d0 = unit(sub(points[other(segs[0]) as usize], p));
+            let d1 = unit(sub(points[other(segs[1]) as usize], p));
+            dot(d0, d1) < -cos_feature
+        })
+        .collect();
     let input = Input {
         points,
         triangles,
@@ -344,6 +379,7 @@ pub fn remesh(
         vertex_tris,
         segments,
         vertex_segments,
+        line,
     };
 
     // The starting mesh: the input itself.
@@ -359,24 +395,12 @@ pub fn remesh(
     };
     for v in 0..points.len() {
         let segs = &input.vertex_segments[v];
-        let kind = match segs.len() {
-            0 => Kind::Smooth,
-            2 => {
-                // A line through the vertex, unless it turns sharply here.
-                let other = |s: u32| {
-                    let (a, b) = input.segments[s as usize];
-                    if a as usize == v { b } else { a }
-                };
-                let p = points[v];
-                let d0 = unit(sub(points[other(segs[0]) as usize], p));
-                let d1 = unit(sub(points[other(segs[1]) as usize], p));
-                if dot(d0, d1) < -cos_feature {
-                    Kind::Feature
-                } else {
-                    Kind::Corner
-                }
-            }
-            _ => Kind::Corner,
+        let kind = if segs.is_empty() {
+            Kind::Smooth
+        } else if input.line[v] {
+            Kind::Feature
+        } else {
+            Kind::Corner
         };
         m.kind.push(kind);
         m.home.push(match kind {
@@ -418,12 +442,16 @@ pub fn remesh(
             let i = m.pos.len() as u32;
             let feature = m.feature.contains(&key(u, v));
             let (p, kind, home) = if feature {
-                let from = if m.kind[u as usize] == Kind::Feature {
-                    u
+                // From a feature end's segment, or from every segment at
+                // a corner (corners are input vertices).
+                let starts = if m.kind[u as usize] == Kind::Feature {
+                    vec![m.home[u as usize]]
+                } else if m.kind[v as usize] == Kind::Feature {
+                    vec![m.home[v as usize]]
                 } else {
-                    v
+                    input.vertex_segments[u as usize].clone()
                 };
-                let (q, s) = input.project_feature(mid, m.home[from as usize]);
+                let (q, s) = input.project_feature(mid, &starts);
                 (q, Kind::Feature, s)
             } else {
                 let tris = m.edge_tris(u, v);
@@ -653,7 +681,7 @@ fn smooth(m: &mut Mesh, input: &Input<'_>, v: u32) {
                 return;
             }
             let c = scale(add(m.pos[along[0] as usize], m.pos[along[1] as usize]), 0.5);
-            input.project_feature(add(p, scale(sub(c, p), 0.5)), m.home[v as usize])
+            input.project_feature(add(p, scale(sub(c, p), 0.5)), &[m.home[v as usize]])
         }
         Kind::Smooth => {
             let ring = m.neighbours(v);
@@ -891,5 +919,43 @@ mod tests {
             remesh(&p, &f, &[], &|_| 0.2, &RemeshParams::default()),
             Err(RemeshError::Surface(_))
         ));
+    }
+
+    /// Two feature lines leave one corner 3° apart (the two walls of a thin
+    /// slot): a vertex on the first, projected from near the second, stays
+    /// on the first; it never jumps across past the corner.
+    #[test]
+    fn a_feature_vertex_stays_on_its_own_line() {
+        let points = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.0, 0.05, 0.0],
+            [2.0, 0.1, 0.0],
+        ];
+        let triangles = vec![[0, 1, 3]];
+        let segments = vec![(0, 1), (1, 2), (0, 3), (3, 4)];
+        let mut vertex_segments = vec![Vec::new(); points.len()];
+        for (s, &(a, b)) in segments.iter().enumerate() {
+            vertex_segments[a as usize].push(s as u32);
+            vertex_segments[b as usize].push(s as u32);
+        }
+        let input = Input {
+            points: &points,
+            triangles: &triangles,
+            normals: vec![[0.0, 0.0, 1.0]],
+            bvh: Bvh::new(TriangleSoup::new(&points, &triangles).unwrap()),
+            vertex_tris: vec![vec![0], vec![0], Vec::new(), vec![0], Vec::new()],
+            segments,
+            vertex_segments,
+            // Vertices 1 and 3 are on straight lines; 0 is a corner.
+            line: vec![false, true, false, true, false],
+        };
+        let (q, s) = input.project_feature([1.5, 0.08, 0.0], &[1]);
+        assert!(s <= 1, "jumped to segment {s}");
+        assert!(distance_squared(q, [1.5, 0.0, 0.0]) < 1e-24, "{q:?}");
+        // From the corner both lines are open.
+        let (_, s) = input.project_feature([1.5, 0.08, 0.0], &[0, 2]);
+        assert_eq!(s, 3);
     }
 }

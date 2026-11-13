@@ -320,20 +320,38 @@ fn repair_part(
     })
 }
 
-/// Whether a surface passes every surface-gate check, without recording
-/// anything: for a surface built after repair, such as a remeshed one.
-pub(crate) fn passes_gate(points: &[Point3], faces: &[[u32; 3]], tol: &Tolerances) -> bool {
-    let Ok(a) = analyze_surface(points, faces, faces, tol) else {
-        return false;
+/// The surface-gate checks a surface fails, without recording anything (for
+/// a surface built after repair, such as a remeshed one): one phrase each,
+/// with its count; empty when the surface passes.
+pub(crate) fn gate_failures(
+    points: &[Point3],
+    faces: &[[u32; 3]],
+    tol: &Tolerances,
+) -> Vec<String> {
+    let a = match analyze_surface(points, faces, faces, tol) {
+        Ok(a) => a,
+        Err(e) => return vec![format!("not a surface ({e})")],
     };
-    a.loops.iter().all(|l| a.sheet[l.shell])
-        && a.nonmanifold_edges.is_empty()
-        && a.nonmanifold_vertices.is_empty()
-        && a.disagreements.is_empty()
-        && !a.sheet.iter().any(|&s| s)
-        && !a.inverted.iter().any(|&i| i)
-        && a.self_pairs.is_empty()
-        && a.shell_overlaps.is_empty()
+    let count = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}"));
+    [
+        count(
+            a.loops.iter().filter(|l| !a.sheet[l.shell]).count(),
+            "holes",
+        ),
+        count(a.nonmanifold_edges.len(), "non-manifold edges"),
+        count(a.nonmanifold_vertices.len(), "non-manifold vertices"),
+        count(a.disagreements.len(), "orientation disagreements"),
+        count(a.sheet.iter().filter(|&&s| s).count(), "open sheets"),
+        count(a.inverted.iter().filter(|&&i| i).count(), "inverted shells"),
+        count(a.self_pairs.len(), "self-intersecting triangle pairs"),
+        count(
+            a.shell_overlaps.values().map(Vec::len).sum(),
+            "intersecting triangle pairs between shells",
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Connected pieces of a surface by its vertex ids.
