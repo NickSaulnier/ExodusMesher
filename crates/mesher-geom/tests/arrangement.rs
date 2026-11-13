@@ -522,3 +522,197 @@ fn random_overlapping_solids_make_closed_arrangements() {
     }
     assert!(checked > 40, "{checked}");
 }
+
+// Stage 3: the solid's boundary.
+
+use mesher_geom::TriangleSoup;
+use mesher_geom::arrangement::{Resolved, resolve, resolve_with};
+use mesher_geom::bvh::closest_point_on_triangle;
+use mesher_geom::winding::winding_number_brute;
+
+fn volume(r: &Resolved) -> f64 {
+    r.triangles
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|v| r.points[v as usize].approx());
+            (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                / 6.0
+        })
+        .sum()
+}
+
+fn balanced(triangles: &[[u32; 3]]) -> bool {
+    let mut net: BTreeMap<(u32, u32), i64> = BTreeMap::new();
+    for t in triangles {
+        for k in 0..3 {
+            let (u, v) = (t[k], t[(k + 1) % 3]);
+            *net.entry((u.min(v), u.max(v))).or_insert(0) += if u < v { 1 } else { -1 };
+        }
+    }
+    net.values().all(|&n| n == 0)
+}
+
+#[test]
+fn overlapping_boxes_resolve_to_their_union() {
+    let (p, f) = union(&[
+        cuboid([0.0; 3], [1.0; 3], 0),
+        cuboid([0.5, 0.25, 0.25], [1.5, 1.25, 1.25], 0),
+    ]);
+    let r = resolve(&p, &f).unwrap();
+    assert!(balanced(&r.triangles));
+    // 1 + 1 − 0.5 × 0.75 × 0.75.
+    assert!((volume(&r) - 1.71875).abs() < 1e-12, "{}", volume(&r));
+}
+
+#[test]
+fn a_nested_box_is_dropped() {
+    let (p, f) = union(&[cuboid([0.0; 3], [3.0; 3], 0), cuboid([1.0; 3], [2.0; 3], 0)]);
+    let r = resolve(&p, &f).unwrap();
+    assert!(balanced(&r.triangles));
+    assert_eq!(r.triangles.len(), 12);
+    assert!(r.origin.iter().all(|&o| o < 12));
+    assert!((volume(&r) - 27.0).abs() < 1e-12);
+}
+
+#[test]
+fn boxes_touching_face_to_face_become_one() {
+    // Side by side, sharing the plane x = 1 over part of a face.
+    let (p, f) = union(&[
+        cuboid([0.0; 3], [1.0; 3], 0),
+        cuboid([1.0, 0.25, 0.0], [2.0, 0.75, 1.0], 0),
+    ]);
+    let r = resolve(&p, &f).unwrap();
+    assert!(balanced(&r.triangles));
+    assert!((volume(&r) - 1.5).abs() < 1e-12, "{}", volume(&r));
+    // Nothing is left in the shared region of x = 1.
+    for t in &r.triangles {
+        let c = t.map(|v| r.points[v as usize].approx());
+        let on_interface = c
+            .iter()
+            .all(|q| q[0] == 1.0 && q[1] >= 0.25 && q[1] <= 0.75);
+        assert!(!on_interface, "{c:?}");
+    }
+    assert!(r.dropped > 0);
+}
+
+#[test]
+fn a_box_inside_out_within_another_is_removed() {
+    // An inverted box inside a box: winding 0 inside it, so it is a cavity.
+    let (p, mut f) = union(&[cuboid([0.0; 3], [3.0; 3], 0), cuboid([1.0; 3], [2.0; 3], 0)]);
+    for t in &mut f[12..] {
+        t.swap(1, 2);
+    }
+    let r = resolve(&p, &f).unwrap();
+    assert!(balanced(&r.triangles));
+    assert_eq!(r.triangles.len(), 24);
+    assert!((volume(&r) - 26.0).abs() < 1e-12);
+}
+
+#[test]
+fn an_open_surface_is_refused() {
+    let (p, f) = cuboid([0.0; 3], [1.0; 3], 0);
+    let f = f[1..].to_vec();
+    assert!(matches!(
+        resolve(&p, &f),
+        Err(ArrangementError::Open { .. })
+    ));
+}
+
+/// Away from both surfaces, the input wraps a point (winding number at
+/// least a half) exactly when the resolved surface encloses it.
+fn same_solid(p: &[Point3], f: &[[u32; 3]], r: &Resolved, rng: &mut Lcg, samples: usize) {
+    let rp: Vec<Point3> = r.points.iter().map(|q| q.approx()).collect();
+    let soup_in = TriangleSoup::new(p, f).unwrap();
+    let soup_out = TriangleSoup::new(&rp, &r.triangles).unwrap();
+    let (lo, hi) = p.iter().fold(
+        ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
+        |(lo, hi), q| {
+            (
+                [0, 1, 2].map(|k| lo[k].min(q[k])),
+                [0, 1, 2].map(|k| hi[k].max(q[k])),
+            )
+        },
+    );
+    let near = |x: Point3, pts: &[Point3], tris: &[[u32; 3]]| {
+        tris.iter().any(|t| {
+            let c = closest_point_on_triangle(x, t.map(|v| pts[v as usize]));
+            (0..3).map(|k| (c[k] - x[k]).powi(2)).sum::<f64>() < 1e-12
+        })
+    };
+    for _ in 0..samples {
+        let x = [0, 1, 2].map(|k| lo[k] - 0.1 + (hi[k] - lo[k] + 0.2) * rng.next());
+        if near(x, p, f) || near(x, &rp, &r.triangles) {
+            continue;
+        }
+        let w_in = winding_number_brute(&soup_in, x);
+        let w_out = winding_number_brute(&soup_out, x);
+        assert_eq!(
+            w_in >= 0.5,
+            w_out >= 0.5,
+            "at {x:?}: {w_in} against {w_out}"
+        );
+        assert!(
+            (w_out - w_out.round()).abs() < 1e-6 && w_out.round() <= 1.0,
+            "{w_out}"
+        );
+    }
+}
+
+#[test]
+fn random_overlapping_solids_resolve_to_their_union() {
+    let mut rng = Lcg(61);
+    let mut checked = 0;
+    for case in 0..60 {
+        let grid = case % 2 == 0;
+        let mut parts = Vec::new();
+        for _ in 0..3 {
+            let mut q = || {
+                let v = rng.next() * 4.0;
+                if grid { (2.0 * v).round() / 2.0 } else { v }
+            };
+            if case % 3 == 0 {
+                let lo = [q(), q(), q()];
+                let hi = [lo[0] + 0.5 + q(), lo[1] + 0.5 + q(), lo[2] + 0.5 + q()];
+                parts.push(cuboid(lo, hi, 0));
+            } else {
+                let c = [
+                    [q(), q(), q()],
+                    [q(), q(), q()],
+                    [q(), q(), q()],
+                    [q(), q(), q()],
+                ];
+                parts.push(tetrahedron(c));
+            }
+        }
+        let (p, f) = union(&parts);
+        let proper = f.iter().all(|t| {
+            let [a, b, c] = t.map(|i| p[i as usize]);
+            mesher_geom::predicates::plane_axis(a, b, c).is_some()
+        });
+        if !proper {
+            continue;
+        }
+        let mut welded: Vec<Point3> = Vec::new();
+        let ids: Vec<u32> = p
+            .iter()
+            .map(|q| match welded.iter().position(|w| w == q) {
+                Some(i) => i as u32,
+                None => {
+                    welded.push(*q);
+                    welded.len() as u32 - 1
+                }
+            })
+            .collect();
+        let f: Vec<[u32; 3]> = f.iter().map(|t| t.map(|v| ids[v as usize])).collect();
+        let r = resolve(&welded, &f).unwrap_or_else(|e| panic!("case {case}: {e}"));
+        assert!(balanced(&r.triangles), "case {case}");
+        same_solid(&welded, &f, &r, &mut rng, 200);
+        // Found around edges from one cast per piece, the same surface.
+        let by_edges = resolve_with(&welded, &f, false)
+            .unwrap_or_else(|e| panic!("case {case}, around edges: {e}"));
+        assert_eq!(by_edges.triangles, r.triangles, "case {case}");
+        checked += 1;
+    }
+    assert!(checked > 40, "{checked}");
+}

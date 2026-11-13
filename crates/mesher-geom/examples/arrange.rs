@@ -12,7 +12,12 @@
 //! the arrangement of one must keep that), the largest error in a
 //! triangle's area covered by its pieces (over the squared diagonal), and
 //! seconds; or the error. `ARRANGE_DUMP=1` lists, on stderr, the triangles
-//! whose pieces miss more than 1e-12 of that.
+//! whose pieces miss more than 1e-12 of that. `ARRANGE_RESOLVE=1` adds a
+//! line for stage 3 (closed inputs): faces, patches, faces dropped and
+//! kept, unbalanced edges, the volume against the input's, and, rounded to
+//! f64, the triangles left flat and the pairs that intersect again;
+//! `ARRANGE_PROPAGATE=1` also finds the windings from one cast per piece
+//! and says on stderr where that differs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -20,7 +25,9 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use mesher_geom::Point3;
-use mesher_geom::arrangement::arrangement;
+use mesher_geom::arrangement::{
+    ArrangementError, arrangement, intersections, resolve, resolve_with,
+};
 use mesher_geom::predicates::plane_axis;
 
 fn area(p: Point3, q: Point3, r: Point3) -> f64 {
@@ -154,6 +161,60 @@ fn main() {
                 );
             }
             Err(e) => println!("{path}\tfailed\t{e}"),
+        }
+        if std::env::var("ARRANGE_RESOLVE").is_err() {
+            continue;
+        }
+        // Stage 3, and a preview of stage 4: the boundary rounded to f64.
+        let started = Instant::now();
+        match resolve(&points, &triangles) {
+            Ok(r) => {
+                let seconds = started.elapsed().as_secs_f64();
+                let rp: Vec<Point3> = r.points.iter().map(|q| q.approx()).collect();
+                let proper: Vec<[u32; 3]> = r
+                    .triangles
+                    .iter()
+                    .copied()
+                    .filter(|t| {
+                        let [a, b, c] = t.map(|v| rp[v as usize]);
+                        plane_axis(a, b, c).is_some()
+                    })
+                    .collect();
+                let flat = r.triangles.len() - proper.len();
+                let crossing = intersections(&rp, &proper).map_or(usize::MAX, |x| x.pairs);
+                if std::env::var("ARRANGE_PROPAGATE").is_ok() {
+                    match resolve_with(&points, &triangles, false) {
+                        Ok(by_edges) if by_edges.triangles == r.triangles => {}
+                        Ok(_) => eprintln!("{path}: around edges gives another surface"),
+                        Err(e) => eprintln!("{path}: around edges failed: {e}"),
+                    }
+                }
+                let vol = |pts: &[Point3], tris: &[[u32; 3]]| -> f64 {
+                    tris.iter()
+                        .map(|t| {
+                            let [a, b, c] = t.map(|v| pts[v as usize]);
+                            (a[0] * (b[1] * c[2] - b[2] * c[1])
+                                - a[1] * (b[0] * c[2] - b[2] * c[0])
+                                + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                                / 6.0
+                        })
+                        .sum()
+                };
+                println!(
+                    "{path}\tresolved\tfaces {}\tpatches {}\tdropped {}\tkept {}\tunbalanced {}\tvolume {:.6e} from {:.6e}\trounded: flat {flat}, crossing pairs {crossing}\t{seconds:.3}",
+                    r.faces,
+                    r.patches,
+                    r.dropped,
+                    r.triangles.len(),
+                    unbalanced(&r.triangles),
+                    vol(&rp, &r.triangles),
+                    vol(&points, &triangles),
+                );
+            }
+            Err(ArrangementError::Open { edges }) => {
+                println!("{path}\topen\t{edges} unbalanced edges");
+            }
+            Err(e) => println!("{path}\tresolve failed\t{e}"),
         }
     }
 }

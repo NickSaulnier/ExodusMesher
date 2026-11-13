@@ -26,12 +26,14 @@
 //! so their subdivisions agree along it.
 
 mod cdt;
+mod label;
 mod subdivide;
 
 use std::collections::BTreeMap;
 
 use thiserror::Error;
 
+pub use label::{Resolved, resolve, resolve_with};
 pub use subdivide::{Arrangement, arrangement};
 
 use crate::implicit::{self, ImplicitError, Point};
@@ -49,6 +51,10 @@ pub enum ArrangementError {
     Implicit(#[from] ImplicitError),
     #[error("a triangle could not be subdivided: {0}")]
     Triangulation(String),
+    #[error("the surface is not closed: {edges} edges are not used as often in each direction")]
+    Open { edges: usize },
+    #[error("no segment could be cast clear of every edge and vertex")]
+    Cast,
 }
 
 /// What a constraint segment lies on besides its triangle's plane, so its
