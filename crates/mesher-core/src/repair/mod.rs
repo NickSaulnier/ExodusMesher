@@ -384,7 +384,15 @@ fn repair_part(
                             .hint("the surface was cut along its intersections and replaced by the boundary of the solid it encloses"),
                     );
                 }
-                log.repaired(name, &codes, Action::Resolve);
+                // The resolved surface has no intersections of either kind:
+                // a split in rung 1 can turn the self-intersections diagnosis
+                // found into overlaps between the shells it separated (or
+                // join shells the other way), so both codes are repaired.
+                log.repaired(
+                    name,
+                    &[DefectCode::IntSelfIntersection, DefectCode::IntShellOverlap],
+                    Action::Resolve,
+                );
                 points = r.points;
                 faces = r.triangles;
                 origin = new_origin;

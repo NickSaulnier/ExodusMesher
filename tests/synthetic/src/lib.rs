@@ -56,6 +56,31 @@ impl Solid {
         Solid::cuboid([0.0; 3], [1.0; 3])
     }
 
+    /// The prism of a simple, counter-clockwise polygon between `z0` and
+    /// `z1` (outward). Its caps are fanned from vertex `fan`, which the
+    /// caller picks so that every fan triangle lies inside the polygon.
+    #[must_use]
+    pub fn prism(polygon: &[[f64; 2]], z0: f64, z1: f64, fan: usize) -> Solid {
+        let n = polygon.len() as u32;
+        let points = [z0, z1]
+            .iter()
+            .flat_map(|&z| polygon.iter().map(move |&[x, y]| [x, y, z]))
+            .collect();
+        let at = |k: u32| (fan as u32 + k) % n;
+        let mut tris = Vec::new();
+        for k in 1..n.saturating_sub(1) {
+            let (a, b, c) = (at(0), at(k), at(k + 1));
+            tris.push([a, c, b]);
+            tris.push([n + a, n + b, n + c]);
+        }
+        for i in 0..n {
+            let j = (i + 1) % n;
+            tris.push([i, j, n + j]);
+            tris.push([i, n + j, n + i]);
+        }
+        Solid { points, tris }
+    }
+
     /// Surface of `[0, n]^3` from unit quads, sharing vertices along edges.
     #[must_use]
     pub fn grid_cube(n: i64) -> Solid {

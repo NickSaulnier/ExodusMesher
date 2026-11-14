@@ -135,18 +135,18 @@ cargo test --workspace
 
 ## Benchmark
 
-The stratified 1,000-model Thingi10k sample was run on Nov 8, 2026, with default settings, against TetGen (`pzAfq`) at the same element size. Full details are in [PLAN.md](PLAN.md) (Milestone 10).
+The stratified 1,000-model Thingi10k sample was last run on Nov 13, 2026 (after Milestone 17), with default settings, against TetGen (`pzAfq`) at the same element size. Full details, and the first run of Nov 8, are in [PLAN.md](PLAN.md) (Milestone 10).
 
 | Class | Models | Conformal (exit 0 or 10) | Stuffing fallback (20) | Failed (30) | TetGen meshed |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Clean | 350 | 304 | 40 | 6 | 323 |
-| Multi-component | 150 | 114 | 32 | 4 | 126 |
-| Non-manifold | 120 | 59 | 57 | 4 | 72 |
-| Open | 80 | 65 | 11 | 4 | 19 |
-| Self-intersecting | 300 | 26 | 235 | 39 | 3 |
-| All | 1,000 | 568 | 375 | 57 | 543 |
+| Clean | 350 | 266 | 82 | 2 | 322 |
+| Multi-component | 150 | 99 | 47 | 4 | 124 |
+| Non-manifold | 120 | 48 | 68 | 4 | 70 |
+| Open | 80 | 57 | 21 | 2 | 19 |
+| Self-intersecting | 300 | 88 | 194 | 18 | 3 |
+| All | 1,000 | 558 | 412 | 30 | 538 |
 
-On the 534 models both meshed, the median per-model minimum dihedral is 2.98° for ExodusMesher (0.90° for its conformal meshes alone) and 0.72° for TetGen. The median mean non-orthogonality is 23.2° against 27.2°. ExodusMesher takes about 15 times TetGen's total time (median 38 s a model).
+ExodusMesher meshes 970 of the 1,000 models (943 on Nov 8); TetGen meshes 538. 145 of the stuffing meshes are kept by choice: those models had a conformal mesh, but its worst cells were far beyond the quality limits and stuffing's were better. On the 533 models both meshed, the median per-model minimum dihedral is 15.0° for ExodusMesher (also 15.0° for its conformal meshes alone, against 0.90° on Nov 8) and 0.71° for TetGen. The median mean non-orthogonality is 21.5° against 27.2°. ExodusMesher takes about 17 times TetGen's total time (median 41 s a model).
 
 ## Licensing
 

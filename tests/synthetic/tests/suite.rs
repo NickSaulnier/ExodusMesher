@@ -27,7 +27,9 @@ use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::report::MAX_LOCATION_ITEMS;
 use mesher_core::volume::{MeshOutcome, mesh_parts};
-use mesher_core::{DefectCode, JobConfig, Kernel, Outcome, Record, RecordLog, Stage};
+use mesher_core::{
+    Action, DefectCode, JobConfig, Kernel, Outcome, Record, RecordLog, Severity, Stage,
+};
 use mesher_io::parse_obj;
 use mesher_synthetic::{Scene, Solid};
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
@@ -409,6 +411,40 @@ fn cases() -> Vec<Case> {
         Scene::default().with(Some("pair"), cube().union(&shifted())),
         vec![(IntShellOverlap, Key::Any)],
     ));
+    {
+        // A cube and a hooked prism sharing an edge, the hook reaching back
+        // into the cube: one shell that intersects itself, until rung 1
+        // splits the edge and the intersections are between two shells.
+        // Rung 2 resolves them all (Thingi10k 44104 kept its diagnosis
+        // errors). The union still has the edge, split again, so stuffing
+        // meshes it.
+        let hook = Solid::prism(
+            &[
+                [1.5, 1.0],
+                [0.5, 0.25],
+                [2.0, 0.25],
+                [2.0, 1.5],
+                [1.0, 1.5],
+                [1.0, 1.0],
+            ],
+            0.0,
+            1.0,
+            0,
+        );
+        let s = cube().union(&hook);
+        let e = [[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]].map(|p| s.find(p).unwrap());
+        out.push(Case {
+            conformal_fails: true,
+            ..case(
+                "self-intersection across a non-manifold edge",
+                Scene::single(s),
+                vec![
+                    (TopNonmanifoldEdge, verts(e)),
+                    (IntSelfIntersection, Key::Any),
+                ],
+            )
+        });
+    }
     // Rung 2 on more ways shells meet: a bar through a cube, boxes
     // overlapping on a common floor (coplanar faces), and boxes touching
     // face to face (their interface goes).
@@ -800,6 +836,34 @@ fn check_repair(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) {
                 "{label}: no {want:?} repair record for {} at {key:?}",
                 finding.code.as_str()
             ));
+        }
+    }
+
+    // A part whose intersections rung 2 resolved keeps no intersection
+    // error from diagnosis, whichever kind each became after rung 1.
+    for r in stage(Stage::Repair) {
+        if r.action != Some(Action::Resolve) || r.outcome != Some(Outcome::Applied) {
+            continue;
+        }
+        for finding in stage(Stage::Diagnose).filter(|f| {
+            f.part == r.part
+                && matches!(
+                    f.code,
+                    DefectCode::IntSelfIntersection | DefectCode::IntShellOverlap
+                )
+        }) {
+            if finding.severity == Severity::Error
+                || finding.action != Some(Action::Resolve)
+                || finding.outcome != Some(Outcome::Applied)
+            {
+                failures.push(format!(
+                    "{label}: {} on a resolved part left as {:?} {:?} {:?}",
+                    finding.code.as_str(),
+                    finding.severity,
+                    finding.action,
+                    finding.outcome
+                ));
+            }
         }
     }
 
