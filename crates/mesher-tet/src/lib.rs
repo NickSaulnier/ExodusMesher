@@ -16,6 +16,7 @@ pub mod remesh;
 pub mod sizing;
 pub mod smooth;
 pub mod stuffing;
+pub mod wrap;
 
 pub use conforming::{ConformingError, ConformingMesh, ConformingParams, conforming_mesh};
 pub use delaunay::{Delaunay, DelaunayError, Inserted, Tetrahedralization, delaunay};
@@ -25,3 +26,4 @@ pub use remesh::{RemeshError, RemeshParams, Remeshed, remesh};
 pub use sizing::{SizeField, SizingParams};
 pub use smooth::{SmoothParams, SmoothStats, smooth_slivers};
 pub use stuffing::{Stuffed, StuffingError, StuffingParams, stuff, stuff_graded};
+pub use wrap::{WrapError, WrapParams, Wrapped, wrap};

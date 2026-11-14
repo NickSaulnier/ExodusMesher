@@ -90,6 +90,11 @@
           "description": "Repair rung 2: a surface that intersects itself or whose shells\noverlap, cut along its intersections and replaced by the boundary of\nthe solid it encloses.",
           "type": "string",
           "const": "resolve"
+        },
+        {
+          "description": "Repair rung 3: a surface the gate still rejects (open, non-manifold,\nintersecting where rung 2 could not resolve it), replaced by a wrap:\na closed, manifold, intersection-free surface at a small offset\naround it.",
+          "type": "string",
+          "const": "wrap"
         }
       ]
     },
@@ -470,6 +475,12 @@
         "uniform_size": {
           "description": "Mesh at `element_size` everywhere, without the sizing field (which\ngrades the size down to a quarter of it where the surface is curved\nor the part is thin).",
           "type": "boolean"
+        },
+        "wrap_alpha": {
+          "description": "The wrap's α (repair rung 3: openings narrower than about 2α are\nclosed), relative to the element size.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
         }
       },
       "additionalProperties": false

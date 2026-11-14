@@ -277,14 +277,32 @@ fn cases() -> Vec<Case> {
                 .collect(),
             points: ico.points.clone(),
         };
+        // Too large to fill, and stuffing's boundary is too far from it, so
+        // repair rung 3, the last resort, wraps it (Milestone 17), with the
+        // winding guard closing it across the rim.
         out.push(Case {
             gate_fails: vec![TopBoundaryEdge],
             repair_fails: vec![TopBoundaryEdge],
             open: true,
             ..case(
                 "hole, open bowl (too large to fill)",
-                Scene::single(bowl),
+                Scene::single(bowl.clone()),
                 vec![(TopBoundaryEdge, Key::Any)],
+            )
+        });
+        // Open and intersecting: rung 2 refuses an open part; stuffing or,
+        // failing that, rung 3 meshes it.
+        out.push(Case {
+            gate_fails: vec![TopBoundaryEdge, IntShellOverlap],
+            repair_fails: vec![TopBoundaryEdge, IntShellOverlap],
+            open: true,
+            ..case(
+                "open bowl with a box through its wall",
+                Scene::default().with(
+                    Some("bowl"),
+                    bowl.union(&Solid::cuboid([0.7, -0.2, 0.1], [1.3, 0.2, 0.5])),
+                ),
+                vec![(TopBoundaryEdge, Key::Any), (IntShellOverlap, Key::Any)],
             )
         });
     }
@@ -809,8 +827,20 @@ fn check_repair(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) {
         failures.push(format!("{label}: a repair guard tripped"));
     }
 
-    // Accounting: counts before and after are explained by the repair records.
-    for p in &run.repaired {
+    // Accounting: counts before and after are explained by the repair
+    // records (for a part wrapped as the last resort, its wrap's counts).
+    let finals: Vec<&RepairedPart> = run
+        .repaired
+        .iter()
+        .map(|r| {
+            run.meshes
+                .wrapped
+                .iter()
+                .find(|w| w.part == r.part)
+                .unwrap_or(r)
+        })
+        .collect();
+    for p in finals {
         let applied: Vec<&Record> = stage(Stage::Repair)
             .filter(|r| {
                 r.part.as_deref() == Some(p.name.as_str()) && r.outcome == Some(Outcome::Applied)

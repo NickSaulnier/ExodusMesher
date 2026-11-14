@@ -161,6 +161,11 @@ pub enum Action {
     /// overlap, cut along its intersections and replaced by the boundary of
     /// the solid it encloses.
     Resolve,
+    /// Repair rung 3: a surface the gate still rejects (open, non-manifold,
+    /// intersecting where rung 2 could not resolve it), replaced by a wrap:
+    /// a closed, manifold, intersection-free surface at a small offset
+    /// around it.
+    Wrap,
 }
 
 /// Result of the action.
@@ -568,6 +573,9 @@ pub struct JobConfig {
     /// The volume kernel tried first.
     #[serde(default, skip_serializing_if = "KernelChoice::is_default")]
     pub kernel: KernelChoice,
+    /// The wrap's α (repair rung 3: openings narrower than about 2α are
+    /// closed), relative to the element size.
+    pub wrap_alpha: f64,
 }
 
 /// The volume kernel tried first; the rest of the fallback ladder follows it.
@@ -602,6 +610,7 @@ impl Default for JobConfig {
             uniform_size: false,
             no_remesh: false,
             kernel: KernelChoice::Conformal,
+            wrap_alpha: 1.0,
         }
     }
 }

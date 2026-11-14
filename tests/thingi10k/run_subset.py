@@ -3,9 +3,11 @@ summarise the outcomes: exit codes, kernel (conformal or stuffing), and the
 records that sent a model to the fallback.
 
     python tests/thingi10k/run_subset.py [ids.txt] [--jobs N] [--timeout S]
+        [--out DIR] [--arg=--flag ...]
 
 The models are read from target/thingi10k/obj/<id>.obj (welded OBJ written by
-the oracle harness) and meshed into target/thingi10k/run/<id>/. Needs a
+the oracle harness) and meshed into target/thingi10k/run/<id>/ (or
+DIR/<id>/); each `--arg` is passed on to `mesher run`. Needs a
 release build of `mesher` and `mesher-worker`. The ids file defaults to
 tests/thingi10k/subset.txt.
 """
@@ -23,10 +25,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 EXE = os.path.join(ROOT, "target", "release", "mesher" + (".exe" if os.name == "nt" else ""))
 
 
-def run(model, out, timeout):
+def run(model, out, timeout, extra):
     start = time.monotonic()
     proc = subprocess.run(
-        [EXE, "run", model, "--out", out, "--timeout", str(timeout)],
+        [EXE, "run", model, "--out", out, "--timeout", str(timeout), *extra],
         capture_output=True,
         text=True,
     )
@@ -52,6 +54,8 @@ def main():
     ap.add_argument("ids", nargs="?", default=os.path.join(ROOT, "tests", "thingi10k", "subset.txt"))
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2))
     ap.add_argument("--timeout", type=float, default=600)
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--arg", action="append", default=[])
     args = ap.parse_args()
     with open(args.ids, encoding="utf-8") as f:
         ids = [line.split()[0] for line in f if line.strip() and not line.startswith("#")]
@@ -62,8 +66,9 @@ def main():
             pool.submit(
                 run,
                 os.path.join(data, "obj", f"{i}.obj"),
-                os.path.join(data, "run", i),
+                os.path.join(args.out or os.path.join(data, "run"), i),
                 args.timeout,
+                args.arg,
             ): i
             for i in ids
         }

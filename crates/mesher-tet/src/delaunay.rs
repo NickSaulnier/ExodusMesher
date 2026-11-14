@@ -46,6 +46,10 @@ const NONE: u32 = u32::MAX;
 /// Local face opposite each vertex, ordered outward for a positive tet.
 const FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
 
+/// Local face opposite each vertex, ordered outward for a real tet (see
+/// [`Delaunay::cell`]).
+pub const FACE_ORDER: [[usize; 3]; 4] = FACES;
+
 #[derive(Debug, Clone, Copy)]
 struct Tet {
     v: [u32; 4],
@@ -891,6 +895,30 @@ impl Delaunay {
             .copied()
             .filter(|&t| self.tet(t).is_some())
             .collect()
+    }
+
+    /// Slots of every tet (ghosts too) created by the last insertion that
+    /// added a point.
+    #[must_use]
+    pub fn last_created_slots(&self) -> &[u32] {
+        &self.created
+    }
+
+    /// The vertices and neighbours of the live tet in `slot`, ghosts too
+    /// (vertex [`GHOST`] last). `n[i]` is across the face opposite `v[i]`;
+    /// [`FACE_ORDER`]`[i]` lists that face's local vertices, outward.
+    #[must_use]
+    pub fn cell(&self, slot: u32) -> Option<([u32; 4], [u32; 4])> {
+        self.tets
+            .get(slot as usize)
+            .filter(|t| t.alive)
+            .map(|t| (t.v, t.n))
+    }
+
+    /// The number of slots (live or free); slot ids are below it.
+    #[must_use]
+    pub fn slot_count(&self) -> usize {
+        self.tets.len()
     }
 
     /// The vertices of the real tet in `slot`, if it is alive.

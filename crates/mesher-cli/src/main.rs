@@ -74,6 +74,13 @@ struct RunArgs {
     /// stuffing follow if it fails) [default: conformal].
     #[arg(long, value_enum)]
     kernel: Option<KernelArg>,
+    /// The wrap's α for repair rung 3, relative to the element size: a part
+    /// the surface gate still rejects after local repairs and resolving its
+    /// intersections, and whose stuffing fallback is rejected, is replaced
+    /// as the last resort by a wrap that closes openings narrower than about
+    /// 2α [default: 1].
+    #[arg(long, value_parser = positive)]
+    wrap_alpha: Option<f64>,
     /// Kill the worker after this many seconds.
     #[arg(long, default_value_t = 3600.0, value_parser = positive)]
     timeout: f64,
@@ -143,6 +150,9 @@ fn run(args: RunArgs) -> i32 {
     }
     if let Some(e) = args.element_size {
         c.element_size = e;
+    }
+    if let Some(a) = args.wrap_alpha {
+        c.wrap_alpha = a;
     }
     let worker = args
         .worker

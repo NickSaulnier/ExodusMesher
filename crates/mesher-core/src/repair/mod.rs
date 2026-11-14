@@ -19,6 +19,10 @@
 //! intersections. Repair records have stage `repair`: severity `info` for a
 //! fix applied (the finding itself already carries the warning) and `error`
 //! for a fix that could not be made. Gate failures have stage `surface_gate`.
+//!
+//! Rung 3 (`wrap_part`) is the last resort, run by the volume pipeline for a
+//! part that failed the gate and whose stuffing fallback was rejected: the
+//! surface is replaced by a wrap at a small offset around it.
 
 mod fill;
 mod nonmanifold;
@@ -26,7 +30,9 @@ mod nonmanifold;
 use std::collections::BTreeMap;
 
 use mesher_geom::arrangement::resolve_rounded;
-use mesher_geom::{GeomError, Point3};
+use mesher_geom::vec3::{add, cross, norm, scale, sub};
+use mesher_geom::{Aabb, Bvh, FastWindingNumber, GeomError, Point3, TriangleSoup};
+use mesher_tet::{WrapParams, wrap};
 use serde_json::Value;
 
 use crate::diagnose::analysis::{Analysis, analyze_surface};
@@ -143,20 +149,9 @@ fn repair_part(
     // Which vertices are one point of contact: copies of a model vertex by
     // their origin; vertices with no model vertex (made by rung 2) by their
     // position, so the copies a split makes of one still meet.
-    let contact =
-        |points: &[Point3], faces: &[[u32; 3]], origin: &[Option<u32>]| -> Vec<[u32; 3]> {
-            let mut first: BTreeMap<[u64; 3], u32> = BTreeMap::new();
-            let mut key = |v: u32| -> u32 {
-                if let Some(o) = origin.get(v as usize).copied().flatten() {
-                    return o;
-                }
-                let at = points
-                    .get(v as usize)
-                    .map_or([u64::MAX; 3], |p| p.map(|x| (x + 0.0).to_bits()));
-                n_model.saturating_add(*first.entry(at).or_insert(v))
-            };
-            faces.iter().map(|t| t.map(&mut key)).collect()
-        };
+    let contact = |points: &[Point3], faces: &[[u32; 3]], origin: &[Option<u32>]| {
+        contact_ids(points, faces, origin, n_model)
+    };
     let origin_faces = |fs: &[u32], face_origin: &[Option<u32>]| -> Vec<u32> {
         fs.iter()
             .filter_map(|&f| face_origin.get(f as usize).copied().flatten())
@@ -454,6 +449,218 @@ fn repair_part(
     })
 }
 
+/// Which vertices are one point of contact: copies of a model vertex by
+/// their origin; vertices with no model vertex (made by rungs 2 and 3) by
+/// their position, so the copies a split makes of one still meet.
+fn contact_ids(
+    points: &[Point3],
+    faces: &[[u32; 3]],
+    origin: &[Option<u32>],
+    n_model: u32,
+) -> Vec<[u32; 3]> {
+    let mut first: BTreeMap<[u64; 3], u32> = BTreeMap::new();
+    let mut key = |v: u32| -> u32 {
+        if let Some(o) = origin.get(v as usize).copied().flatten() {
+            return o;
+        }
+        let at = points
+            .get(v as usize)
+            .map_or([u64::MAX; 3], |p| p.map(|x| (x + 0.0).to_bits()));
+        n_model.saturating_add(*first.entry(at).or_insert(v))
+    };
+    faces.iter().map(|t| t.map(&mut key)).collect()
+}
+
+/// Repair rung 3, the last resort (decided Nov 13, 2026): a part whose
+/// surface failed the gate and whose stuffing fallback was rejected (or not
+/// allowed, under `--strict`) is wrapped (`mesher_tet::wrap`: closed,
+/// manifold, intersection-free, at a small offset around it, with the
+/// winding guard for an open surface). The wrap is kept if the faces
+/// bounding the solid the surface encloses are within the deviation limit
+/// of it; the part is then returned with the wrap as its surface (passing
+/// the gate) for the volume pipeline to mesh again, with one record per
+/// gate check it failed. `None` (with `failed` records) when it cannot be
+/// wrapped, or when the rung is off.
+pub(crate) fn wrap_part(
+    model: &SurfaceModel,
+    r: &RepairedPart,
+    tol: &Tolerances,
+    log: &mut RecordLog,
+) -> Result<Option<RepairedPart>, InternalError> {
+    let name = r.name.as_str();
+    let applied = |code, action| {
+        Record::new(code, Stage::Repair)
+            .part(name)
+            .severity(Severity::Info)
+            .action(action, Outcome::Applied)
+    };
+    let failed = |code, action| {
+        Record::new(code, Stage::Repair)
+            .part(name)
+            .severity(Severity::Error)
+            .action(action, Outcome::Failed)
+    };
+    let err = |e: GeomError| InternalError(format!("part {name}: {e}"));
+    let n_model = model.vertices.len() as u32;
+    let contact = |points: &[Point3], faces: &[[u32; 3]], origin: &[Option<u32>]| {
+        contact_ids(points, faces, origin, n_model)
+    };
+    let (points, faces) = (&r.points, &r.faces);
+    let (origin, face_origin) = (&r.vertex_origin, &r.face_origin);
+    let a2 = analyze_surface(points, faces, &contact(points, faces, origin), tol).map_err(err)?;
+    let failing = gate_codes(&a2);
+    if failing.is_empty() || tol.wrap_alpha <= 0.0 || faces.is_empty() {
+        return Ok(None);
+    }
+    {
+        let used: Vec<Point3> = faces
+            .iter()
+            .flatten()
+            .filter_map(|&v| points.get(v as usize).copied())
+            .collect();
+        let diagonal = Aabb::of_points(&used).diagonal();
+        let alpha = tol.wrap_alpha * diagonal;
+        let offset = alpha / tol.wrap_offset_ratio;
+        let open = is_open(faces);
+        let params = WrapParams {
+            alpha,
+            offset,
+            max_points: 4_000_000,
+            winding_guard: open,
+        };
+        let (components_before, euler_before) =
+            (components(&contact(points, faces, origin)), euler(faces));
+        // The faces bounding the solid the surface encloses: the winding
+        // number is below 1/2 just off one side (faces buried inside it,
+        // such as a shell inside another, go with the wrap as with rung 2).
+        let input_soup = TriangleSoup::new(points, faces).map_err(err)?;
+        let fwn = FastWindingNumber::new(input_soup);
+        let bounding: Vec<Point3> = faces
+            .iter()
+            .filter_map(|t| {
+                let [a, b, c] = t.map(|v| points[v as usize]);
+                let n = cross(sub(b, a), sub(c, a));
+                let len = norm(n);
+                if len.is_nan() || len <= 0.0 {
+                    return None;
+                }
+                let m = [0, 1, 2].map(|k| (a[k] + b[k] + c[k]) / 3.0);
+                let step = scale(n, offset / len);
+                let side = |p: Point3| libm::fabs(fwn.winding_number(p)) < 0.5;
+                (side(add(m, step)) || side(sub(m, step))).then_some(m)
+            })
+            .collect();
+        let outcome = wrap(points, faces, params)
+            .map_err(|e| e.to_string())
+            .and_then(|w| {
+                // How far the solid's boundary is from the wrap: features
+                // the wrap closed over.
+                let soup = TriangleSoup::new(&w.points, &w.triangles).map_err(|e| e.to_string())?;
+                let bvh = Bvh::new(soup);
+                let deviation = bounding
+                    .iter()
+                    .filter_map(|&p| bvh.nearest(p))
+                    .map(|n| n.distance_squared)
+                    .fold(0.0f64, f64::max)
+                    .sqrt()
+                    / diagonal;
+                Ok((w, deviation))
+            });
+        let measured = |r: Record| {
+            r.measured("rung", 3u64)
+                .measured("alpha", alpha / diagonal)
+                .measured("offset", offset / diagonal)
+                .measured("winding_guard", open)
+        };
+        match outcome {
+            Ok((w, deviation)) if deviation <= tol.max_wrap_deviation => {
+                // Each wrap triangle takes the model triangle nearest its
+                // centre, so side sets keep their groups.
+                let input = TriangleSoup::new(points, faces).map_err(err)?;
+                let input_bvh = Bvh::new(input);
+                let new_face_origin: Vec<Option<u32>> = w
+                    .triangles
+                    .iter()
+                    .map(|t| {
+                        let c = t.map(|v| w.points[v as usize]);
+                        let m = [0, 1, 2].map(|k| (c[0][k] + c[1][k] + c[2][k]) / 3.0);
+                        input_bvh
+                            .nearest(m)
+                            .and_then(|n| face_origin.get(n.triangle as usize).copied().flatten())
+                    })
+                    .collect();
+                let (components_after, euler_after) =
+                    (components(&w.triangles), euler(&w.triangles));
+                for (i, &code) in failing.iter().enumerate() {
+                    let mut record = applied(code, Action::Wrap);
+                    if i == 0 {
+                        record = record
+                            .measured("faces_removed", faces.len() as u64)
+                            .measured("faces_added", w.triangles.len() as u64)
+                            .measured(
+                                "vertices_added",
+                                w.points.len() as i64 - points.len() as i64,
+                            );
+                    }
+                    log.push(
+                        measured(record)
+                            .measured("deviation", deviation)
+                            .measured("faces_before", faces.len() as u64)
+                            .measured("faces_after", w.triangles.len() as u64)
+                            .measured("components_before", components_before as u64)
+                            .measured("components_after", components_after as u64)
+                            .measured("euler_before", euler_before)
+                            .measured("euler_after", euler_after)
+                            .measured("cap_points", w.cap_points as u64)
+                            .measured("cells_relabelled", w.relabelled as u64)
+                            .hint("the surface was replaced by a wrap at a small offset around it; features narrower than about twice alpha are closed over"),
+                    );
+                }
+                log.repaired(name, &failing, Action::Wrap);
+                let origin = vec![None; w.points.len()];
+                let ids = contact(&w.points, &w.triangles, &origin);
+                let a3 = analyze_surface(&w.points, &w.triangles, &ids, tol).map_err(err)?;
+                let gate_passed = gate(name, &a3, &origin, &new_face_origin, model, log);
+                let summary = RepairSummary {
+                    faces_after: w.triangles.len() as u64,
+                    vertices_after: w.points.len() as u64,
+                    gate_passed,
+                    rung: 3,
+                    components_after: components_after as u64,
+                    euler_after,
+                    ..r.summary
+                };
+                return Ok(Some(RepairedPart {
+                    part: r.part,
+                    name: r.name.clone(),
+                    points: w.points,
+                    faces: w.triangles,
+                    vertex_origin: origin,
+                    face_origin: new_face_origin,
+                    summary,
+                }));
+            }
+            outcome => {
+                let reason = match outcome {
+                    Ok((_, deviation)) => format!(
+                        "the wrap is {deviation:.4} of the diagonal from the surface, beyond the limit of {}",
+                        tol.max_wrap_deviation
+                    ),
+                    Err(e) => e,
+                };
+                for &code in &failing {
+                    log.push(
+                        measured(failed(code, Action::Wrap))
+                            .measured("reason", reason.clone())
+                            .hint("the surface could not be wrapped"),
+                    );
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// The surface-gate checks a surface fails, without recording anything (for
 /// a surface built after repair, such as a remeshed one): one phrase each,
 /// with its count; empty when the surface passes.
@@ -486,6 +693,50 @@ pub(crate) fn gate_failures(
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// The codes of the surface-gate checks an analysis fails (as `gate`
+/// records them), without recording anything.
+fn gate_codes(a: &Analysis) -> Vec<DefectCode> {
+    let sheets = (0..a.shell_faces.len()).any(|s| a.sheet[s]);
+    let inverted = (0..a.shell_faces.len()).any(|s| !a.sheet[s] && a.inverted[s]);
+    [
+        (
+            a.loops.iter().any(|l| !a.sheet[l.shell]),
+            DefectCode::TopBoundaryEdge,
+        ),
+        (
+            !a.nonmanifold_edges.is_empty(),
+            DefectCode::TopNonmanifoldEdge,
+        ),
+        (
+            !a.nonmanifold_vertices.is_empty(),
+            DefectCode::TopNonmanifoldVertex,
+        ),
+        (
+            !a.disagreements.is_empty(),
+            DefectCode::TopInconsistentOrientation,
+        ),
+        (sheets, DefectCode::TopOpenSheet),
+        (inverted, DefectCode::TopInvertedShell),
+        (!a.self_pairs.is_empty(), DefectCode::IntSelfIntersection),
+        (!a.shell_overlaps.is_empty(), DefectCode::IntShellOverlap),
+    ]
+    .into_iter()
+    .filter_map(|(fails, code)| fails.then_some(code))
+    .collect()
+}
+
+/// Whether some edge is not used as often in each direction.
+fn is_open(faces: &[[u32; 3]]) -> bool {
+    let mut balance: BTreeMap<(u32, u32), i64> = BTreeMap::new();
+    for t in faces {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            *balance.entry((a.min(b), a.max(b))).or_default() += if a < b { 1 } else { -1 };
+        }
+    }
+    balance.values().any(|&n| n != 0)
 }
 
 /// The Euler characteristic of a surface: vertices − edges + faces.

@@ -16,7 +16,7 @@ use mesher_core::protocol::{
     Job, MESH_EXODUS_FILE, MESH_MSH_FILE, MESH_VTU_FILE, OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE,
     WorkerMessage,
 };
-use mesher_core::repair::repair;
+use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::volume::{assemble, mesh_parts};
 use mesher_core::{Action, DefectCode, ExitStatus, Outcome, Record, RecordLog, Report, Stage};
 use mesher_io::exodus::{ExodusError, ExodusOptions, QaRecord, write_exodus};
@@ -89,7 +89,7 @@ fn process(
     report: &mut Report,
     emit: &mut dyn FnMut(&WorkerMessage),
 ) -> Result<Vec<(&'static str, String)>, String> {
-    let tol = Tolerances::default();
+    let tol = Tolerances::for_job(&job.config);
     emit(&WorkerMessage::Progress {
         stage: Stage::Diagnose,
         fraction: 0.0,
@@ -132,6 +132,24 @@ fn process(
     let repaired = repair(model, &diagnosis, &selected, &tol, log).map_err(|e| e.0)?;
     report.stages_run.push(Stage::Repair);
     report.stages_run.push(Stage::SurfaceGate);
+
+    emit(&WorkerMessage::Progress {
+        stage: Stage::VolumeMesh,
+        fraction: 0.0,
+    });
+    let meshes = mesh_parts(model, &repaired, &job.config, log).map_err(|e| e.0)?;
+    // A part wrapped as the last resort (repair rung 3) has the wrap as its
+    // repaired surface.
+    let repaired: Vec<&RepairedPart> = repaired
+        .iter()
+        .map(|r| {
+            meshes
+                .wrapped
+                .iter()
+                .find(|w| w.part == r.part)
+                .unwrap_or(r)
+        })
+        .collect();
     for r in &repaired {
         if let Some(p) = report.parts.get_mut(r.part) {
             p.repair = Some(r.summary);
@@ -144,12 +162,6 @@ fn process(
             .collect();
         files.push((REPAIRED_FILE, mesher_io::write_obj(&surfaces)));
     }
-
-    emit(&WorkerMessage::Progress {
-        stage: Stage::VolumeMesh,
-        fraction: 0.0,
-    });
-    let meshes = mesh_parts(model, &repaired, &job.config, log).map_err(|e| e.0)?;
     report.stages_run.push(Stage::VolumeMesh);
     report.stages_run.push(Stage::VolumeGate);
     report.attempts.extend(meshes.attempts.iter().cloned());

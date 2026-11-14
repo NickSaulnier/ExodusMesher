@@ -6,7 +6,9 @@
 //! kernel rounded to f64, the conforming kernel following if that fails. If that fails (budget, recovery) or the surface did not
 //! pass the gate, isosurface stuffing on the winding-number field (`0.5 − w`)
 //! takes over, unless `--strict` forbids it. A failed conformal attempt is a
-//! warning when the fallback then succeeds, an error otherwise.
+//! warning when the fallback then succeeds, an error otherwise. Last, a part
+//! whose surface failed the gate and whose stuffing was rejected (or not
+//! allowed) is wrapped (repair rung 3) and meshed again from the start.
 //!
 //! The volume gate checks orientation, quality (the proven bounds for
 //! stuffing; the sliver threshold for Delaunay) and the Hausdorff deviation
@@ -33,7 +35,7 @@ use mesher_tet::{
 use crate::diagnose::{InternalError, Tolerances};
 use crate::mesh::{Block, SideSet, VolumeMesh, tet_side_nodes};
 use crate::model::SurfaceModel;
-use crate::repair::{RepairedPart, gate_failures};
+use crate::repair::{RepairedPart, gate_failures, wrap_part};
 use crate::report::{
     Action, Attempt, AttemptOutcome, DefectCode, JobConfig, Kernel, KernelChoice, MeshSummary,
     Outcome, QualityMeasure, Record, RecordLog, Severity, Stage, WorstCell,
@@ -81,6 +83,9 @@ pub struct MeshOutcome {
     /// The summary of each part's final attempt, by part position.
     pub summaries: Vec<(usize, MeshSummary)>,
     pub attempts: Vec<Attempt>,
+    /// The parts wrapped by repair rung 3 (the last resort): their wrap
+    /// and repair summary replace what repair gave.
+    pub wrapped: Vec<RepairedPart>,
 }
 
 /// Mesh every repaired part.
@@ -377,6 +382,10 @@ fn mesh_part(
     }
 
     if config.strict {
+        // Stuffing is not allowed: the wrap is the last resort.
+        if wrapped_and_meshed(model, r, config, log, outcome)? {
+            return Ok(());
+        }
         if let Some(rec) = exact_failure {
             log.push(rec.severity(Severity::Error));
         }
@@ -424,6 +433,10 @@ fn mesh_part(
             });
         }
     }
+    // 5. The last resort: the wrap.
+    if !fallback_ok && wrapped_and_meshed(model, r, config, log, outcome)? {
+        fallback_ok = true;
+    }
     settle(log, exact_failure, fallback_ok);
     if let Some(rec) = conformal_failure {
         log.push(if fallback_ok {
@@ -435,6 +448,32 @@ fn mesh_part(
         });
     }
     Ok(())
+}
+
+/// Repair rung 3 for a part whose surface failed the gate and found no
+/// mesh: wrap it and mesh the wrap through the whole pipeline. Whether the
+/// wrap meshed; its errors that sent the part here are then worked around.
+fn wrapped_and_meshed(
+    model: &SurfaceModel,
+    r: &RepairedPart,
+    config: &JobConfig,
+    log: &mut RecordLog,
+    outcome: &mut MeshOutcome,
+) -> Result<bool, InternalError> {
+    if r.summary.gate_passed || r.summary.rung >= 3 {
+        return Ok(false);
+    }
+    let Some(w) = wrap_part(model, r, &Tolerances::for_job(config), log)? else {
+        return Ok(false);
+    };
+    mesh_part(model, &w, config, log, outcome)?;
+    outcome.wrapped.retain(|x| x.part != r.part);
+    outcome.wrapped.push(w);
+    let meshed = outcome.meshed.iter().any(|m| m.part == r.part);
+    if meshed {
+        log.worked_around(&r.name, Action::Wrap);
+    }
+    Ok(meshed)
 }
 
 /// The part meshed by isosurface stuffing of its winding number, or the

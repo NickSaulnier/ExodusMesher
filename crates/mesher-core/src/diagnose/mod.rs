@@ -41,6 +41,26 @@ pub struct Tolerances {
     pub max_hole_fraction: f64,
     /// Repairs may change the total enclosed volume by at most this fraction.
     pub max_volume_change: f64,
+    /// Repair rung 3: the wrap's α relative to the part's diagonal (0 turns
+    /// the rung off), δ = α / `wrap_offset_ratio`, and the largest distance
+    /// from the input to the wrap, relative to the diagonal, for the wrap to
+    /// be kept.
+    pub wrap_alpha: f64,
+    pub wrap_offset_ratio: f64,
+    pub max_wrap_deviation: f64,
+}
+
+impl Tolerances {
+    /// The defaults, with repair rung 3's α and deviation limit from the
+    /// job's settings.
+    #[must_use]
+    pub fn for_job(config: &crate::report::JobConfig) -> Tolerances {
+        Tolerances {
+            wrap_alpha: config.element_size * config.wrap_alpha,
+            max_wrap_deviation: config.max_deviation,
+            ..Tolerances::default()
+        }
+    }
 }
 
 impl Default for Tolerances {
@@ -53,6 +73,9 @@ impl Default for Tolerances {
             max_hole_edges: 256,
             max_hole_fraction: 0.2,
             max_volume_change: 0.01,
+            wrap_alpha: 0.03,
+            wrap_offset_ratio: 30.0,
+            max_wrap_deviation: 0.05,
         }
     }
 }

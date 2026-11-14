@@ -31,6 +31,7 @@ The same input and settings give a byte-identical report.
 | `element_size` | Target element size, relative to the part's bounding-box diagonal (default 0.03): the largest size anywhere |
 | `uniform_size` | Present (true) when the size was not graded |
 | `no_remesh` | Present (true) when remeshing a part's surface was turned off |
+| `wrap_alpha` | The wrap's α for repair rung 3, relative to `element_size` (default 1): openings narrower than about 2α are closed |
 | `stuffing_only` | Present (true) when the client retried a worker that timed out or ran out of memory with the stuffing fallback only |
 
 ## Parts
@@ -45,7 +46,7 @@ Each part is an OBJ object (`o`), or in a file without objects an OBJ group (`g`
 | `shells` | Edge-connected surface pieces |
 | `bounds` | Bounding box `[min, max]` |
 | `selected` | Whether the job meshed it |
-| `repair` | `faces_before`, `faces_after`, `vertices_before`, `vertices_after`, and `gate_passed`: whether the repaired surface is a valid closed solid; `rung`: the highest repair rung that changed the surface (1 for local fixes or none, 2 when its intersections were resolved); `components_before`, `components_after`, `euler_before`, `euler_after`: the surface's connected pieces and Euler characteristic (vertices − edges + faces, 2 per sphere-like shell, 0 for a ring) entering repair and after it |
+| `repair` | `faces_before`, `faces_after`, `vertices_before`, `vertices_after`, and `gate_passed`: whether the repaired surface is a valid closed solid; `rung`: the highest repair rung that changed the surface (1 for local fixes or none, 2 when its intersections were resolved, 3 when it was wrapped as the last resort); `components_before`, `components_after`, `euler_before`, `euler_after`: the surface's connected pieces and Euler characteristic (vertices − edges + faces, 2 per sphere-like shell, 0 for a ring) entering repair and after it |
 | `mesh` | Present when a volume mesh was attempted; see [Mesh quality](#mesh-quality) |
 
 ## Records
@@ -80,7 +81,7 @@ A record is one finding:
 | `part` | The part, once parts exist |
 | `location` | Where it is: `vertices` (0-based indices into the parsed vertex list), `faces` (0-based indices into the triangulated face list; a polygon of n corners becomes n − 2 consecutive triangles), `obj_lines` (1-based lines of the input file), `point` (a position, when one stands for the finding). Each list holds at most 256 entries; a longer one keeps its full length in `measured` as `vertices_total`, `faces_total` or `obj_lines_total` |
 | `measured`, `threshold` | What was measured, and the limit it was held against, by name |
-| `action`, `outcome` | What was done (`skip_line`, `drop_face`, `fan_triangulate`, `remesh`, `merge`, `remove`, `fill_hole`, `split_edge`, `duplicate_vertex`, `reorient`, `flip`, `truncate`, `fallback`, `abort`, `untangle`, `resolve`) and whether it was `applied`, `failed` or `deferred` to a later stage |
+| `action`, `outcome` | What was done (`skip_line`, `drop_face`, `fan_triangulate`, `remesh`, `merge`, `remove`, `fill_hole`, `split_edge`, `duplicate_vertex`, `reorient`, `flip`, `truncate`, `fallback`, `abort`, `untangle`, `resolve`, `wrap`) and whether it was `applied`, `failed` or `deferred` to a later stage |
 | `hint` | A sentence on what it means or what to try |
 
 At most 100 records are kept per code and stage (a repair's and the surface gate's records stay when diagnosis has used its share); `summary.by_code` still counts every occurrence. A finding is never repaired without a record.
@@ -90,6 +91,10 @@ The same records are in `defects.vtp` (open it in ParaView beside the mesh) and 
 ### Records from repair rung 2
 
 A closed part whose surface intersects itself or whose shells overlap is cut along its intersections and replaced by the boundary of the solid it encloses (exact arithmetic, then rounded to f64 and checked; nested shells inside the solid and interfaces between solids touching face to face go). One `INT_SELF_INTERSECTION` or `INT_SHELL_OVERLAP` record per code found, stage `repair`, severity `info`, action `resolve` / `applied`, with `rung` (2), `intersecting_pairs` and `coplanar_pairs` (pairs of input triangles that meet), `faces_before`, `faces_after`, `pieces_dropped` (pieces of the cut surface inside or outside the solid), `components_before`, `components_after`, `euler_before`, `euler_after`, `rounding_rounds` (times the rounded surface had to be resolved again); the first also `faces_removed`, `faces_added` and `vertices_added` (net). Diagnosis's findings of those codes become warnings with `resolve` / `applied`. When it cannot be done (the part is open, or rounding cannot make it clean), the records have `resolve` / `failed` and `reason`, and the part goes to the fallback. The part's `repair` summary carries `rung` and the counts too, since the per-code cap can leave a record out.
+
+### Records from repair rung 3
+
+The last resort: a part whose repaired surface failed the surface gate (a hole too large to fill, an edge whose faces do not pair up, an open part that intersects itself, rounding that could not be made clean) and whose stuffing fallback was rejected by the volume gate (or not allowed, under `strict`) is replaced by a wrap: a closed, oriented, manifold surface with no intersecting triangles, at a small offset δ around the surface, that closes openings narrower than about 2α (α = `wrap_alpha` × `element_size` × the part's diagonal, δ = α / 30). For an open part, the wrap closes holes across the level set where the surface's generalized winding number is 1/2 (the winding guard), instead of wrapping both sides of its walls. The wrap is kept when the faces bounding the solid the surface encloses (those with the winding number below 1/2 just off one side) are all within `max_deviation` of it. One record per gate check the surface failed (`TOP_BOUNDARY_EDGE`, `TOP_NONMANIFOLD_EDGE`, `TOP_NONMANIFOLD_VERTEX`, `TOP_INCONSISTENT_ORIENTATION`, `TOP_OPEN_SHEET`, `TOP_INVERTED_SHELL`, `INT_SELF_INTERSECTION`, `INT_SHELL_OVERLAP`), stage `repair`, severity `info`, action `wrap` / `applied`, with `rung` (3), `alpha` and `offset` (relative to the diagonal), `winding_guard`, `deviation` (the largest distance from those faces to the wrap, relative to the diagonal: features closed over), `faces_before`, `faces_after`, `components_before`, `components_after`, `euler_before`, `euler_after`, `cap_points` (wrap vertices on the winding guard's level set) and `cells_relabelled` (to make it manifold); the first also `faces_removed`, `faces_added` and `vertices_added` (net). The part's errors of those codes become warnings with `wrap` / `applied` (a repair that failed keeps its own action). A wrap triangle's `faces` location is the model triangle nearest its centre, so side sets keep their groups; its vertices have no model vertex. The wrapped part then goes through the volume pipeline from the start (the conformal kernel, then stuffing on the wrap), and its `repair` summary, and `repaired.obj`, are the wrap's; once it meshes, the records that sent the part to the last resort (the gate's, the rejected stuffing's) become warnings with `wrap` / `applied`. These records come after the rejected stuffing's. When the wrap fails or is too far from the surface, the records have `wrap` / `failed` and `reason`, and the part has no mesh.
 
 ### Records from meshing
 
@@ -125,14 +130,14 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `GEO_DUPLICATE_VERTEX` | warning | Vertices closer than tolerance | Merge, warning |
 | `GEO_DEGENERATE_FACE` | warning | Zero-area or collinear face | Remove, warning |
 | `GEO_DUPLICATE_FACE` | warning | Same face listed twice | Remove, warning |
-| `TOP_BOUNDARY_EDGE` | warning | Hole: edge with one adjacent face | Fill if small, else error |
-| `TOP_NONMANIFOLD_EDGE` | warning | Edge shared by three or more faces | Split, else error |
+| `TOP_BOUNDARY_EDGE` | warning | Hole: edge with one adjacent face | Fill if small, else error, triggers fallback (stuffing, then the wrap of repair rung 3) |
+| `TOP_NONMANIFOLD_EDGE` | warning | Edge shared by three or more faces | Split, else error, triggers fallback (stuffing, then the wrap of repair rung 3) |
 | `TOP_NONMANIFOLD_VERTEX` | warning | Vertex joining separate fans | Duplicate vertex, warning |
 | `TOP_INCONSISTENT_ORIENTATION` | warning | Neighbouring faces disagree on winding | Reorient, warning |
 | `TOP_INVERTED_SHELL` | warning | Shell with negative signed volume | Flip, warning |
 | `TOP_OPEN_SHEET` | fatal | Surface encloses no volume | Fatal for that part |
-| `INT_SELF_INTERSECTION` | error | Faces of one shell intersect | Resolve (repair rung 2) for a closed part, warning; else error, triggers fallback |
-| `INT_SHELL_OVERLAP` | error | Two shells of one part intersect | Resolve (repair rung 2) for a closed part, warning; else error, triggers fallback |
+| `INT_SELF_INTERSECTION` | error | Faces of one shell intersect | Resolve (repair rung 2) for a closed part, warning; else error, triggers fallback (stuffing, then the wrap of repair rung 3) |
+| `INT_SHELL_OVERLAP` | error | Two shells of one part intersect | Resolve (repair rung 2) for a closed part, warning; else error, triggers fallback (stuffing, then the wrap of repair rung 3) |
 | `QUAL_SLIVER_FACE` | warning | Minimum angle below threshold | Remesh, warning |
 | `QUAL_SUSPECT_SCALE` | info | Bounding box suggests wrong units | Info; tolerances are relative |
 | `MESH_RECOVERY_FAILED` | error | Constrained Delaunay could not recover a facet | Error, triggers fallback |
