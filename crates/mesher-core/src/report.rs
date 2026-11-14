@@ -14,8 +14,9 @@ use crate::exit::ExitStatus;
 /// Version of the `report.json` layout. Bump on any breaking change.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// At most this many detailed records are kept per defect code; the summary
-/// still counts every occurrence.
+/// At most this many detailed records are kept per defect code and stage (so
+/// a repair's or the surface gate's records stay when diagnosis has filled
+/// its share of a code); the summary still counts every occurrence.
 pub const MAX_RECORDS_PER_CODE: u64 = 100;
 
 /// At most this many entries per location list.
@@ -352,12 +353,14 @@ fn capped(items: impl IntoIterator<Item = u32>) -> (Vec<u32>, Option<u64>) {
     }
 }
 
-/// Collects records, keeping at most [`MAX_RECORDS_PER_CODE`] per code while
-/// counting every one.
+/// Collects records, keeping at most [`MAX_RECORDS_PER_CODE`] per code and
+/// stage while counting every one.
 #[derive(Debug, Clone, Default)]
 pub struct RecordLog {
     records: Vec<Record>,
     by_code: BTreeMap<DefectCode, CodeCount>,
+    /// Records kept per code and stage, for the cap.
+    kept: BTreeMap<(DefectCode, Stage), u64>,
     severity_counts: BTreeMap<Severity, u64>,
     /// Errors per part, stage and code, kept or not, so a fallback that
     /// works around them can downgrade every one of them.
@@ -392,7 +395,9 @@ impl RecordLog {
         }
         let count = self.by_code.entry(record.code).or_default();
         count.total += 1;
-        if count.reported < MAX_RECORDS_PER_CODE {
+        let kept = self.kept.entry((record.code, record.stage)).or_default();
+        if *kept < MAX_RECORDS_PER_CODE {
+            *kept += 1;
             count.reported += 1;
             self.records.push(record);
             self.records.last()
@@ -957,6 +962,30 @@ mod tests {
         assert_eq!(report.summary.warnings, 250);
         assert_eq!(report.summary.fatal, 1);
         assert_eq!(report.summary.exit_code, 30);
+    }
+
+    /// The cap is per code and stage: a later stage's records of a code stay
+    /// when an earlier stage has used its share.
+    #[test]
+    fn log_caps_per_code_and_stage() {
+        let mut log = RecordLog::new();
+        for _ in 0..150 {
+            log.push(Record::new(
+                DefectCode::IntSelfIntersection,
+                Stage::Diagnose,
+            ));
+        }
+        log.push(Record::new(
+            DefectCode::IntSelfIntersection,
+            Stage::SurfaceGate,
+        ));
+        let gate = log
+            .records()
+            .iter()
+            .filter(|r| r.stage == Stage::SurfaceGate)
+            .count();
+        assert_eq!(gate, 1);
+        assert_eq!(log.records().len() as u64, MAX_RECORDS_PER_CODE + 1);
     }
 
     /// A part's surface errors become warnings once the fallback meshed it,

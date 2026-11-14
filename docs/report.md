@@ -83,7 +83,7 @@ A record is one finding:
 | `action`, `outcome` | What was done (`skip_line`, `drop_face`, `fan_triangulate`, `remesh`, `merge`, `remove`, `fill_hole`, `split_edge`, `duplicate_vertex`, `reorient`, `flip`, `truncate`, `fallback`, `abort`, `untangle`, `resolve`) and whether it was `applied`, `failed` or `deferred` to a later stage |
 | `hint` | A sentence on what it means or what to try |
 
-At most 100 records are kept per code; `summary.by_code` still counts every occurrence. A finding is never repaired without a record.
+At most 100 records are kept per code and stage (a repair's and the surface gate's records stay when diagnosis has used its share); `summary.by_code` still counts every occurrence. A finding is never repaired without a record.
 
 The same records are in `defects.vtp` (open it in ParaView beside the mesh) and are drawn by the GUI, which shows each record's OBJ lines.
 

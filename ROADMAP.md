@@ -26,7 +26,7 @@ The roadmap's Phase 1 is the current ExodusMesher plan plus the literature chang
 | --- | --- | --- |
 | Tolerant OBJ parser, part selection, defect taxonomy, `report.json` | Done | Milestones 1–4, `docs/report.md` |
 | Repair ladder, rung 1: local fixes | Done | Milestone 4 |
-| Repair ladder, rung 2: exact self-intersection resolution | Not started; self-intersections go to stuffing | Milestone 16 below |
+| Repair ladder, rung 2: exact self-intersection resolution | Done for closed parts (Milestone 16, Nov 13, 2026); open parts go to stuffing until rung 3 | Milestone 16 below |
 | Repair ladder, rung 3: wrapping | Partly: stuffing on the winding-number field is a lattice wrap, with no feature fidelity | Milestone 17 below |
 | Constrained Delaunay kernel with a stuffing fallback | Done, but on f64 Steiner points and plane labels, not indirect predicates; 54% conformal on the 100-model clean subset (Nov 7); on the 1,000-model sample (Nov 8), 304 of 350 clean models and 568 of 1,000 overall | Milestone 8; Milestones 11–13 below |
 | Exodus II, CLI, worker, GUI | Done (SEACAS check deferred; GUI interactive check open) | Milestones 5, 9 |

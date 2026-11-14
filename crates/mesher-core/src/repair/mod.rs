@@ -140,31 +140,37 @@ fn repair_part(
     let mut face_origin: Vec<Option<u32>> = part.face_ids.iter().map(|&t| Some(t)).collect();
     let vertices_before = points.len() as u64;
     let n_model = model.vertices.len() as u32;
-    let contact = |faces: &[[u32; 3]], origin: &[Option<u32>]| -> Vec<[u32; 3]> {
-        faces
-            .iter()
-            .map(|t| {
-                t.map(|v| {
-                    origin
-                        .get(v as usize)
-                        .copied()
-                        .flatten()
-                        .unwrap_or(n_model.saturating_add(v))
-                })
-            })
-            .collect()
-    };
+    // Which vertices are one point of contact: copies of a model vertex by
+    // their origin; vertices with no model vertex (made by rung 2) by their
+    // position, so the copies a split makes of one still meet.
+    let contact =
+        |points: &[Point3], faces: &[[u32; 3]], origin: &[Option<u32>]| -> Vec<[u32; 3]> {
+            let mut first: BTreeMap<[u64; 3], u32> = BTreeMap::new();
+            let mut key = |v: u32| -> u32 {
+                if let Some(o) = origin.get(v as usize).copied().flatten() {
+                    return o;
+                }
+                let at = points
+                    .get(v as usize)
+                    .map_or([u64::MAX; 3], |p| p.map(|x| (x + 0.0).to_bits()));
+                n_model.saturating_add(*first.entry(at).or_insert(v))
+            };
+            faces.iter().map(|t| t.map(&mut key)).collect()
+        };
     let origin_faces = |fs: &[u32], face_origin: &[Option<u32>]| -> Vec<u32> {
         fs.iter()
             .filter_map(|&f| face_origin.get(f as usize).copied().flatten())
             .collect()
     };
 
-    let a0 = analyze_surface(&points, &faces, &contact(&faces, &origin), tol).map_err(err)?;
-    let (components_entering, euler_entering) =
-        (components(&contact(&faces, &origin)), euler(&faces));
+    let a0 =
+        analyze_surface(&points, &faces, &contact(&points, &faces, &origin), tol).map_err(err)?;
+    let (components_entering, euler_entering) = (
+        components(&contact(&points, &faces, &origin)),
+        euler(&faces),
+    );
     let volume_before: f64 = a0.volume.iter().map(|v| v.abs()).sum();
-    let shells_before = components(&contact(&faces, &origin));
+    let shells_before = components(&contact(&points, &faces, &origin));
     faces.clone_from(&a0.oriented);
 
     // 2. Flip inverted shells.
@@ -230,7 +236,8 @@ fn repair_part(
     let vorigin = |v: u32, origin: &[Option<u32>]| origin.get(v as usize).copied().flatten();
 
     // 4. Fill small holes.
-    let a1 = analyze_surface(&points, &faces, &contact(&faces, &origin), tol).map_err(err)?;
+    let a1 =
+        analyze_surface(&points, &faces, &contact(&points, &faces, &origin), tol).map_err(err)?;
     for hole in &a1.loops {
         if a1.sheet[hole.shell] {
             continue;
@@ -288,7 +295,7 @@ fn repair_part(
     }
 
     // Guards, then the gate.
-    let ids = contact(&faces, &origin);
+    let ids = contact(&points, &faces, &origin);
     let a2 = analyze_surface(&points, &faces, &ids, tol).map_err(err)?;
     let shells_after = components(&ids);
     if shells_after != shells_before {
@@ -390,7 +397,7 @@ fn repair_part(
                 // Shells the resolution joined where they touch along an
                 // edge or at a vertex are split there again, as in rung 1.
                 split_records(&mut points, &mut faces, &mut origin, &face_origin, log)?;
-                let ids = contact(&faces, &origin);
+                let ids = contact(&points, &faces, &origin);
                 a2 = analyze_surface(&points, &faces, &ids, tol).map_err(err)?;
                 // Non-manifold edges and vertices rung 1 could not split are
                 // gone too when the resolved surface has none: their errors
@@ -432,7 +439,7 @@ fn repair_part(
         gate_passed,
         rung,
         components_before: components_entering as u64,
-        components_after: components(&contact(&faces, &origin)) as u64,
+        components_after: components(&contact(&points, &faces, &origin)) as u64,
         euler_before: euler_entering,
         euler_after: euler(&faces),
     };
