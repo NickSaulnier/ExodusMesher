@@ -28,8 +28,8 @@ use mesher_tet::cdt::{
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
 use mesher_tet::{
     ConformingError, ConformingParams, FvQuality, ImproveParams, RemeshParams, SizeField,
-    SizingParams, StuffingError, StuffingParams, WorstAt, conforming_mesh, fv_quality, improve,
-    remesh, stuff, stuff_graded,
+    SizingParams, Stall, StuffingError, StuffingParams, WorstAt, conforming_mesh, fv_quality,
+    improve, remesh, stuff, stuff_graded,
 };
 
 use crate::diagnose::{InternalError, Tolerances};
@@ -123,6 +123,7 @@ fn mesh_part(
     log: &mut RecordLog,
     outcome: &mut MeshOutcome,
 ) -> Result<(), InternalError> {
+    let _prof = mesher_tet::prof::scope("volume::mesh_part");
     let name = r.name.as_str();
     let internal = |e: String| InternalError(format!("part {name}: {e}"));
     let soup = TriangleSoup::new(&r.points, &r.faces).map_err(|e| internal(e.to_string()))?;
@@ -460,6 +461,7 @@ fn wrapped_and_meshed(
     log: &mut RecordLog,
     outcome: &mut MeshOutcome,
 ) -> Result<bool, InternalError> {
+    let _prof = mesher_tet::prof::scope("volume::wrapped_and_meshed");
     if r.summary.gate_passed || r.summary.rung >= 3 {
         return Ok(false);
     }
@@ -489,6 +491,7 @@ fn stuffing_candidate(
     winding: &FastWindingNumber<'_>,
     bounds: &Aabb,
 ) -> Result<Result<Candidate, Record>, InternalError> {
+    let _prof = mesher_tet::prof::scope("volume::stuffing_candidate");
     let levels = if config.uniform_size {
         0
     } else {
@@ -558,6 +561,7 @@ fn exact(
     r: &RepairedPart,
     name: &str,
 ) -> Result<(Candidate, Vec<Record>), Box<Record>> {
+    let _prof = mesher_tet::prof::scope("volume::exact");
     let recovery = |e: &dyn std::fmt::Display| {
         Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
             .measured("kernel", "exact")
@@ -708,6 +712,7 @@ fn worst_cell(c: &Candidate) -> f64 {
 }
 
 fn improve_cells(c: &mut Candidate) {
+    let _prof = mesher_tet::prof::scope("volume::improve_cells");
     let r = improve(&c.points, &c.tets, &ImproveParams::default());
     let renumbered: Option<Vec<(String, Vec<[u32; 3]>)>> = c
         .face_groups
@@ -760,6 +765,7 @@ fn remeshed(
     h: f64,
     config: &JobConfig,
 ) -> Result<(Remeshing, Candidate), String> {
+    let _prof = mesher_tet::prof::scope("volume::remeshed");
     let field = if config.uniform_size {
         SizeField::uniform(h)
     } else {
@@ -775,6 +781,7 @@ fn remeshed(
                 .unwrap_or(u32::MAX)
         })
         .collect();
+    let prof_remesh = mesher_tet::prof::scope("volume::remeshed/remesh");
     let s = remesh(
         &r.points,
         &r.faces,
@@ -798,7 +805,10 @@ fn remeshed(
             .collect(),
         ..r.clone()
     };
+    drop(prof_remesh);
+    let prof_gate = mesher_tet::prof::scope("volume::remeshed/gate");
     let failures = gate_failures(&surface.points, &surface.faces, &Tolerances::default());
+    drop(prof_gate);
     if !failures.is_empty() {
         return Err(format!(
             "the remeshed surface failed the surface gate: {}",
@@ -824,6 +834,7 @@ fn conformal(
     config: &JobConfig,
     own_facets: bool,
 ) -> Result<Candidate, Box<Record>> {
+    let _prof = mesher_tet::prof::scope("volume::conformal");
     // OBJ group of each input face (fill faces have none).
     let group_of = |f: usize| -> Option<u32> {
         r.face_origin
@@ -835,9 +846,11 @@ fn conformal(
     };
     // The sizing field grades the size down where the surface curves or the
     // part is thin.
+    let prof_size = mesher_tet::prof::scope("volume::conformal/size_field");
     let size = (!config.uniform_size)
         .then(|| SizeField::from_surface(&r.points, &r.faces, &SizingParams::for_size(h)))
         .filter(|f| !f.is_uniform());
+    drop(prof_size);
     let min_size = size.as_ref().map(SizeField::min);
     let side_sets: Vec<u32> = (0..r.faces.len())
         .map(|f| group_of(f).unwrap_or(u32::MAX))
@@ -867,6 +880,20 @@ fn conformal(
             ConformingError::Recovery { missing_faces } => {
                 Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
                     .measured("missing_faces", *missing_faces as u64)
+            }
+            ConformingError::Stalled {
+                cause,
+                value,
+                limit,
+            } => {
+                let (measure, max) = match cause {
+                    Stall::Points => ("new_points", "max_new_points"),
+                    Stall::Missing | Stall::Cascade => ("missing_pieces", "max_missing_pieces"),
+                };
+                Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
+                    .measured("stalled", cause.as_str())
+                    .measured(measure, *value as u64)
+                    .threshold(max, *limit as u64)
             }
             ConformingError::Surface(_) | ConformingError::Delaunay(_) => {
                 Record::new(DefectCode::MeshRecoveryFailed, Stage::VolumeMesh)
@@ -906,6 +933,7 @@ fn volume_gate(
     config: &JobConfig,
     log: &mut RecordLog,
 ) -> Result<(bool, MeshSummary), InternalError> {
+    let _prof = mesher_tet::prof::scope("volume::volume_gate");
     let gate = |code| Record::new(code, Stage::VolumeGate).part(name);
     let mut accepted = true;
     let (points, tets) = (&c.points, &c.tets);

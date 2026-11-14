@@ -135,6 +135,41 @@ pub enum ConformingError {
     Recovery {
         missing_faces: usize,
     },
+    /// Recovery was stopped early: it was growing, not converging
+    /// (improvement 5); `value` passed `limit`.
+    Stalled {
+        cause: Stall,
+        value: usize,
+        limit: usize,
+    },
+}
+
+/// Why recovery was stopped early. Each limit is a count, so the same input
+/// always stops the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stall {
+    /// The first recovery's missing subsegments and subfacets grew past
+    /// `STALL_FACTOR` × the input triangles (+ `STALL_MISSING_FLOOR`).
+    Missing,
+    /// The first recovery's new points grew past `STALL_FACTOR` × the input
+    /// points (+ `STALL_POINTS_FLOOR`).
+    Points,
+    /// A later recovery (handed over from local repair, or the last one)
+    /// grew its missing count past `STALL_FACTOR` × its count at the start
+    /// (+ `STALL_MISSING_FLOOR`): a cascade.
+    Cascade,
+}
+
+impl Stall {
+    /// The name used in reports.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stall::Missing => "missing_grew",
+            Stall::Points => "points_grew",
+            Stall::Cascade => "cascade",
+        }
+    }
 }
 
 impl std::fmt::Display for ConformingError {
@@ -154,6 +189,20 @@ impl std::fmt::Display for ConformingError {
                     "{missing_faces} boundary triangles could not be recovered"
                 )
             }
+            ConformingError::Stalled {
+                cause,
+                value,
+                limit,
+            } => match cause {
+                Stall::Points => write!(
+                    f,
+                    "recovery stopped: {value} new points exceed {limit} without converging"
+                ),
+                Stall::Missing | Stall::Cascade => write!(
+                    f,
+                    "recovery stopped: {value} missing boundary pieces exceed {limit} without converging"
+                ),
+            },
         }
     }
 }
@@ -315,6 +364,12 @@ struct Builder<'a> {
     face_constraints: bool,
     /// Kernel steps taken, against `params.max_work`.
     work: u64,
+    /// For `prof::trace`: refinement's tets refined for size and for shape,
+    /// boundary splits, and circumcentres inserted after a refused split.
+    refine_counts: [u64; 5],
+    /// Until the first recovery is done: its stopping rules are relative to
+    /// the input, later ones to their own start.
+    first_recovery: bool,
     /// Whether each tet (by sorted vertices) is inside; see `tet_inside`.
     inside_cache: FxHashMap<[u32; 4], bool>,
 }
@@ -324,6 +379,15 @@ struct Builder<'a> {
 const CASCADE: usize = 256;
 /// Attempts allowed per tet before it is left alone.
 const MAX_ATTEMPTS: u8 = 8;
+/// Early stop of recovery (improvement 5, Nov 14, 2026): how far the missing
+/// count, or the new points, may grow before recovery is given up. Chosen on
+/// the 1,000-model Thingi10k sample: no recovery that succeeds comes near
+/// them (the first recovery's missing count reaches at most 10 × the input
+/// triangles on a 166-triangle model, its new points 4.2 × the input points
+/// above the floor; a later recovery's missing count at most 4 × its start).
+const STALL_FACTOR: usize = 8;
+const STALL_MISSING_FLOOR: usize = 1024;
+const STALL_POINTS_FLOOR: usize = 4096;
 /// Flips one legalization may make before giving up (a few per insertion are typical).
 const MAX_FLIPS: usize = 10_000;
 
@@ -1274,6 +1338,8 @@ impl Builder<'_> {
         let _prof = crate::prof::scope("conforming::recover");
         // Passes since the number missing last went down.
         let (mut best, mut stalled) = (usize::MAX, 0usize);
+        // The missing count at the start, for a later recovery's limit.
+        let mut start: Option<usize> = None;
         loop {
             self.step()?;
             let tets = self.dt.tets();
@@ -1313,6 +1379,20 @@ impl Builder<'_> {
                 .collect();
             missing_edges.sort_unstable();
             missing_edges.dedup();
+            let faces_missing = live
+                .iter()
+                .filter(|&&s| !faces.contains(&key3(self.subs[s as usize].v)))
+                .count();
+            self.check_stall(missing_edges.len() + faces_missing, &mut start)?;
+            crate::prof::trace(|| {
+                format!(
+                    "recover pass: work {} points {} subfacets {} missing_edges {} missing_faces {faces_missing} best {best} stalled {stalled}",
+                    self.work,
+                    self.dt.points().len(),
+                    live.len(),
+                    missing_edges.len(),
+                )
+            });
             if !missing_edges.is_empty() {
                 let mut progress = false;
                 let count = missing_edges.len();
@@ -1425,6 +1505,41 @@ impl Builder<'_> {
         }
     }
 
+    /// Stop recovery early when it grows instead of converging (see
+    /// `Stall`): `missing` is this pass's missing subsegments and subfacets,
+    /// `start` the count at the first pass of this recovery.
+    fn check_stall(
+        &self,
+        missing: usize,
+        start: &mut Option<usize>,
+    ) -> Result<(), ConformingError> {
+        let start = *start.get_or_insert(missing);
+        let stalled = |cause, value, limit| {
+            Err(ConformingError::Stalled {
+                cause,
+                value,
+                limit,
+            })
+        };
+        if self.first_recovery {
+            let limit = STALL_FACTOR * self.frames.len() + STALL_MISSING_FLOOR;
+            if missing > limit {
+                return stalled(Stall::Missing, missing, limit);
+            }
+            let new = self.dt.points().len().saturating_sub(self.inputs);
+            let limit = STALL_FACTOR * self.inputs + STALL_POINTS_FLOOR;
+            if new > limit {
+                return stalled(Stall::Points, new, limit);
+            }
+        } else {
+            let limit = STALL_FACTOR * start + STALL_MISSING_FLOOR;
+            if missing > limit {
+                return stalled(Stall::Cascade, missing, limit);
+            }
+        }
+        Ok(())
+    }
+
     /// The tet's circumcentre, if it is trustworthy: exactly inside the tet's
     /// circumsphere. For a near-flat tet the computed centre can be far off.
     fn reliable_centre(p: [Point3; 4]) -> Option<(Point3, f64)> {
@@ -1499,10 +1614,14 @@ impl Builder<'_> {
             None => false,
         };
         if split {
+            self.refine_counts[2] += 1;
             return Ok(Some(true));
         }
         if any && !fallback {
             return Ok(None);
+        }
+        if any {
+            self.refine_counts[3] += 1;
         }
         // No boundary split (none needed, or the floor or the constraints
         // refused it): insert the circumcentre if the tet sees it.
@@ -1547,6 +1666,7 @@ impl Builder<'_> {
         let mut queue = std::mem::take(&mut self.missing);
         queue.sort_unstable();
         queue.dedup();
+        let (work0, points0, queue0) = (self.work, self.dt.points().len(), queue.len());
         // A cascade: local splits that delete more subfacets than they
         // recover, each round slower than the last. Local repair cannot win
         // it, but a full recovery pass settles it quickly (Thingi10k), so hand
@@ -1598,14 +1718,18 @@ impl Builder<'_> {
             // Swapped-in subfacets that are present need their constraint.
             queue = next;
         }
-        let result = if queue
+        let handover = queue
             .iter()
-            .any(|&s| self.subs[s as usize].alive && !self.dt.has_face(self.subs[s as usize].v))
-        {
-            self.recover()
-        } else {
-            Ok(())
-        };
+            .any(|&s| self.subs[s as usize].alive && !self.dt.has_face(self.subs[s as usize].v));
+        crate::prof::trace(|| {
+            format!(
+                "repair: work {work0}+{} points {points0}+{} queue {queue0} -> {} handover {handover}",
+                self.work - work0,
+                self.dt.points().len() - points0,
+                queue.len(),
+            )
+        });
+        let result = if handover { self.recover() } else { Ok(()) };
         self.floored = floored;
         result
     }
@@ -1615,6 +1739,21 @@ impl Builder<'_> {
         let _prof = crate::prof::scope("conforming::refine");
         loop {
             self.step()?;
+            if self.work % 65_536 == 0 {
+                crate::prof::trace(|| {
+                    format!(
+                        "refine: work {} points {} queue {} size {} (small but flat {}) shape {} splits {} after_refused {}",
+                        self.work,
+                        self.dt.points().len(),
+                        self.tet_queue.len(),
+                        self.refine_counts[0],
+                        self.refine_counts[4],
+                        self.refine_counts[1],
+                        self.refine_counts[2],
+                        self.refine_counts[3],
+                    )
+                });
+            }
             if !self.missing.is_empty() {
                 self.repair()?;
             }
@@ -1645,6 +1784,17 @@ impl Builder<'_> {
                     && shortest >= self.params.min_boundary_size);
             if !bad || !self.attempt(v) {
                 continue;
+            }
+            self.refine_counts[usize::from(r <= self.size_at(centroid))] += 1;
+            if r > self.size_at(centroid) {
+                let longest = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+                    .iter()
+                    .map(|&(i, j)| distance_squared(p[i], p[j]))
+                    .fold(0.0f64, f64::max)
+                    .sqrt();
+                if longest < self.size_at(centroid) {
+                    self.refine_counts[4] += 1;
+                }
             }
             let split = if reliable {
                 self.refine_at(slot, centroid, cc, true)? == Some(true)
@@ -1784,6 +1934,13 @@ pub fn conforming_mesh(
         ..params.clone()
     };
     let params = &local_params;
+    crate::prof::trace(|| {
+        format!(
+            "conforming_mesh: points {} triangles {} max_points {budget} max_work {work}",
+            points.len(),
+            triangles.len()
+        )
+    });
     // Each input vertex lies on the facets of its triangles: points sharing a
     // facet are coplanar by construction, whatever rounding says.
     let facet = facets(points, triangles, &params.groups);
@@ -1830,6 +1987,8 @@ pub fn conforming_mesh(
         face_constraints: false,
         facet,
         work: 0,
+        first_recovery: true,
+        refine_counts: [0; 5],
         inside_cache: FxHashMap::default(),
     };
     for (t, tri) in triangles.iter().enumerate() {
@@ -1849,6 +2008,14 @@ pub fn conforming_mesh(
     b.legalize(interior);
 
     b.recover()?;
+    b.first_recovery = false;
+    crate::prof::trace(|| {
+        format!(
+            "phase recovered: work {} points {}",
+            b.work,
+            b.dt.points().len()
+        )
+    });
     b.unflatten_all();
     // Recovery's flips and shrunk cavities leave the mesh short of
     // constrained Delaunay; restore it, so refinement's cavities are regular.
@@ -1861,6 +2028,13 @@ pub fn conforming_mesh(
             .collect();
     b.floored = true;
     b.refine()?;
+    crate::prof::trace(|| {
+        format!(
+            "phase refined: work {} points {}",
+            b.work,
+            b.dt.points().len()
+        )
+    });
     b.flip_slivers();
     b.remove_slivers()?;
     b.flip_slivers();

@@ -46,7 +46,14 @@ fn main() -> ExitCode {
         worker_version: env!("CARGO_PKG_VERSION").to_owned(),
     });
     inject_test_fault(job.config.stuffing_only);
-    exit(mesher_worker::run(&job, &mut emit))
+    let status = mesher_worker::run(&job, &mut emit);
+    #[cfg(feature = "profile")]
+    eprint!(
+        "--- profile
+{}",
+        mesher_core::prof::report()
+    );
+    exit(status)
 }
 
 fn read_job(source: &str) -> Result<Job, String> {

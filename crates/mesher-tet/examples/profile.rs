@@ -2,7 +2,7 @@
 //! it (element size 0.03 of the diagonal, graded by the size field):
 //!
 //! ```text
-//! cargo run --release -p mesher-tet --features profile --example profile -- model.obj [--uniform] [--remesh] [--size 0.03] [--max-points N]
+//! cargo run --release -p mesher-tet --features profile --example profile -- model.obj [--uniform] [--remesh [--input-field]] [--size 0.03] [--max-points N]
 //! ```
 //!
 //! Prints the outcome, where the slivers are, every tet flat in floating
@@ -103,6 +103,14 @@ fn main() {
         points = r.points;
         triangles = r.triangles;
     }
+    // As the pipeline does after remeshing: the size field of the remeshed
+    // surface itself.
+    let field = if flag("--remesh") && !flag("--uniform") && !flag("--input-field") {
+        SizeField::from_surface(&points, &triangles, &SizingParams::for_size(h))
+    } else {
+        field
+    };
+    eprintln!("size field for meshing: {field:?}");
     let params = ConformingParams {
         size: (!field.is_uniform()).then(|| Arc::new(field)),
         groups,

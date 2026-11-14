@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Timing scopes for profiling (`mesher_tet::prof`); never changes results.
+profile = ["mesher-tet/profile"]
+
 [dependencies]
 libm.workspace = true
 mesher-geom.workspace = true

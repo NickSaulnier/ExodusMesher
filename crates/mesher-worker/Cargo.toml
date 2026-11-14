@@ -11,6 +11,10 @@ rust-version.workspace = true
 name = "mesher-worker"
 path = "src/main.rs"
 
+[features]
+# Print the timing scopes to stderr at the end of a run (profiling only).
+profile = ["mesher-core/profile"]
+
 [dependencies]
 mesher-core.workspace = true
 mesher-io.workspace = true

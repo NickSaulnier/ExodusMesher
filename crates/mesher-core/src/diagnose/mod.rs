@@ -160,6 +160,7 @@ pub fn diagnose(
     tol: &Tolerances,
     log: &mut RecordLog,
 ) -> Result<Diagnosis, InternalError> {
+    let _prof = mesher_tet::prof::scope("core::diagnose");
     let mut referenced = vec![false; model.vertices.len()];
     for t in &model.triangles {
         for &v in &t.vertices {

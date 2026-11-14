@@ -13,6 +13,9 @@ pub mod report;
 pub mod volume;
 
 pub use exit::ExitStatus;
+/// Timing scopes, for profiling builds (the `profile` feature).
+#[doc(hidden)]
+pub use mesher_tet::prof;
 pub use report::{
     Action, Attempt, AttemptOutcome, DefectCode, InputInfo, InputStats, JobConfig, Kernel,
     KernelChoice, Location, MeshSummary, Outcome, PartSource, PartSummary, QualityMeasure, Record,

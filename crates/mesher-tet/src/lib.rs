@@ -18,7 +18,7 @@ pub mod smooth;
 pub mod stuffing;
 pub mod wrap;
 
-pub use conforming::{ConformingError, ConformingMesh, ConformingParams, conforming_mesh};
+pub use conforming::{ConformingError, ConformingMesh, ConformingParams, Stall, conforming_mesh};
 pub use delaunay::{Delaunay, DelaunayError, Inserted, Tetrahedralization, delaunay};
 pub use improve::{ImproveParams, ImproveStats, Improved, improve};
 pub use quality::{FvQuality, WorstAt, dihedral_angles, dihedral_range, fv_quality};

@@ -67,6 +67,7 @@ pub fn repair(
     tol: &Tolerances,
     log: &mut RecordLog,
 ) -> Result<Vec<RepairedPart>, InternalError> {
+    let _prof = mesher_tet::prof::scope("core::repair");
     selected
         .iter()
         .filter_map(|&i| diagnosis.parts.get(i).map(|p| (i, p)))
@@ -495,6 +496,7 @@ pub(crate) fn wrap_part(
     tol: &Tolerances,
     log: &mut RecordLog,
 ) -> Result<Option<RepairedPart>, InternalError> {
+    let _prof = mesher_tet::prof::scope("core::wrap_part");
     let name = r.name.as_str();
     let applied = |code, action| {
         Record::new(code, Stage::Repair)

@@ -4,6 +4,8 @@
 //! without it both compile to nothing. Timing never influences results.
 //! With `PROF_EVERY` set to a number of seconds, the totals so far also go
 //! to stderr that often, for runs that may be stopped before they report.
+//! With `PROF_TRACE` set, `prof::trace` writes progress lines to stderr
+//! (how a kernel phase advances, for choosing its stopping rules).
 
 #[cfg(feature = "profile")]
 mod imp {
@@ -66,6 +68,14 @@ mod imp {
         }
     }
 
+    /// Write `line()` to stderr when `PROF_TRACE` is set.
+    pub fn trace(line: impl FnOnce() -> String) {
+        static ON: OnceLock<bool> = OnceLock::new();
+        if *ON.get_or_init(|| std::env::var_os("PROF_TRACE").is_some()) {
+            eprintln!("{}", line());
+        }
+    }
+
     /// The totals so far, slowest first, and clear them.
     #[must_use]
     pub fn report() -> String {
@@ -105,10 +115,13 @@ mod imp {
         Scope
     }
 
+    #[inline(always)]
+    pub fn trace(_line: impl FnOnce() -> String) {}
+
     #[must_use]
     pub fn report() -> String {
         String::new()
     }
 }
 
-pub use imp::{Scope, report, scope};
+pub use imp::{Scope, report, scope, trace};
