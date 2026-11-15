@@ -140,6 +140,17 @@ pub struct Delaunay {
     created: Vec<u32>,
     /// A live tet holding each vertex (any one), to find its star.
     vertex_tet: Vec<u32>,
+    /// The number of live tets (ghosts included) holding each vertex: a
+    /// face-connected star has this many (see [`Delaunay::check`]).
+    degree: Vec<u32>,
+    /// Debug (feature `profile` and `DELAUNAY_CHECK` set): check the stars
+    /// around every change, and report the first one in several parts.
+    debug: bool,
+    /// Insert as before improvement 12, without the guards against a hull
+    /// dented by plane labels: construction's last resort.
+    unguarded: bool,
+    /// Whether the point being inserted was located in a real tet.
+    inside: bool,
     /// Constrained faces and edges, with sorted vertices.
     faces: FxHashSet<[u32; 3]>,
     edges: FxHashSet<(u32, u32)>,
@@ -185,33 +196,77 @@ impl Delaunay {
             duplicates: Vec::new(),
             created: Vec::new(),
             vertex_tet: vec![NONE; n],
+            degree: vec![0; n],
+            debug: cfg!(feature = "profile") && std::env::var_os("DELAUNAY_CHECK").is_some(),
+            unguarded: false,
+            inside: false,
             faces: FxHashSet::default(),
             edges: FxHashSet::default(),
             lost: Vec::new(),
             planes,
         };
         let first = d.initial_tet(&order)?;
+        let mut deferred = Vec::new();
         for &i in &order {
             if first.contains(&i) {
                 continue;
             }
-            let outcome = match d.insert_index(i, &[], &[], false) {
-                // Its plane labels can leave a point no cavity it sees
-                // whole; insert it unlabelled (flat tets it makes are
-                // removed afterwards), then label it.
-                Err(DelaunayError::Blocked { .. }) if !d.planes(i).is_empty() => {
-                    let planes = std::mem::take(&mut d.planes[i as usize]);
-                    let outcome = d.insert_index(i, &[], &[], false);
-                    d.planes[i as usize] = planes;
-                    outcome?
+            match d.insert_construction(i) {
+                // A hull bent by plane labels can leave a point outside it
+                // no cavity whose boundary is a sphere; it goes in at the
+                // end, when the hull around it has changed.
+                Err(DelaunayError::Blocked { .. }) => deferred.push(i),
+                other => other?,
+            }
+        }
+        for i in deferred {
+            match d.insert_construction(i) {
+                // Last resort: unguarded, as before improvement 12, kept
+                // only if every star around it is still connected.
+                Err(DelaunayError::Blocked { .. }) => {
+                    d.unguarded = true;
+                    let outcome = d.insert_construction(i);
+                    d.unguarded = false;
+                    outcome?;
+                    let mut around: Vec<u32> = d.created.clone();
+                    for &t in &d.created {
+                        around.extend(d.tets[t as usize].n);
+                    }
+                    let mut vs: Vec<u32> = around
+                        .iter()
+                        .flat_map(|&t| d.tets[t as usize].v)
+                        .filter(|&x| x != GHOST)
+                        .collect();
+                    vs.sort_unstable();
+                    vs.dedup();
+                    if vs.iter().any(|&v| d.check_star(v).is_err()) {
+                        return Err(DelaunayError::Cavity { point: i });
+                    }
                 }
                 other => other?,
-            };
-            if let Inserted::Duplicate(v) = outcome {
-                d.duplicates.push((i, v));
             }
         }
         Ok(d)
+    }
+
+    /// Insert point `i` while constructing.
+    fn insert_construction(&mut self, i: u32) -> Result<(), DelaunayError> {
+        let outcome = match self.insert_index(i, &[], &[], false) {
+            // Its plane labels can leave a point no cavity it sees
+            // whole; insert it unlabelled (flat tets it makes are
+            // removed afterwards), then label it.
+            Err(DelaunayError::Blocked { .. }) if !self.planes(i).is_empty() => {
+                let planes = std::mem::take(&mut self.planes[i as usize]);
+                let outcome = self.insert_index(i, &[], &[], false);
+                self.planes[i as usize] = planes;
+                outcome?
+            }
+            other => other?,
+        };
+        if let Inserted::Duplicate(v) = outcome {
+            self.duplicates.push((i, v));
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -253,12 +308,14 @@ impl Delaunay {
         }
         self.points.push(p);
         self.vertex_tet.push(NONE);
+        self.degree.push(0);
         let outcome = match self.insert_index(i, seeds, keep, force) {
             Ok(o) => o,
             Err(e) => {
                 if matches!(e, DelaunayError::Blocked { .. }) {
                     self.points.pop();
                     self.vertex_tet.pop();
+                    self.degree.pop();
                 }
                 return Err(e);
             }
@@ -773,6 +830,13 @@ impl Delaunay {
         }
         self.last = ids[0];
         self.created = ids;
+        if self.debug {
+            let mut around: Vec<u32> = self.created.clone();
+            for &t in &self.created {
+                around.extend(self.tets[t as usize].n);
+            }
+            self.debug_check("replace", &around);
+        }
         Ok(())
     }
 
@@ -992,9 +1056,46 @@ impl Delaunay {
                 if mine != theirs {
                     return Err(format!("tets {ti} and {u} disagree on their shared face"));
                 }
+                if same_cycle(face(&t.v, k), face(&nb.v, back)) {
+                    return Err(format!(
+                        "tets {ti} and {u} orient their shared face alike (they overlap)"
+                    ));
+                }
             }
         }
+        for v in 0..self.points.len() as u32 {
+            self.check_star(v)?;
+        }
         Ok(())
+    }
+
+    /// Is the star of vertex `v` face-connected: does the walk across faces
+    /// from one of its tets reach every live tet holding it? A star in
+    /// several parts means the tetrahedralization is not a manifold there.
+    pub fn check_star(&self, v: u32) -> Result<(), String> {
+        let degree = self.degree.get(v as usize).copied().unwrap_or(0) as usize;
+        let star = self.star(v).len();
+        if star != degree {
+            return Err(format!(
+                "vertex {v}: its star walk reaches {star} of the {degree} tets holding it"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Debug: check the stars of the vertices of `slots`, and report the
+    /// first one in several parts (`debug`).
+    fn debug_check(&self, what: &str, slots: &[u32]) {
+        let mut vs: Vec<u32> = slots
+            .iter()
+            .flat_map(|&t| self.tets[t as usize].v)
+            .filter(|&x| x != GHOST)
+            .collect();
+        vs.sort_unstable();
+        vs.dedup();
+        if let Some(e) = vs.into_iter().find_map(|v| self.check_star(v).err()) {
+            eprintln!("DELAUNAY_CHECK after {what}: {e}");
+        }
     }
 
     fn pos(&self, v: u32) -> Point3 {
@@ -1026,6 +1127,9 @@ impl Delaunay {
             if let Some(slot) = self.vertex_tet.get_mut(x as usize) {
                 *slot = id;
             }
+            if let Some(d) = self.degree.get_mut(x as usize) {
+                *d += 1;
+            }
         }
         id
     }
@@ -1046,7 +1150,17 @@ impl Delaunay {
                 .filter(|&&x| x != GHOST)
                 .map(|&x| self.pos(x))
                 .collect();
-            (!collinear(r[0], r[1], p), false)
+            // The new hull face through p and this edge must not fold over
+            // the hull face beyond it: p beyond the neighbouring ghost's
+            // face (and not on its plane by label) means that ghost belongs
+            // in the cavity too.
+            let nb = self.tets[self.tets[t as usize].n[j] as usize].v;
+            let [a, b, c] = [nb[0], nb[1], nb[2]].map(|x| self.pos(x));
+            let folds = !self.unguarded
+                && nb[3] == GHOST
+                && !self.on_one_plane(&[nb[0], nb[1], nb[2], i])
+                && orient3d(a, b, c, p) == Sign::Positive;
+            (!folds && !collinear(r[0], r[1], p), false)
         } else {
             let [a, b, c] = f.map(|x| self.pos(x));
             // A face on one of p's planes is seen from neither side: growing
@@ -1072,6 +1186,11 @@ impl Delaunay {
         self.tets[t as usize].alive = false;
         self.alive -= 1;
         self.free.push(t);
+        for x in self.tets[t as usize].v {
+            if let Some(d) = self.degree.get_mut(x as usize) {
+                *d -= 1;
+            }
+        }
     }
 
     /// The first four affinely independent points (in insertion order) form
@@ -1157,7 +1276,12 @@ impl Delaunay {
                 orient3d(a, b, c, p)
             };
             match side {
-                Sign::Positive => true,
+                // Plane labels let the hull dent by rounding (a point on a
+                // hull facet by label but just inside it becomes a hull
+                // vertex), so a point in a real tet can be beyond a hull
+                // face far off: that ghost is not one it sees, and taking it
+                // in makes tets overlapping others.
+                Sign::Positive => self.unguarded || !self.inside,
                 Sign::Negative => false,
                 Sign::Zero => in_circumcircle_coplanar(a, b, c, p),
             }
@@ -1189,11 +1313,20 @@ impl Delaunay {
             t = self.tets[t as usize].n[3];
         }
         let limit = 4 * self.tets.len() + 64;
+        let mut prev = t;
         for _ in 0..limit {
-            // A ghost is reached only by crossing a hull face that p is beyond.
+            // A ghost is reached only by crossing a hull face that p is
+            // beyond. Plane labels let the hull dent by rounding, so p can be
+            // beyond a hull face's plane and still inside the mesh: the
+            // ghost counts only if a straight walk to p leaves the hull too.
             if self.is_ghost(t) {
-                return t;
+                return if self.unguarded {
+                    t
+                } else {
+                    self.straight(prev, p).unwrap_or_else(|g| g)
+                };
             }
+            prev = t;
             let v = self.tets[t as usize].v;
             let start = (self.rng.next() % 4) as usize;
             let mut next = None;
@@ -1227,6 +1360,47 @@ impl Delaunay {
                 })
                 .unwrap_or(t)
         })
+    }
+
+    /// Walk the straight segment from the centroid of the real tet `slot`
+    /// to `p`: the real tet holding `p` (`Ok`), or the ghost whose hull face
+    /// the segment leaves through (`Err`).
+    fn straight(&self, slot: u32, p: Point3) -> Result<u32, u32> {
+        let q = self.tets[slot as usize].v.map(|x| self.pos(x));
+        let from: Point3 = std::array::from_fn(|k| (q[0][k] + q[1][k] + q[2][k] + q[3][k]) / 4.0);
+        let mut t = slot;
+        for _ in 0..self.tets.len() + 16 {
+            let v = self.tets[t as usize].v;
+            if v[3] == GHOST {
+                return Err(t);
+            }
+            // Exit through a face that p is beyond and the segment's line
+            // passes through (its boundary counts, for degenerate lines).
+            let mut exit = None;
+            for j in 0..4 {
+                let [a, b, c] = face(&v, j).map(|x| self.pos(x));
+                if orient3d(a, b, c, p) != Sign::Positive {
+                    continue;
+                }
+                let s = [
+                    orient3d(from, p, a, b),
+                    orient3d(from, p, b, c),
+                    orient3d(from, p, c, a),
+                ];
+                let through = !(s.contains(&Sign::Positive) && s.contains(&Sign::Negative));
+                if through || exit.is_none() {
+                    exit = Some(j);
+                }
+                if through {
+                    break;
+                }
+            }
+            match exit {
+                None => return Ok(t),
+                Some(j) => t = self.tets[t as usize].n[j],
+            }
+        }
+        Ok(t)
     }
 
     /// A cavity tet to take out because the cavity would delete a constrained
@@ -1344,7 +1518,115 @@ impl Delaunay {
             }
             k += n;
         }
-        Ok(None)
+        if self.unguarded {
+            return Ok(None);
+        }
+        // And a sphere: connected, one fan of faces around each vertex, and
+        // Euler characteristic 2. Then every vertex's star stays connected
+        // (one fan of new tets joins the old tets around it). Geometry
+        // alone would see to it if every boundary face saw p strictly, but
+        // ghost faces are seen loosely and plane labels bend the hull.
+        match self.boundary_pinch(boundary) {
+            None => Ok(None),
+            // The cavity tets behind the smaller part: one goes.
+            Some(Pinch::Behind(ts)) => ts
+                .into_iter()
+                .filter(|&t| rank(t) < KEEP)
+                .min_by_key(|&t| rank(t))
+                .map(Some)
+                .ok_or(()),
+            Some(Pinch::Genus) => Err(()),
+        }
+    }
+
+    /// Whether the cavity boundary (closed and edge-manifold, ghost vertex
+    /// included) is not a sphere: pinched at a vertex, in several parts, or
+    /// of a higher genus.
+    fn boundary_pinch(&self, boundary: &[(u32, usize, u32)]) -> Option<Pinch> {
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        let faces: Vec<[u32; 3]> = boundary
+            .iter()
+            .map(|&(t, j, _)| face(&self.tets[t as usize].v, j))
+            .collect();
+        // Each edge with the two faces holding it (edge-manifold already).
+        let mut edges: Vec<((u32, u32), usize)> = Vec::with_capacity(3 * faces.len());
+        for (n, f) in faces.iter().enumerate() {
+            for (a, b) in [(f[0], f[1]), (f[1], f[2]), (f[2], f[0])] {
+                edges.push(((a.min(b), a.max(b)), n));
+            }
+        }
+        edges.sort_unstable();
+        // Faces joined across edges; vertex-face incidences joined around
+        // each vertex across the edges through it.
+        let mut part: Vec<usize> = (0..faces.len()).collect();
+        let mut corner: Vec<usize> = (0..3 * faces.len()).collect();
+        let at = |n: usize, x: u32| 3 * n + faces[n].iter().position(|&y| y == x).unwrap_or(0);
+        for pair in edges.chunks(2) {
+            let [((x, y), f1), (_, f2)] = [pair[0], pair[1]];
+            let (r1, r2) = (find(&mut part, f1), find(&mut part, f2));
+            part[r1] = r2;
+            for w in [x, y] {
+                let (c1, c2) = (find(&mut corner, at(f1, w)), find(&mut corner, at(f2, w)));
+                corner[c1] = c2;
+            }
+        }
+        // The fan of each vertex-face incidence, and the distinct
+        // (vertex, fan) pairs.
+        let fan_of: Vec<usize> = (0..3 * faces.len()).map(|c| find(&mut corner, c)).collect();
+        let vertex_of = |c: usize| faces[c / 3][c % 3];
+        let mut fans: Vec<(u32, usize)> = (0..fan_of.len())
+            .map(|c| (vertex_of(c), fan_of[c]))
+            .collect();
+        fans.sort_unstable();
+        fans.dedup();
+        let vertices = {
+            let mut v: Vec<u32> = fans.iter().map(|x| x.0).collect();
+            v.dedup();
+            v.len()
+        };
+        // A vertex in two or more fans: the faces of the smallest.
+        if let Some(w) = fans.windows(2).find(|x| x[0].0 == x[1].0).map(|x| x[0].0) {
+            let mut count: Vec<(usize, usize)> = Vec::new();
+            for c in (0..fan_of.len()).filter(|&c| vertex_of(c) == w) {
+                match count.iter_mut().find(|x| x.0 == fan_of[c]) {
+                    Some(x) => x.1 += 1,
+                    None => count.push((fan_of[c], 1)),
+                }
+            }
+            let small = count.iter().min_by_key(|x| x.1)?.0;
+            let behind: Vec<u32> = (0..fan_of.len())
+                .filter(|&c| vertex_of(c) == w && fan_of[c] == small)
+                .map(|c| boundary[c / 3].0)
+                .collect();
+            return Some(Pinch::Behind(behind));
+        }
+        let mut sizes: Vec<(usize, usize)> = Vec::new();
+        for n in 0..faces.len() {
+            let r = find(&mut part, n);
+            match sizes.iter_mut().find(|s| s.0 == r) {
+                Some(s) => s.1 += 1,
+                None => sizes.push((r, 1)),
+            }
+        }
+        if sizes.len() > 1 {
+            let small = sizes.iter().min_by_key(|s| s.1).map_or(0, |s| s.0);
+            let behind: Vec<u32> = (0..faces.len())
+                .filter(|&n| find(&mut part, n) == small)
+                .map(|n| boundary[n].0)
+                .collect();
+            return Some(Pinch::Behind(behind));
+        }
+        // V − E + F = 2 for a sphere.
+        if vertices + faces.len() != edges.len() / 2 + 2 {
+            return Some(Pinch::Genus);
+        }
+        None
     }
 
     fn insert_index(
@@ -1356,6 +1638,7 @@ impl Delaunay {
     ) -> Result<Inserted, DelaunayError> {
         let _prof = crate::prof::scope("delaunay::insert_index");
         let p = self.pos(i);
+        self.inside = false;
         let mut t0 = self.locate(p);
         if self.is_ghost(t0) && !self.conflict(t0, p, i) {
             // Defensive: never seed a cavity from a ghost p does not conflict with.
@@ -1366,6 +1649,7 @@ impl Delaunay {
                 None => return Err(DelaunayError::Cavity { point: i }),
             }
         }
+        self.inside = !self.is_ghost(t0);
         if !self.is_ghost(t0) {
             for &v in &self.tets[t0 as usize].v {
                 if self.pos(v) == p {
@@ -1599,13 +1883,33 @@ impl Delaunay {
         self.link_around(&created, i).map_err(|()| fail.clone())?;
         self.last = created[0];
         self.created = created;
+        if self.debug {
+            let mut around: Vec<u32> = self.created.clone();
+            for &t in &self.created {
+                around.extend(self.tets[t as usize].n);
+            }
+            self.debug_check(&format!("insert {i}"), &around);
+        }
         Ok(Inserted::New)
     }
+}
+
+/// How a cavity boundary fails to be a sphere (see `boundary_pinch`).
+enum Pinch {
+    /// The cavity tets behind the faces of the smaller part at a pinched
+    /// vertex, or of the smallest part of a disconnected boundary.
+    Behind(Vec<u32>),
+    Genus,
 }
 
 /// The face opposite local vertex `k`, outward for a positive tet.
 fn face(v: &[u32; 4], k: usize) -> [u32; 3] {
     FACES[k].map(|i| v[i])
+}
+
+/// Do two triangles list the same vertices in the same cyclic order?
+fn same_cycle(a: [u32; 3], b: [u32; 3]) -> bool {
+    (0..3).any(|r| [b[r], b[(r + 1) % 3], b[(r + 2) % 3]] == a)
 }
 
 fn sorted3(mut f: [u32; 3]) -> [u32; 3] {
@@ -1885,6 +2189,49 @@ mod tests {
         assert_eq!(labelled.tets().iter().filter(|t| on(t)).count(), 0);
         // Without labels, rounding makes some (this is what labels are for).
         let _ = plain.tets().iter().filter(|t| on(t)).count();
+    }
+
+    #[test]
+    fn labelled_hull_planes_keep_stars_connected() {
+        // A grid on a tilted plane (coplanar only to rounding) with points on
+        // one side only: the grid is a hull facet, which its plane labels let
+        // dent by rounding. A later point beyond a dented face (while inside
+        // the mesh) must not make tets overlapping others, which shows as a
+        // vertex star in several parts (132440, `PLAN.md` improvement 12).
+        for (k, angle) in [0.37, 0.71, 1.13, 0.05].into_iter().enumerate() {
+            let (s, c) = (libm::sin(angle), libm::cos(angle));
+            let on_plane = |x: f64, y: f64| [x, c * y, s * y];
+            let mut pts = Vec::new();
+            let mut planes = Vec::new();
+            for i in 0..15 {
+                for j in 0..15 {
+                    pts.push(on_plane(f64::from(i) / 14.0, f64::from(j) / 14.0));
+                    planes.push(vec![7]);
+                }
+            }
+            for p in random_points(300, 5 + k as u64) {
+                // Above the plane only (its normal is (0, -s, c)).
+                let h = 0.02 + p[2];
+                pts.push([p[0], c * p[1] - s * h, s * p[1] + c * h]);
+                planes.push(Vec::new());
+            }
+            for seed in 0..4 {
+                let mut d = Delaunay::with_planes(pts.clone(), seed, planes.clone()).unwrap();
+                d.check()
+                    .unwrap_or_else(|e| panic!("angle {angle}, seed {seed}: {e}"));
+                // More points on the plane, labelled, as boundary splits are.
+                for p in random_points(100, 50 + seed) {
+                    let i = d.points().len() as u32;
+                    d.set_planes(i, vec![7]);
+                    match d.insert(on_plane(p[0], p[1])) {
+                        Ok(_) | Err(DelaunayError::Blocked { .. }) => {}
+                        Err(e) => panic!("{e}"),
+                    }
+                }
+                d.check()
+                    .unwrap_or_else(|e| panic!("angle {angle}, seed {seed}, inserted: {e}"));
+            }
+        }
     }
 
     #[test]
