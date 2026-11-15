@@ -40,16 +40,22 @@ fn three_tets() -> String {
 }
 
 fn binary(name: &str) -> PathBuf {
-    // Tests run from target/<profile>/deps; binaries sit one level up.
+    // Binaries sit in target/<profile>, an ancestor of the test executable
+    // (target/<profile>/deps before Cargo 1.100, target/<profile>/build/
+    // <package>/<hash>/out since).
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe().unwrap();
-    let dir = exe.parent().and_then(Path::parent).unwrap();
-    let path = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        path.exists(),
-        "{} not built; run `cargo test --workspace`",
-        path.display()
-    );
-    path
+    let path = exe
+        .ancestors()
+        .skip(1)
+        .map(|d| d.join(&file))
+        .find(|p| p.exists());
+    path.unwrap_or_else(|| {
+        panic!(
+            "{file} not built (looked above {}); run `cargo test --workspace`",
+            exe.display()
+        )
+    })
 }
 
 /// Element block names and element counts of an Exodus file.

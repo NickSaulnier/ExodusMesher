@@ -37,16 +37,22 @@ fn data_dir() -> PathBuf {
 
 /// `mesher` and `mesher-worker` from the same profile as this test.
 fn binaries() -> (PathBuf, PathBuf) {
+    // target/<profile> is an ancestor of the test executable
+    // (target/<profile>/deps before Cargo 1.100, target/<profile>/build/
+    // <package>/<hash>/out since).
     let exe = std::env::current_exe().unwrap();
-    let dir = exe.parent().and_then(Path::parent).unwrap().to_path_buf();
-    let name = |n: &str| dir.join(format!("{n}{}", std::env::consts::EXE_SUFFIX));
-    let (cli, worker) = (name("mesher"), name("mesher-worker"));
-    assert!(
-        cli.exists() && worker.exists(),
-        "build them first: cargo build [--release] -p mesher-cli -p mesher-worker (looked in {})",
-        dir.display()
-    );
-    (cli, worker)
+    let name = |n: &str| format!("{n}{}", std::env::consts::EXE_SUFFIX);
+    let dir = exe
+        .ancestors()
+        .skip(1)
+        .find(|d| d.join(name("mesher")).exists() && d.join(name("mesher-worker")).exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "build them first: cargo build [--release] -p mesher-cli -p mesher-worker (looked above {})",
+                exe.display()
+            )
+        });
+    (dir.join(name("mesher")), dir.join(name("mesher-worker")))
 }
 
 fn subset() -> Vec<u64> {
