@@ -2227,11 +2227,10 @@ impl ExactDelaunay {
                     }
                 }
             }
-            for j in 0..4 {
+            let n = self.tets[t as usize].n;
+            for (j, &nj) in n.iter().enumerate() {
                 let f = face(&v, j);
-                if inside(self.tets[t as usize].n[j])
-                    && (0..3).all(|k| protected(f[k], f[(k + 1) % 3]))
-                {
+                if inside(nj) && (0..3).all(|k| protected(f[k], f[(k + 1) % 3])) {
                     return Err(Split::Blocked);
                 }
             }
