@@ -39,7 +39,7 @@
 //! A point budget bounds every stage; exceeding it, or failing to recover the
 //! boundary, is an error the caller turns into a fallback.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use mesher_geom::predicates::{incircle, insphere, orient2d, orient3d};
@@ -47,7 +47,7 @@ use mesher_geom::vec3::{add, cross, distance_squared, dot, norm, scale, sub};
 use mesher_geom::{FastWindingNumber, Point3, Sign, TriangleSoup};
 
 use crate::delaunay::{Delaunay, DelaunayError, Inserted, Walk};
-use crate::fxhash::FxHashMap;
+use crate::fxhash::{FxHashMap, FxHashSet};
 use crate::quality::dihedral_angles;
 use crate::sizing::{SizeField, point_budget};
 use crate::smooth::{SmoothParams, smooth_slivers};
@@ -235,38 +235,104 @@ struct Sub {
     alive: bool,
 }
 
-/// A uniform hash grid of item ids by bounding box (probed, never iterated).
+/// Hash grids of item ids by bounding box (probed, never iterated), one per
+/// size class: an item goes to the level whose cells are about as wide as its
+/// box, so a probe looks at one cell a level and sees only items near it.
+/// (A single grid of the largest element size made every probe walk the
+/// small subfacets of a graded surface and every sliver subfacet's huge
+/// diametral box, about 1,500 items on 73179; improvement 7.)
 #[derive(Debug)]
 struct Grid {
-    cell: f64,
-    cells: HashMap<[i64; 3], Vec<u32>>,
-    /// Items spanning too many cells to register (the diametral sphere of a
-    /// sliver triangle); every probe sees them.
+    /// The cell width of level 0; level `k` has cells `base × 2^k` wide.
+    base: f64,
+    /// Levels in use, by `k`.
+    levels: BTreeMap<i32, HashMap<[i64; 3], Vec<u32>>>,
+    /// Items whose box is too wide even for the top level (the diametral
+    /// sphere of a sliver triangle can be astronomically large, or not
+    /// finite); every probe sees them.
     big: Vec<u32>,
 }
 
-/// Items spanning more cells than this along an axis go to `Grid::big`.
-const BIG_SPAN: i64 = 16;
+/// Levels below and above `base` that boxes may use.
+const GRID_LEVELS: i32 = 60;
 
 impl Grid {
-    fn key(&self, p: Point3) -> [i64; 3] {
-        p.map(|c| (c / self.cell).floor() as i64)
+    fn new(base: f64) -> Grid {
+        Grid {
+            base,
+            levels: BTreeMap::new(),
+            big: Vec::new(),
+        }
+    }
+
+    /// The width of level `k`'s cells.
+    fn width(&self, k: i32) -> f64 {
+        let mut w = self.base;
+        if k >= 0 {
+            for _ in 0..k {
+                w *= 2.0;
+            }
+        } else {
+            for _ in 0..-k {
+                w *= 0.5;
+            }
+        }
+        w
+    }
+
+    /// The level for a box `extent` wide: the smallest whose cells are at
+    /// least half as wide, so the box covers at most three cells an axis;
+    /// `None` for a box wider than the top level allows.
+    fn level(&self, extent: f64) -> Option<i32> {
+        let mut k = 0;
+        let mut w = self.base;
+        if !(extent.is_finite() && w > 0.0) {
+            return None;
+        }
+        while 2.0 * w < extent {
+            if k == GRID_LEVELS {
+                return None;
+            }
+            w *= 2.0;
+            k += 1;
+        }
+        while k > -GRID_LEVELS && extent <= w {
+            w *= 0.5;
+            k -= 1;
+        }
+        if 2.0 * w < extent {
+            k += 1;
+        }
+        Some(k)
+    }
+
+    fn key(w: f64, p: Point3) -> [i64; 3] {
+        p.map(|c| (c / w).floor() as i64)
+    }
+
+    /// The level and cell range of a box, `None` for a big one.
+    fn cells_of(&self, lo: Point3, hi: Point3) -> Option<(i32, [i64; 3], [i64; 3])> {
+        let extent = (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max);
+        let k = self.level(extent)?;
+        let w = self.width(k);
+        let (a, b) = (Grid::key(w, lo), Grid::key(w, hi));
+        // At most three cells an axis by the level's choice; anything else
+        // (a coordinate beyond the keys' range) is big.
+        (0..3)
+            .all(|i| b[i] >= a[i] && b[i] - a[i] <= 2)
+            .then_some((k, a, b))
     }
 
     fn add(&mut self, id: u32, lo: Point3, hi: Point3) {
-        let (a, b) = (self.key(lo), self.key(hi));
-        if (0..3).any(|k| b[k] - a[k] > BIG_SPAN) {
+        let Some((k, a, b)) = self.cells_of(lo, hi) else {
             self.big.push(id);
             return;
-        }
-        let span = |k: usize| (b[k] - a[k]).max(0);
-        for i in 0..=span(0) {
-            for j in 0..=span(1) {
-                for k in 0..=span(2) {
-                    self.cells
-                        .entry([a[0] + i, a[1] + j, a[2] + k])
-                        .or_default()
-                        .push(id);
+        };
+        let level = self.levels.entry(k).or_default();
+        for i in a[0]..=b[0] {
+            for j in a[1]..=b[1] {
+                for l in a[2]..=b[2] {
+                    level.entry([i, j, l]).or_default().push(id);
                 }
             }
         }
@@ -274,18 +340,43 @@ impl Grid {
 
     /// Items whose box may contain `p` (plus every big item).
     fn at(&self, p: Point3) -> impl Iterator<Item = u32> + '_ {
-        self.cells
-            .get(&self.key(p))
-            .map_or(&[][..], Vec::as_slice)
+        self.levels
             .iter()
-            .chain(&self.big)
-            .copied()
+            .flat_map(move |(&k, level)| {
+                level
+                    .get(&Grid::key(self.width(k), p))
+                    .map_or(&[][..], Vec::as_slice)
+                    .iter()
+                    .copied()
+            })
+            .chain(self.big.iter().copied())
     }
 
-    /// Forget a big item (others stay registered; probes filter them).
-    fn remove_big(&mut self, id: u32) {
-        if let Some(i) = self.big.iter().position(|&x| x == id) {
-            self.big.swap_remove(i);
+    /// Forget an item registered with this box.
+    fn remove(&mut self, id: u32, lo: Point3, hi: Point3) {
+        let Some((k, a, b)) = self.cells_of(lo, hi) else {
+            if let Some(i) = self.big.iter().position(|&x| x == id) {
+                self.big.swap_remove(i);
+            }
+            return;
+        };
+        let Some(level) = self.levels.get_mut(&k) else {
+            return;
+        };
+        for i in a[0]..=b[0] {
+            for j in a[1]..=b[1] {
+                for l in a[2]..=b[2] {
+                    let key = [i, j, l];
+                    if let Some(list) = level.get_mut(&key) {
+                        if let Some(at) = list.iter().position(|&x| x == id) {
+                            list.swap_remove(at);
+                        }
+                        if list.is_empty() {
+                            level.remove(&key);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -539,17 +630,22 @@ impl Builder<'_> {
         self.dt.points()[v as usize]
     }
 
-    fn register_sub(&mut self, id: u32) {
-        let s = self.subs[id as usize];
-        let [a, b, c] = s.v.map(|v| self.pos(v));
+    /// The box a subfacet is registered with in `sub_grid`: around its
+    /// diametral sphere.
+    fn sub_box(&self, id: u32) -> (Point3, Point3) {
+        let [a, b, c] = self.subs[id as usize].v.map(|v| self.pos(v));
         let longest = [(a, b), (b, c), (c, a)]
             .iter()
             .map(|&(x, y)| norm(sub(x, y)))
             .fold(0.0, f64::max);
         let r = tri_circle(a, b, c).map_or(longest, |(_, r)| r.max(longest));
         let centre = scale(add(add(a, b), c), 1.0 / 3.0);
-        let lo = centre.map(|x| x - 2.0 * r);
-        let hi = centre.map(|x| x + 2.0 * r);
+        (centre.map(|x| x - 2.0 * r), centre.map(|x| x + 2.0 * r))
+    }
+
+    fn register_sub(&mut self, id: u32) {
+        let s = self.subs[id as usize];
+        let (lo, hi) = self.sub_box(id);
         self.sub_grid.add(id, lo, hi);
         for (u, v) in [(s.v[0], s.v[1]), (s.v[1], s.v[2]), (s.v[2], s.v[0])] {
             self.edge_subs.entry(key2(u, v)).or_default().push(id);
@@ -570,7 +666,8 @@ impl Builder<'_> {
     fn kill_sub(&mut self, id: u32) {
         let s = self.subs[id as usize];
         self.subs[id as usize].alive = false;
-        self.sub_grid.remove_big(id);
+        let (lo, hi) = self.sub_box(id);
+        self.sub_grid.remove(id, lo, hi);
         if self.face_sub.get(&key3(s.v)) == Some(&id) {
             self.face_sub.remove(&key3(s.v));
             self.dt.unconstrain_face(s.v);
@@ -1342,20 +1439,44 @@ impl Builder<'_> {
         let mut start: Option<usize> = None;
         loop {
             self.step()?;
-            let tets = self.dt.tets();
-            let mut edges: HashSet<(u32, u32)> = HashSet::with_capacity(tets.len() * 2);
-            let mut faces: HashSet<[u32; 3]> = HashSet::with_capacity(tets.len() * 3);
-            for t in &tets {
-                for (i, j) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
-                    edges.insert(key2(t[i], t[j]));
-                }
-                for f in FACES {
-                    faces.insert(key3(f.map(|k| t[k])));
-                }
-            }
             let live: Vec<u32> = (0..self.subs.len() as u32)
                 .filter(|&s| self.subs[s as usize].alive)
                 .collect();
+            // Which live subfacets, and which of their subsegments, are in the
+            // tetrahedralization: their keys first, then one scan of the tets
+            // marks them (building sets of every face and edge of the mesh
+            // made each pass cost seconds; improvement 7). Answered from the
+            // tets, not from `has_face` and `has_edge`: one scan is cheaper
+            // than a star walk per key, and does not rely on every star being
+            // face-connected (which failed before `PLAN.md`, "Things to
+            // consider improving", item 12).
+            let mut face_in: FxHashMap<[u32; 3], bool> = FxHashMap::default();
+            let mut edge_in: FxHashMap<(u32, u32), bool> = FxHashMap::default();
+            for &s in &live {
+                let v = self.subs[s as usize].v;
+                face_in.insert(key3(v), false);
+                for (a, b) in [(v[0], v[1]), (v[1], v[2]), (v[2], v[0])] {
+                    if self.is_segment(a, b) {
+                        edge_in.insert(key2(a, b), false);
+                    }
+                }
+            }
+            for t in self.dt.tets() {
+                for (i, j) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
+                    if let Some(x) = edge_in.get_mut(&key2(t[i], t[j])) {
+                        *x = true;
+                    }
+                }
+                for f in FACES {
+                    if let Some(x) = face_in.get_mut(&key3(f.map(|k| t[k]))) {
+                        *x = true;
+                    }
+                }
+            }
+            let faces: FxHashSet<[u32; 3]> =
+                face_in.into_iter().filter(|e| e.1).map(|e| e.0).collect();
+            let edges: FxHashSet<(u32, u32)> =
+                edge_in.into_iter().filter(|e| e.1).map(|e| e.0).collect();
             // A recovered subsegment stays recovered.
             for &s in &live {
                 let v = self.subs[s as usize].v;
@@ -1765,13 +1886,9 @@ impl Builder<'_> {
             }
             let p = v.map(|x| self.pos(x));
             let centroid = scale(add(add(p[0], p[1]), add(p[2], p[3])), 0.25);
-            if !self.tet_inside(v, centroid) {
-                continue;
-            }
             let Some((cc, r)) = tet_sphere(p) else {
                 continue;
             };
-            let reliable = Self::reliable_centre(p).is_some();
             let shortest = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
                 .iter()
                 .map(|&(i, j)| distance_squared(p[i], p[j]))
@@ -1782,9 +1899,12 @@ impl Builder<'_> {
             let bad = r > self.size_at(centroid)
                 || (r > self.params.radius_edge_bound * shortest
                     && shortest >= self.params.min_boundary_size);
-            if !bad || !self.attempt(v) {
+            // Whether it is inside only matters for a bad tet: the winding
+            // number is the costliest test, so it comes last.
+            if !bad || !self.tet_inside(v, centroid) || !self.attempt(v) {
                 continue;
             }
+            let reliable = Self::reliable_centre(p).is_some();
             self.refine_counts[usize::from(r <= self.size_at(centroid))] += 1;
             if r > self.size_at(centroid) {
                 let longest = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
@@ -1963,11 +2083,7 @@ pub fn conforming_mesh(
         dt,
         subs: Vec::new(),
         edge_subs: HashMap::new(),
-        sub_grid: Grid {
-            cell: params.max_circumradius,
-            cells: HashMap::new(),
-            big: Vec::new(),
-        },
+        sub_grid: Grid::new(params.max_circumradius),
         face_sub: HashMap::new(),
         winding: FastWindingNumber::new(soup),
         params,
@@ -2403,5 +2519,47 @@ mod tests {
             conforming_mesh(&p, &t2, &ConformingParams::with_size(0.3)),
             Err(ConformingError::Surface(_))
         ));
+    }
+
+    #[test]
+    fn grid_probes_see_every_box_holding_the_point() {
+        let mut g = Grid::new(1.0);
+        // Boxes from tiny to far wider than the top level, and one not finite.
+        let boxes: Vec<(Point3, Point3)> = vec![
+            ([0.0, 0.0, 0.0], [1e-9, 1e-9, 1e-9]),
+            ([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]),
+            ([-3.0, -1.0, 0.0], [5.0, 1.0, 0.25]),
+            ([-1e3, -1e3, -1e3], [1e3, 1e3, 1e3]),
+            ([-1e300, -1e300, -1e300], [1e300, 1e300, 1e300]),
+            ([0.0, 0.0, 0.0], [f64::INFINITY, 1.0, 1.0]),
+        ];
+        for (id, &(lo, hi)) in boxes.iter().enumerate() {
+            g.add(id as u32, lo, hi);
+        }
+        let probes = [
+            [0.0, 0.0, 0.0],
+            [5e-10, 5e-10, 5e-10],
+            [0.4, -0.4, 0.1],
+            [4.9, 0.9, 0.2],
+            [700.0, -900.0, 10.0],
+            [1e200, 0.0, 0.0],
+        ];
+        let inside =
+            |p: Point3, (lo, hi): (Point3, Point3)| (0..3).all(|k| lo[k] <= p[k] && p[k] <= hi[k]);
+        for p in probes {
+            let seen: Vec<u32> = g.at(p).collect();
+            for (id, &b) in boxes.iter().enumerate() {
+                if inside(p, b) {
+                    assert!(seen.contains(&(id as u32)), "probe {p:?} misses box {id}");
+                }
+            }
+        }
+        for (id, &(lo, hi)) in boxes.iter().enumerate() {
+            g.remove(id as u32, lo, hi);
+        }
+        for p in probes {
+            assert_eq!(g.at(p).count(), 0);
+        }
+        assert!(g.levels.values().all(HashMap::is_empty));
     }
 }

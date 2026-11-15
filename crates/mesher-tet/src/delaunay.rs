@@ -1673,8 +1673,16 @@ impl Delaunay {
             }
         }
         let grow_scope = crate::prof::scope("delaunay::insert/grow");
+        let constrained = !self.faces.is_empty() || !self.edges.is_empty();
         let mut k = 0;
         while k < cavity.len() {
+            // A constrained cavity this big is refused below unless it needs
+            // no change at all; growth through a part of the mesh that
+            // constraints keep from being Delaunay can run through most of
+            // it, so stop looking (improvement 7).
+            if constrained && cavity.len() > MAX_CAVITY {
+                return Err(blocked);
+            }
             let t = cavity[k];
             k += 1;
             for j in 0..4 {
@@ -1711,7 +1719,6 @@ impl Delaunay {
             next_rank += 1;
         }
         let boundary_scope = crate::prof::scope("delaunay::insert/boundary");
-        let constrained = !self.faces.is_empty() || !self.edges.is_empty();
         let grow_limit = (4 * cavity.len()).max(64);
         let interior = seeds.is_empty() && keep.is_empty() && self.planes(i).is_empty();
         // Whether p sees each face, and whether the face is on one of its
@@ -1727,6 +1734,9 @@ impl Delaunay {
         // updated in place.
         let mut unseen: Vec<(u32, usize, u32)> = Vec::new();
         let mut rebuild = true;
+        // Whether a tet has been taken out: from then on an interior
+        // insertion's cavity no longer grows across faces p does not see.
+        let mut shrunk = false;
         let boundary = loop {
             let _iter = crate::prof::scope("delaunay::insert/boundary-pass");
             if rebuild {
@@ -1756,7 +1766,7 @@ impl Delaunay {
                 // the tet it refines), then the cavity only shrinks.
                 let may_grow = force
                     || !constrained
-                    || (interior && cavity.len() < grow_limit)
+                    || (interior && !shrunk && cavity.len() < grow_limit)
                     || self.conflict_cached(u, p, i, epoch);
                 if may_grow
                     && !planar
@@ -1809,6 +1819,7 @@ impl Delaunay {
                 next_rank += 1;
             }
             cavity.extend(grow);
+            shrunk |= !shrink.is_empty();
             for victim in shrink {
                 cavity.retain(|&x| x != victim);
                 self.stamp[victim as usize] = 0;
