@@ -34,6 +34,12 @@ pub struct RemeshParams {
     /// target size is a feature too small to mesh: one corner merges into
     /// the other (moving the surface by at most the edge's length).
     pub small_feature: f64,
+    /// Collapse an edge shorter than `small_feature` of the size whatever
+    /// the lengths of the edges it leaves: they grow by less than that. Off,
+    /// every collapse keeps the edges within 4/3 of the size, and narrow
+    /// strips beside long feature edges, whose edges are already near it,
+    /// never merge and leave needles along them.
+    pub free_small_collapses: bool,
 }
 
 impl Default for RemeshParams {
@@ -43,6 +49,7 @@ impl Default for RemeshParams {
             iterations: 6,
             max_triangles: 2_000_000,
             small_feature: 0.1,
+            free_small_collapses: true,
         }
     }
 }
@@ -494,7 +501,10 @@ pub fn remesh(
             }
             let h = target(&m, u, v);
             let small = params.small_feature * h;
-            if !(try_collapse(&mut m, u, v, h, small) || try_collapse(&mut m, v, u, h, small)) {
+            let free = params.free_small_collapses;
+            if !(try_collapse(&mut m, u, v, h, small, free)
+                || try_collapse(&mut m, v, u, h, small, free))
+            {
                 continue;
             }
         }
@@ -518,10 +528,11 @@ pub fn remesh(
 }
 
 /// Collapse `x` into `y` if that keeps the surface valid and its edges no
-/// longer than 4h/3. A corner collapses only into another corner along a
+/// longer than 4h/3 (unless the edge is shorter than `small` and `free`;
+/// see `RemeshParams::free_small_collapses`). A corner collapses only into another corner along a
 /// feature edge shorter than `small`; a feature vertex along its line, or
 /// into a feature vertex or corner of another line closer than `small`.
-fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64) -> bool {
+fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64, free: bool) -> bool {
     let (kx, ky) = (m.kind[x as usize], m.kind[y as usize]);
     match kx {
         Kind::Corner => {
@@ -569,6 +580,11 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64) -> bool {
         return false;
     }
     let py = m.pos[y as usize];
+    let longest = if free && norm(sub(m.pos[x as usize], py)) < small {
+        f64::INFINITY
+    } else {
+        4.0 / 3.0 * h
+    };
     for &t in &m.vt[x as usize] {
         if edge.contains(&t) {
             continue;
@@ -582,7 +598,7 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64) -> bool {
             return false;
         }
         for &w in &tri {
-            if w != x && norm(sub(m.pos[w as usize], py)) > 4.0 / 3.0 * h {
+            if w != x && norm(sub(m.pos[w as usize], py)) > longest {
                 return false;
             }
         }
@@ -1072,6 +1088,58 @@ mod tests {
         for corner in [0, 1, 4, 5, 6, 9] {
             assert!(r.points.contains(&p[corner]), "lost corner {corner}");
         }
+    }
+
+    /// A flat 5 × 5 grid with unit spacing, each square split along its
+    /// rising diagonal, the node at (3, 2) moved to (2.01, 2): the edge from
+    /// it to the node at (2, 2) is a needle's short edge.
+    fn needle_grid() -> Mesh {
+        let id = |i: u32, j: u32| 5 * j + i;
+        let mut pos: Vec<Point3> = (0..25)
+            .map(|v| [(v % 5) as f64, (v / 5) as f64, 0.0])
+            .collect();
+        pos[id(3, 2) as usize] = [2.01, 2.0, 0.0];
+        let mut tris = Vec::new();
+        for j in 0..4 {
+            for i in 0..4 {
+                tris.push([id(i, j), id(i + 1, j), id(i + 1, j + 1)]);
+                tris.push([id(i, j), id(i + 1, j + 1), id(i, j + 1)]);
+            }
+        }
+        let mut vt = vec![Vec::new(); pos.len()];
+        for (t, tri) in tris.iter().enumerate() {
+            for &v in tri {
+                vt[v as usize].push(t as u32);
+            }
+        }
+        Mesh {
+            kind: vec![Kind::Smooth; pos.len()],
+            home: vec![0; pos.len()],
+            alive: vec![true; tris.len()],
+            origin: vec![0; tris.len()],
+            pos,
+            tris,
+            vt,
+            feature: HashSet::new(),
+            merged: 0,
+        }
+    }
+
+    /// Collapsing the needle's short edge leaves an edge 1.42 long, over
+    /// 4h/3 for h = 1: refused unless small collapses are free, when it
+    /// moves the surface by less than `small`.
+    #[test]
+    fn a_needle_collapses_when_small_collapses_are_free() {
+        let (x, y) = (12, 13);
+        let mut m = needle_grid();
+        assert!(!try_collapse(&mut m, x, y, 1.0, 0.1, false));
+        assert_eq!(m.vt[x as usize].len(), 6);
+        // Not free when the edge is not small.
+        assert!(!try_collapse(&mut m, x, y, 1.0, 0.005, true));
+        assert!(try_collapse(&mut m, x, y, 1.0, 0.1, true));
+        assert!(m.vt[x as usize].is_empty());
+        assert_eq!(m.alive.iter().filter(|&&a| a).count(), 30);
+        assert_eq!(m.merged, 0);
     }
 
     /// A prism on a triangle with a corner of `degrees` at the z axis: walls

@@ -740,22 +740,27 @@ fn improve_cells(c: &mut Candidate) {
 /// The repaired surface remeshed to the size field, and its conformal mesh:
 /// the number of remeshed triangles and the candidate, or why not.
 /// What remeshing did to a part's surface, for its records.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Remeshing {
     triangles: usize,
     /// Features too small to mesh that were merged away (each moves the
     /// surface by at most a tenth of the local size).
     merged_small_features: usize,
+    /// Why the first remeshing, with free small collapses, failed, when
+    /// the surface was remeshed again without them.
+    retried: Option<String>,
 }
 
 impl Remeshing {
     fn measure(self, rec: Record) -> Record {
-        let rec = rec.measured("remeshed_triangles", self.triangles as u64);
+        let mut rec = rec.measured("remeshed_triangles", self.triangles as u64);
         if self.merged_small_features > 0 {
-            rec.measured("merged_small_features", self.merged_small_features as u64)
-        } else {
-            rec
+            rec = rec.measured("merged_small_features", self.merged_small_features as u64);
         }
+        if let Some(reason) = self.retried {
+            rec = rec.measured("free_collapses_failed", reason);
+        }
+        rec
     }
 }
 
@@ -781,18 +786,51 @@ fn remeshed(
                 .unwrap_or(u32::MAX)
         })
         .collect();
+    // Free small collapses merge the narrow strips along long feature
+    // edges, which otherwise leave needles; on some surfaces they leave one
+    // that does not mesh, and the surface is remeshed again without them.
+    let free = remeshed_with(model, r, h, config, &field, &groups, true);
+    match free {
+        Ok(ok) => Ok(ok),
+        Err(first) => match remeshed_with(model, r, h, config, &field, &groups, false) {
+            Ok((remeshing, c)) => Ok((
+                Remeshing {
+                    retried: Some(first),
+                    ..remeshing
+                },
+                c,
+            )),
+            Err(second) => Err(format!("{first}; without free small collapses: {second}")),
+        },
+    }
+}
+
+/// `remeshed`, with or without free small collapses.
+fn remeshed_with(
+    model: &SurfaceModel,
+    r: &RepairedPart,
+    h: f64,
+    config: &JobConfig,
+    field: &SizeField,
+    groups: &[u32],
+    free_small_collapses: bool,
+) -> Result<(Remeshing, Candidate), String> {
     let prof_remesh = mesher_tet::prof::scope("volume::remeshed/remesh");
     let s = remesh(
         &r.points,
         &r.faces,
-        &groups,
+        groups,
         &|p| field.at(p),
-        &RemeshParams::default(),
+        &RemeshParams {
+            free_small_collapses,
+            ..RemeshParams::default()
+        },
     )
     .map_err(|e| e.to_string())?;
     let remeshing = Remeshing {
         triangles: s.triangles.len(),
         merged_small_features: s.merged_small_features,
+        retried: None,
     };
     let surface = RepairedPart {
         points: s.points,
