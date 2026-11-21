@@ -110,6 +110,7 @@ defect_codes! {
     MeshRoundingRepaired = "MESH_ROUNDING_REPAIRED", Warning, "A tet that rounding to f64 turned over or flattened was untangled";
     MeshRoundingFailed = "MESH_ROUNDING_FAILED", Error, "Tets that rounding to f64 turned over or flattened could not be untangled";
     VolInvertedTet = "VOL_INVERTED_TET", Error, "Tetrahedron with non-positive volume";
+    VolNonmanifold = "VOL_NONMANIFOLD", Error, "Mesh face held by more than two tets, or by two on the same side";
     VolLowQuality = "VOL_LOW_QUALITY", Warning, "Non-orthogonality, skewness or volume ratio out of bounds";
     VolBoundaryDeviation = "VOL_BOUNDARY_DEVIATION", Error, "Hausdorff distance to input over tolerance";
     ExoNameTruncated = "EXO_NAME_TRUNCATED", Warning, "Part or set name over the Exodus limit";

@@ -323,6 +323,11 @@
           "const": "VOL_INVERTED_TET"
         },
         {
+          "description": "Mesh face held by more than two tets, or by two on the same side",
+          "type": "string",
+          "const": "VOL_NONMANIFOLD"
+        },
+        {
           "description": "Non-orthogonality, skewness or volume ratio out of bounds",
           "type": "string",
           "const": "VOL_LOW_QUALITY"

@@ -146,11 +146,9 @@ pub struct Delaunay {
     /// Debug (feature `profile` and `DELAUNAY_CHECK` set): check the stars
     /// around every change, and report the first one in several parts.
     debug: bool,
-    /// Insert as before improvement 12, without the guards against a hull
-    /// dented by plane labels: construction's last resort.
+    /// Insert as before improvement 12, without requiring the cavity's
+    /// boundary to be a sphere: construction's last resort.
     unguarded: bool,
-    /// Whether the point being inserted was located in a real tet.
-    inside: bool,
     /// Constrained faces and edges, with sorted vertices.
     faces: FxHashSet<[u32; 3]>,
     edges: FxHashSet<(u32, u32)>,
@@ -199,7 +197,6 @@ impl Delaunay {
             degree: vec![0; n],
             debug: cfg!(feature = "profile") && std::env::var_os("DELAUNAY_CHECK").is_some(),
             unguarded: false,
-            inside: false,
             faces: FxHashSet::default(),
             edges: FxHashSet::default(),
             lost: Vec::new(),
@@ -1150,17 +1147,7 @@ impl Delaunay {
                 .filter(|&&x| x != GHOST)
                 .map(|&x| self.pos(x))
                 .collect();
-            // The new hull face through p and this edge must not fold over
-            // the hull face beyond it: p beyond the neighbouring ghost's
-            // face (and not on its plane by label) means that ghost belongs
-            // in the cavity too.
-            let nb = self.tets[self.tets[t as usize].n[j] as usize].v;
-            let [a, b, c] = [nb[0], nb[1], nb[2]].map(|x| self.pos(x));
-            let folds = !self.unguarded
-                && nb[3] == GHOST
-                && !self.on_one_plane(&[nb[0], nb[1], nb[2], i])
-                && orient3d(a, b, c, p) == Sign::Positive;
-            (!folds && !collinear(r[0], r[1], p), false)
+            (!collinear(r[0], r[1], p), false)
         } else {
             let [a, b, c] = f.map(|x| self.pos(x));
             // A face on one of p's planes is seen from neither side: growing
@@ -1276,12 +1263,12 @@ impl Delaunay {
                 orient3d(a, b, c, p)
             };
             match side {
-                // Plane labels let the hull dent by rounding (a point on a
-                // hull facet by label but just inside it becomes a hull
-                // vertex), so a point in a real tet can be beyond a hull
-                // face far off: that ghost is not one it sees, and taking it
-                // in makes tets overlapping others.
-                Sign::Positive => self.unguarded || !self.inside,
+                // Even when plane labels have dented the hull and p is inside
+                // the mesh: refusing the ghost keeps the dent, and recovery
+                // then fails on models that mesh with it (improvement 12, Nov
+                // 20). The cavity's boundary must still be a sphere, and the
+                // volume gate rejects a mesh that is not a manifold.
+                Sign::Positive => true,
                 Sign::Negative => false,
                 Sign::Zero => in_circumcircle_coplanar(a, b, c, p),
             }
@@ -1313,20 +1300,11 @@ impl Delaunay {
             t = self.tets[t as usize].n[3];
         }
         let limit = 4 * self.tets.len() + 64;
-        let mut prev = t;
         for _ in 0..limit {
-            // A ghost is reached only by crossing a hull face that p is
-            // beyond. Plane labels let the hull dent by rounding, so p can be
-            // beyond a hull face's plane and still inside the mesh: the
-            // ghost counts only if a straight walk to p leaves the hull too.
+            // A ghost is reached only by crossing a hull face that p is beyond.
             if self.is_ghost(t) {
-                return if self.unguarded {
-                    t
-                } else {
-                    self.straight(prev, p).unwrap_or_else(|g| g)
-                };
+                return t;
             }
-            prev = t;
             let v = self.tets[t as usize].v;
             let start = (self.rng.next() % 4) as usize;
             let mut next = None;
@@ -1360,47 +1338,6 @@ impl Delaunay {
                 })
                 .unwrap_or(t)
         })
-    }
-
-    /// Walk the straight segment from the centroid of the real tet `slot`
-    /// to `p`: the real tet holding `p` (`Ok`), or the ghost whose hull face
-    /// the segment leaves through (`Err`).
-    fn straight(&self, slot: u32, p: Point3) -> Result<u32, u32> {
-        let q = self.tets[slot as usize].v.map(|x| self.pos(x));
-        let from: Point3 = std::array::from_fn(|k| (q[0][k] + q[1][k] + q[2][k] + q[3][k]) / 4.0);
-        let mut t = slot;
-        for _ in 0..self.tets.len() + 16 {
-            let v = self.tets[t as usize].v;
-            if v[3] == GHOST {
-                return Err(t);
-            }
-            // Exit through a face that p is beyond and the segment's line
-            // passes through (its boundary counts, for degenerate lines).
-            let mut exit = None;
-            for j in 0..4 {
-                let [a, b, c] = face(&v, j).map(|x| self.pos(x));
-                if orient3d(a, b, c, p) != Sign::Positive {
-                    continue;
-                }
-                let s = [
-                    orient3d(from, p, a, b),
-                    orient3d(from, p, b, c),
-                    orient3d(from, p, c, a),
-                ];
-                let through = !(s.contains(&Sign::Positive) && s.contains(&Sign::Negative));
-                if through || exit.is_none() {
-                    exit = Some(j);
-                }
-                if through {
-                    break;
-                }
-            }
-            match exit {
-                None => return Ok(t),
-                Some(j) => t = self.tets[t as usize].n[j],
-            }
-        }
-        Ok(t)
     }
 
     /// A cavity tet to take out because the cavity would delete a constrained
@@ -1638,7 +1575,6 @@ impl Delaunay {
     ) -> Result<Inserted, DelaunayError> {
         let _prof = crate::prof::scope("delaunay::insert_index");
         let p = self.pos(i);
-        self.inside = false;
         let mut t0 = self.locate(p);
         if self.is_ghost(t0) && !self.conflict(t0, p, i) {
             // Defensive: never seed a cavity from a ghost p does not conflict with.
@@ -1649,7 +1585,6 @@ impl Delaunay {
                 None => return Err(DelaunayError::Cavity { point: i }),
             }
         }
-        self.inside = !self.is_ghost(t0);
         if !self.is_ghost(t0) {
             for &v in &self.tets[t0 as usize].v {
                 if self.pos(v) == p {

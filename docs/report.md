@@ -110,6 +110,7 @@ These carry the measurements most often needed to act on them:
 | `VOL_LOW_QUALITY` | One record per measure beyond its limit: `min_dihedral_degrees` and `max_dihedral_degrees` against the kernel's bounds (10° and 170° for the constrained Delaunay kernel; 9.3171° and 161.6432°, the bounds Labelle and Shewchuk prove for its warping parameters, for stuffing); `max_non_orthogonality_degrees` against 70°; `max_skewness` against 2. Each is located at the worst cell: `element` (its 1-based number in the part's element block), for a face measure `neighbour` (the cell across the face), and the location's `point` (the cell's centroid, or the face's). An `info` record with `remesh/applied` instead says the surface was remeshed for quality: `input_worst_cell` and `remeshed_worst_cell` (1 is at the limits, smaller is worse), `remeshed_triangles`, and `merged_small_features` as for `MESH_RECOVERY_FAILED`. A warning with `fallback/applied` says every conformal mesh was far beyond the limits (worst cell under 0.25) and the stuffing mesh, whose cells were better, was kept: `conformal_worst_cell`, `stuffing_worst_cell` and `volume_error` (it must be at most 1 %); its boundary only approximates the surface (the mesh's `hausdorff`) |
 | `VOL_BOUNDARY_DEVIATION` | `hausdorff` and `hausdorff_relative` against `max_deviation_relative` |
 | `VOL_INVERTED_TET` | `tets` not positive by the exact predicate (a kernel bug), or `flat_in_float`: tets positive by the exact predicate but with no positive volume when computed in floating point, as a solver computes it (flat to rounding). Either rejects the candidate mesh, and the next step of the fallback ladder runs |
+| `VOL_NONMANIFOLD` | `crowded_faces` (faces held by more than two tets) and `same_side_faces` (faces whose two tets lie on the same side, so they overlap), with `kernel`. With every tet positive and the boundary on the surface, a mesh with neither covers each point of the part once. A kernel bug: it rejects the candidate mesh, and the next step of the fallback ladder runs |
 
 ## Defect codes
 
@@ -149,6 +150,7 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `MESH_ROUNDING_REPAIRED` | warning | A tet that rounding to f64 turned over or flattened was untangled | Untangle, warning |
 | `MESH_ROUNDING_FAILED` | error | Tets that rounding to f64 turned over or flattened could not be untangled | Error, triggers fallback |
 | `VOL_INVERTED_TET` | error | Tetrahedron with non-positive volume | Error |
+| `VOL_NONMANIFOLD` | error | Mesh face held by more than two tets, or by two on the same side | Error |
 | `VOL_LOW_QUALITY` | warning | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
 | `VOL_BOUNDARY_DEVIATION` | error | Hausdorff distance to input over tolerance | Error |
 | `EXO_NAME_TRUNCATED` | warning | Part or set name over the Exodus limit | Truncate, warning |

@@ -921,6 +921,42 @@ fn conformal(
     Ok(c)
 }
 
+/// Faces of a tet mesh held by more than two tets (`crowded`), and faces held
+/// by two tets on the same side of them (`same_side`). Both are zero for a
+/// mesh that is a manifold with boundary.
+fn face_manifold(tets: &[[u32; 4]]) -> (u64, u64) {
+    // Each face with its vertices sorted, and whether sorting them was an
+    // even permutation of the face as the tet lists it (all four listed the
+    // same way round, so two tets on opposite sides list it with opposite
+    // parities).
+    let mut faces: Vec<([u32; 3], bool)> = Vec::with_capacity(4 * tets.len());
+    for t in tets {
+        for f in [
+            [t[1], t[2], t[3]],
+            [t[0], t[3], t[2]],
+            [t[0], t[1], t[3]],
+            [t[0], t[2], t[1]],
+        ] {
+            let inversions =
+                u32::from(f[0] > f[1]) + u32::from(f[0] > f[2]) + u32::from(f[1] > f[2]);
+            let mut key = f;
+            key.sort_unstable();
+            faces.push((key, inversions % 2 == 0));
+        }
+    }
+    faces.sort_unstable();
+    let (mut crowded, mut same_side) = (0, 0);
+    for group in faces.chunk_by(|a, b| a.0 == b.0) {
+        match group {
+            [_] => {}
+            [a, b] if a.1 == b.1 => same_side += 1,
+            [_, _] => {}
+            _ => crowded += 1,
+        }
+    }
+    (crowded, same_side)
+}
+
 /// Check a candidate mesh; returns whether it is accepted and its summary.
 #[allow(clippy::too_many_arguments)]
 fn volume_gate(
@@ -950,6 +986,20 @@ fn volume_gate(
         log.push(
             gate(DefectCode::VolInvertedTet)
                 .measured("tets", not_positive)
+                .measured("kernel", format!("{:?}", c.kernel))
+                .hint("the volume kernels should never do this; please report it"),
+        );
+    }
+    // With every tet positive and the boundary on the input surface, a mesh
+    // whose faces each have at most one tet on each side covers every point
+    // of the part once: tets overlapping one another would show here.
+    let (crowded, same_side) = face_manifold(tets);
+    if crowded + same_side > 0 {
+        accepted = false;
+        log.push(
+            gate(DefectCode::VolNonmanifold)
+                .measured("crowded_faces", crowded)
+                .measured("same_side_faces", same_side)
                 .measured("kernel", format!("{:?}", c.kernel))
                 .hint("the volume kernels should never do this; please report it"),
         );
@@ -1214,4 +1264,24 @@ fn hausdorff(
         .filter(|&p| winding.winding_number(p).abs() < 1.0)
         .collect();
     Ok(one_sided(&bounding, &bb).max(one_sided(&samples(b_points, b_faces), &ba)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::face_manifold;
+
+    #[test]
+    fn face_manifold_counts_crowded_and_same_side_faces() {
+        // One tet, and two on opposite sides of their shared face 0-1-2.
+        assert_eq!(face_manifold(&[[0, 1, 2, 3]]), (0, 0));
+        assert_eq!(face_manifold(&[[0, 1, 2, 3], [0, 2, 1, 4]]), (0, 0));
+        // The same tet twice (listed from another vertex): all four faces
+        // have both copies on the same side.
+        assert_eq!(face_manifold(&[[0, 1, 2, 3], [1, 2, 0, 3]]), (0, 4));
+        // Three tets on one face.
+        assert_eq!(
+            face_manifold(&[[0, 1, 2, 3], [0, 2, 1, 4], [0, 2, 1, 5]]),
+            (1, 0)
+        );
+    }
 }
