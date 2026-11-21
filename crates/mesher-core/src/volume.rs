@@ -746,9 +746,9 @@ struct Remeshing {
     /// Features too small to mesh that were merged away (each moves the
     /// surface by at most a tenth of the local size).
     merged_small_features: usize,
-    /// Why the first remeshing, with free small collapses, failed, when
-    /// the surface was remeshed again without them.
-    retried: Option<String>,
+    /// Why the earlier remeshings failed, when this one is a retry: the
+    /// record's key for each, and the reason.
+    retried: Vec<(&'static str, String)>,
 }
 
 impl Remeshing {
@@ -757,8 +757,8 @@ impl Remeshing {
         if self.merged_small_features > 0 {
             rec = rec.measured("merged_small_features", self.merged_small_features as u64);
         }
-        if let Some(reason) = self.retried {
-            rec = rec.measured("free_collapses_failed", reason);
+        for (key, reason) in self.retried {
+            rec = rec.measured(key, reason);
         }
         rec
     }
@@ -787,25 +787,49 @@ fn remeshed(
         })
         .collect();
     // Free small collapses merge the narrow strips along long feature
-    // edges, which otherwise leave needles; on some surfaces they leave one
-    // that does not mesh, and the surface is remeshed again without them.
-    let free = remeshed_with(model, r, h, config, &field, &groups, true);
-    match free {
-        Ok(ok) => Ok(ok),
-        Err(first) => match remeshed_with(model, r, h, config, &field, &groups, false) {
-            Ok((remeshing, c)) => Ok((
-                Remeshing {
-                    retried: Some(first),
-                    ..remeshing
-                },
-                c,
-            )),
-            Err(second) => Err(format!("{first}; without free small collapses: {second}")),
-        },
+    // edges, which otherwise leave needles. A remeshed surface that does
+    // not mesh (most often one that crosses itself) is remeshed again with
+    // every operation checked against crossing, and then, if that fails
+    // too, as before free small collapses. The checks refuse moves that
+    // later passes would undo, so they are not the first attempt: on the
+    // subsets they lost as many models as they won.
+    let ladder: [(Option<&'static str>, &str, bool, bool); 3] = [
+        (Some("unchecked_remesh_failed"), "", true, false),
+        (
+            Some("checked_remesh_failed"),
+            "; with crossing checks: ",
+            true,
+            true,
+        ),
+        (None, "; without free small collapses: ", false, false),
+    ];
+    let mut retried = Vec::new();
+    let mut reasons = String::new();
+    for (key, label, free, checked) in ladder {
+        match remeshed_with(model, r, h, config, &field, &groups, free, checked) {
+            Ok((remeshing, c)) => {
+                return Ok((
+                    Remeshing {
+                        retried,
+                        ..remeshing
+                    },
+                    c,
+                ));
+            }
+            Err(reason) => {
+                reasons.push_str(label);
+                reasons.push_str(&reason);
+                if let Some(key) = key {
+                    retried.push((key, reason));
+                }
+            }
+        }
     }
+    Err(reasons)
 }
 
-/// `remeshed`, with or without free small collapses.
+/// `remeshed`, with or without free small collapses and crossing checks.
+#[allow(clippy::too_many_arguments)]
 fn remeshed_with(
     model: &SurfaceModel,
     r: &RepairedPart,
@@ -814,6 +838,7 @@ fn remeshed_with(
     field: &SizeField,
     groups: &[u32],
     free_small_collapses: bool,
+    check_crossings: bool,
 ) -> Result<(Remeshing, Candidate), String> {
     let prof_remesh = mesher_tet::prof::scope("volume::remeshed/remesh");
     let s = remesh(
@@ -823,6 +848,7 @@ fn remeshed_with(
         &|p| field.at(p),
         &RemeshParams {
             free_small_collapses,
+            check_crossings,
             ..RemeshParams::default()
         },
     )
@@ -830,7 +856,7 @@ fn remeshed_with(
     let remeshing = Remeshing {
         triangles: s.triangles.len(),
         merged_small_features: s.merged_small_features,
-        retried: None,
+        retried: Vec::new(),
     };
     let surface = RepairedPart {
         points: s.points,

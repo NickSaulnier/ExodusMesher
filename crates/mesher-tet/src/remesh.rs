@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use mesher_geom::bvh::{Bvh, closest_point_on_segment, closest_point_on_triangle};
 use mesher_geom::vec3::{add, cross, distance_squared, dot, norm, scale, sub};
-use mesher_geom::{Point3, TriangleSoup};
+use mesher_geom::{Point3, TriangleSoup, faces_intersect};
 
 /// How the remesher works.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +40,13 @@ pub struct RemeshParams {
     /// strips beside long feature edges, whose edges are already near it,
     /// never merge and leave needles along them.
     pub free_small_collapses: bool,
+    /// Refuse any operation that would make the surface cross itself: each
+    /// triangle it would make is tested exactly against the live triangles
+    /// near it. The input must not cross itself; then neither does the
+    /// output. A split that would cross falls back to the edge's midpoint.
+    /// Off by default: the checks also refuse crossings later passes would
+    /// undo, and the pipeline turns them on only for a surface that failed.
+    pub check_crossings: bool,
 }
 
 impl Default for RemeshParams {
@@ -50,6 +57,7 @@ impl Default for RemeshParams {
             max_triangles: 2_000_000,
             small_feature: 0.1,
             free_small_collapses: true,
+            check_crossings: false,
         }
     }
 }
@@ -219,6 +227,125 @@ struct Mesh {
     feature: HashSet<(u32, u32)>,
     /// Collapses that merged a feature too small to mesh.
     merged: usize,
+    /// The live triangles by place, for `crosses`.
+    grid: Grid,
+}
+
+/// Boxes spanning more cells than this are kept in `Grid::big`.
+const GRID_MAX_CELLS: i64 = 512;
+
+/// Live triangles by the grid cells their bounding boxes overlap, so an
+/// operation can test the triangles it would make against those near them.
+/// Off (`cell` zero), nothing is listed and nothing crosses.
+struct Grid {
+    cell: f64,
+    cells: HashMap<[i64; 3], Vec<u32>>,
+    /// Triangles whose boxes span too many cells to list, always tested.
+    big: Vec<u32>,
+    /// Where each triangle is listed.
+    slot: Vec<Option<Slot>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    Cells([i64; 3], [i64; 3]),
+    Big,
+}
+
+fn bbox(p: [Point3; 3]) -> (Point3, Point3) {
+    let mut lo = p[0];
+    let mut hi = p[0];
+    for q in &p[1..] {
+        for k in 0..3 {
+            lo[k] = lo[k].min(q[k]);
+            hi[k] = hi[k].max(q[k]);
+        }
+    }
+    (lo, hi)
+}
+
+fn boxes_meet((lo, hi): (Point3, Point3), (a, b): (Point3, Point3)) -> bool {
+    (0..3).all(|k| a[k] <= hi[k] && lo[k] <= b[k])
+}
+
+impl Grid {
+    fn new(cell: f64) -> Grid {
+        Grid {
+            cell: if cell.is_finite() && cell > 0.0 {
+                cell
+            } else {
+                0.0
+            },
+            cells: HashMap::new(),
+            big: Vec::new(),
+            slot: Vec::new(),
+        }
+    }
+
+    fn on(&self) -> bool {
+        self.cell > 0.0
+    }
+
+    /// The cells a box overlaps, or `None` if more than `GRID_MAX_CELLS`.
+    fn range(&self, (lo, hi): (Point3, Point3)) -> Option<([i64; 3], [i64; 3])> {
+        let f = |x: f64| {
+            let c = libm::floor(x / self.cell);
+            // Far outside any real part: treated as too many cells.
+            if c.abs() < 1e15 { Some(c as i64) } else { None }
+        };
+        let mut a = [0; 3];
+        let mut b = [0; 3];
+        let mut count: i64 = 1;
+        for k in 0..3 {
+            a[k] = f(lo[k])?;
+            b[k] = f(hi[k])?;
+            count = count.saturating_mul(b[k] - a[k] + 1);
+        }
+        (count <= GRID_MAX_CELLS).then_some((a, b))
+    }
+
+    fn remove(&mut self, t: u32) {
+        let Some(slot) = self.slot.get_mut(t as usize).and_then(Option::take) else {
+            return;
+        };
+        match slot {
+            Slot::Big => self.big.retain(|&x| x != t),
+            Slot::Cells(a, b) => {
+                for i in a[0]..=b[0] {
+                    for j in a[1]..=b[1] {
+                        for k in a[2]..=b[2] {
+                            if let Some(list) = self.cells.get_mut(&[i, j, k]) {
+                                list.retain(|&x| x != t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn insert(&mut self, t: u32, b: (Point3, Point3)) {
+        if self.slot.len() <= t as usize {
+            self.slot.resize(t as usize + 1, None);
+        }
+        let slot = match self.range(b) {
+            Some((a, b)) => {
+                for i in a[0]..=b[0] {
+                    for j in a[1]..=b[1] {
+                        for k in a[2]..=b[2] {
+                            self.cells.entry([i, j, k]).or_default().push(t);
+                        }
+                    }
+                }
+                Slot::Cells(a, b)
+            }
+            None => {
+                self.big.push(t);
+                Slot::Big
+            }
+        };
+        self.slot[t as usize] = Some(slot);
+    }
 }
 
 impl Mesh {
@@ -276,7 +403,74 @@ impl Mesh {
         for &v in &t {
             self.vt[v as usize].push(i);
         }
+        self.reindex(i);
         i
+    }
+
+    /// List triangle `t` in the grid where it now is (or not, if dead).
+    fn reindex(&mut self, t: u32) {
+        if !self.grid.on() {
+            return;
+        }
+        self.grid.remove(t);
+        if self.alive[t as usize] {
+            let b = bbox(self.tris[t as usize].map(|v| self.pos[v as usize]));
+            self.grid.insert(t, b);
+        }
+    }
+
+    /// Would triangles `new` (vertex positions from `at`) cross each other
+    /// or any live triangle but those in `skip` (the ones they replace)?
+    /// Triangles not in `skip` must not hold a vertex `at` moves.
+    fn crosses(&self, new: &[[u32; 3]], at: &dyn Fn(u32) -> Point3, skip: &[u32]) -> bool {
+        if !self.grid.on() {
+            return false;
+        }
+        let mut seen: HashSet<u32> = HashSet::new();
+        for (i, &n) in new.iter().enumerate() {
+            let pn = n.map(at);
+            if new[i + 1..]
+                .iter()
+                .any(|&o| faces_intersect(n, pn, o, o.map(at)))
+            {
+                return true;
+            }
+            let b = bbox(pn);
+            seen.clear();
+            let mut hit = |t: u32| {
+                if skip.contains(&t) || !self.alive[t as usize] || !seen.insert(t) {
+                    return false;
+                }
+                let c = self.tris[t as usize];
+                let pc = c.map(|v| self.pos[v as usize]);
+                boxes_meet(b, bbox(pc)) && faces_intersect(n, pn, c, pc)
+            };
+            if self.grid.big.iter().any(|&t| hit(t)) {
+                return true;
+            }
+            match self.grid.range(b) {
+                Some((lo, hi)) => {
+                    for x in lo[0]..=hi[0] {
+                        for y in lo[1]..=hi[1] {
+                            for z in lo[2]..=hi[2] {
+                                if let Some(list) = self.grid.cells.get(&[x, y, z]) {
+                                    if list.iter().any(|&t| hit(t)) {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // A box too large to list: test every live triangle.
+                None => {
+                    if (0..self.tris.len() as u32).any(&mut hit) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn unlink(&mut self, v: u32, t: u32) {
@@ -295,6 +489,7 @@ impl Mesh {
             self.tris[t as usize] = [p, m, w];
             self.unlink(q, t);
             self.vt[m as usize].push(t);
+            self.reindex(t);
             let origin = self.origin[t as usize];
             self.push_tri([m, q, w], origin);
         }
@@ -411,6 +606,14 @@ pub fn remesh(
         vt: vec![Vec::new(); points.len()],
         feature: input.segments.iter().map(|&(u, v)| key(u, v)).collect(),
         merged: 0,
+        grid: Grid::new(if params.check_crossings {
+            // The median target size: a triangle near it spans a few cells.
+            let mut sizes: Vec<f64> = points.iter().map(|&p| size(p)).collect();
+            sizes.sort_by(f64::total_cmp);
+            sizes.get(sizes.len() / 2).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        }),
     };
     for v in 0..points.len() {
         let segs = &input.vertex_segments[v];
@@ -477,6 +680,35 @@ pub fn remesh(
                 let n = unit(add(m.tri_normal(tris[0]), m.tri_normal(tris[1])));
                 let (q, t) = input.project(mid, n, m.origin[tris[0] as usize]);
                 (q, Kind::Smooth, t)
+            };
+            // The triangles the split makes, with the new vertex at `at`.
+            let edge = m.edge_tris(u, v);
+            let made: Vec<[u32; 3]> = edge
+                .iter()
+                .flat_map(|&t| {
+                    let tri = m.tris[t as usize];
+                    let r = (0..3)
+                        .find(|&k| key(tri[k], tri[(k + 1) % 3]) == key(u, v))
+                        .unwrap_or(0);
+                    let (a, b, w) = (tri[r], tri[(r + 1) % 3], tri[(r + 2) % 3]);
+                    [[a, i, w], [i, b, w]]
+                })
+                .collect();
+            let crosses = |at: Point3| {
+                m.crosses(
+                    &made,
+                    &|w| if w == i { at } else { m.pos[w as usize] },
+                    &edge,
+                )
+            };
+            // Projected, else at the midpoint (on the old triangles), else
+            // not at all.
+            let p = if !crosses(p) {
+                p
+            } else if !crosses(mid) {
+                mid
+            } else {
+                continue;
             };
             m.pos.push(p);
             m.kind.push(kind);
@@ -603,6 +835,15 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64, free: bool) ->
             }
         }
     }
+    // No crossing: the triangles around x, moved to y.
+    let made: Vec<[u32; 3]> = m.vt[x as usize]
+        .iter()
+        .filter(|t| !edge.contains(t))
+        .map(|&t| m.tris[t as usize].map(|w| if w == x { y } else { w }))
+        .collect();
+    if m.crosses(&made, &|w| m.pos[w as usize], &m.vt[x as usize]) {
+        return false;
+    }
     // Do it.
     if kx == Kind::Corner || (kx == Kind::Feature && !m.feature.contains(&key(x, y))) {
         m.merged += 1;
@@ -613,6 +854,9 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64, free: bool) ->
             m.unlink(w, t);
         }
     }
+    for &t in &edge {
+        m.reindex(t);
+    }
     let around = std::mem::take(&mut m.vt[x as usize]);
     for t in around {
         for w in &mut m.tris[t as usize] {
@@ -621,6 +865,7 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64, free: bool) ->
             }
         }
         m.vt[y as usize].push(t);
+        m.reindex(t);
     }
     let rekey: Vec<(u32, u32)> = m
         .feature
@@ -657,7 +902,7 @@ fn try_flip(m: &mut Mesh, u: u32, v: u32) -> bool {
         libm::acos(dot(d0, d1).clamp(-1.0, 1.0))
     };
     // A small margin keeps cocircular quads from flipping back and forth.
-    if angle(f.a, u, v) + angle(f.b, u, v) <= std::f64::consts::PI + 1e-9 {
+    if angle(f.a, u, v) + angle(f.b, u, v) <= std::f64::consts::PI + 1e-9 || flip_crosses(m, &f) {
         return false;
     }
     flip(m, &f);
@@ -736,6 +981,14 @@ fn flip(m: &mut Mesh, f: &Flip) {
     m.unlink(v, t1);
     m.vt[a as usize].push(t2);
     m.vt[b as usize].push(t1);
+    m.reindex(t1);
+    m.reindex(t2);
+}
+
+/// Would flip `f` make the surface cross itself?
+fn flip_crosses(m: &Mesh, f: &Flip) -> bool {
+    let Flip { u, v, t1, t2, a, b } = *f;
+    m.crosses(&[[a, u, b], [b, v, a]], &|w| m.pos[w as usize], &[t1, t2])
 }
 
 /// The smallest angle of the triangle `tri`, radians.
@@ -823,7 +1076,9 @@ fn align_sharp_edges(m: &mut Mesh) {
         }
         if let (_, Some((i, j))) = best {
             for f in [o1[i].1, o2[j].1].into_iter().flatten() {
-                flip(m, &f);
+                if !flip_crosses(m, &f) {
+                    flip(m, &f);
+                }
             }
         }
     }
@@ -869,12 +1124,19 @@ fn smooth(m: &mut Mesh, input: &Input<'_>, v: u32) {
         .map(|&t| unit(m.tri_normal(t)))
         .collect();
     m.pos[v as usize] = target;
-    let ok = m.vt[v as usize].iter().zip(&before).all(|(&t, &n)| {
+    let around = m.vt[v as usize].clone();
+    let ok = around.iter().zip(&before).all(|(&t, &n)| {
         let after = m.tri_normal(t);
         norm(after) > 0.0 && dot(unit(after), n) > 0.5
-    });
+    }) && {
+        let made: Vec<[u32; 3]> = around.iter().map(|&t| m.tris[t as usize]).collect();
+        !m.crosses(&made, &|w| m.pos[w as usize], &around)
+    };
     if ok {
         m.home[v as usize] = home;
+        for t in around {
+            m.reindex(t);
+        }
     } else {
         m.pos[v as usize] = p;
     }
@@ -1094,11 +1356,18 @@ mod tests {
     /// rising diagonal, the node at (3, 2) moved to (2.01, 2): the edge from
     /// it to the node at (2, 2) is a needle's short edge.
     fn needle_grid() -> Mesh {
-        let id = |i: u32, j: u32| 5 * j + i;
-        let mut pos: Vec<Point3> = (0..25)
-            .map(|v| [(v % 5) as f64, (v / 5) as f64, 0.0])
+        let (mut pos, tris) = grid_sheet(0.0, 0);
+        pos[13] = [2.01, 2.0, 0.0];
+        mesh_of(pos, tris, 0.0)
+    }
+
+    /// A flat 5 × 5 grid at height `z`, unit spacing, each square split
+    /// along its rising diagonal, its vertices numbered from `first`.
+    fn grid_sheet(z: f64, first: u32) -> (Vec<Point3>, Vec<[u32; 3]>) {
+        let id = |i: u32, j: u32| first + 5 * j + i;
+        let pos: Vec<Point3> = (0..25)
+            .map(|v| [(v % 5) as f64, (v / 5) as f64, z])
             .collect();
-        pos[id(3, 2) as usize] = [2.01, 2.0, 0.0];
         let mut tris = Vec::new();
         for j in 0..4 {
             for i in 0..4 {
@@ -1106,22 +1375,90 @@ mod tests {
                 tris.push([id(i, j), id(i + 1, j + 1), id(i, j + 1)]);
             }
         }
-        let mut vt = vec![Vec::new(); pos.len()];
-        for (t, tri) in tris.iter().enumerate() {
-            for &v in tri {
-                vt[v as usize].push(t as u32);
-            }
-        }
-        Mesh {
+        (pos, tris)
+    }
+
+    /// A mesh of smooth vertices, with a crossing grid of `cell` (0: off).
+    fn mesh_of(pos: Vec<Point3>, tris: Vec<[u32; 3]>, cell: f64) -> Mesh {
+        let mut m = Mesh {
             kind: vec![Kind::Smooth; pos.len()],
             home: vec![0; pos.len()],
-            alive: vec![true; tris.len()],
-            origin: vec![0; tris.len()],
+            alive: Vec::new(),
+            origin: Vec::new(),
+            vt: vec![Vec::new(); pos.len()],
             pos,
-            tris,
-            vt,
+            tris: Vec::new(),
             feature: HashSet::new(),
             merged: 0,
+            grid: Grid::new(cell),
+        };
+        for t in tris {
+            m.push_tri(t, 0);
+        }
+        m
+    }
+
+    /// Two sheets 0.01 apart: moving a vertex of one through the other
+    /// crosses it, moving it within its plane does not; nor does anything
+    /// with the grid off.
+    #[test]
+    fn a_move_through_another_sheet_crosses() {
+        let (mut pos, mut tris) = grid_sheet(0.0, 0);
+        let (top, top_tris) = grid_sheet(0.01, 25);
+        pos.extend(top);
+        tris.extend(top_tris);
+        for cell in [1.0, 0.3, 0.0] {
+            let m = mesh_of(pos.clone(), tris.clone(), cell);
+            let v = 12;
+            let around = m.vt[v as usize].clone();
+            let made: Vec<[u32; 3]> = around.iter().map(|&t| m.tris[t as usize]).collect();
+            let moved = |to: Point3| {
+                m.crosses(
+                    &made,
+                    &|w| if w == v { to } else { m.pos[w as usize] },
+                    &around,
+                )
+            };
+            assert_eq!(moved([2.0, 2.0, 0.02]), cell > 0.0, "cell {cell}");
+            assert!(!moved([2.2, 1.9, 0.0]), "cell {cell}");
+            assert!(!moved([2.0, 2.0, 0.005]), "cell {cell}");
+        }
+    }
+
+    /// After collapses and flips the grid lists each live triangle in the
+    /// cells its box overlaps, and no dead one.
+    #[test]
+    fn the_grid_follows_the_mesh() {
+        let (mut pos, tris) = grid_sheet(0.0, 0);
+        pos[13] = [2.01, 2.0, 0.0];
+        let mut m = mesh_of(pos, tris, 0.5);
+        assert!(try_collapse(&mut m, 12, 13, 1.0, 0.1, true));
+        for (u, v) in m.edges() {
+            if let Some(f) = flippable(&m, u, v) {
+                flip(&mut m, &f);
+            }
+        }
+        for t in 0..m.tris.len() as u32 {
+            let listed: Vec<[i64; 3]> = m
+                .grid
+                .cells
+                .iter()
+                .filter(|(_, list)| list.contains(&t))
+                .map(|(&c, _)| c)
+                .collect();
+            if !m.alive[t as usize] {
+                assert!(listed.is_empty(), "dead triangle {t} listed");
+                continue;
+            }
+            let b = bbox(m.tris[t as usize].map(|v| m.pos[v as usize]));
+            let (lo, hi) = m.grid.range(b).unwrap();
+            let count = (0..3).map(|k| hi[k] - lo[k] + 1).product::<i64>();
+            assert_eq!(listed.len() as i64, count, "triangle {t}");
+            assert!(
+                listed
+                    .iter()
+                    .all(|c| (0..3).all(|k| lo[k] <= c[k] && c[k] <= hi[k]))
+            );
         }
     }
 
