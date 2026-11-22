@@ -8,8 +8,12 @@
 //!   between the two face centroids, but never below half that distance
 //!   (finer than the facets would not follow the input any better);
 //! - a *thickness* size: a ray cast inward from each face centroid measures
-//!   the local thickness of the solid, and an element should be no larger
-//!   than it (`thickness` times it).
+//!   the local thickness of the solid, to the first face it meets from
+//!   inside (one facing along the ray; faces meeting it the other way, where
+//!   shells touch or overlap, are passed), and an element should be no
+//!   larger than it (`thickness` times it);
+//! - a *requested* size: the caller's size for a face (`face_sizes`, the
+//!   user's size controls per patch).
 //!
 //! These samples are clamped to `[min_size, max_size]` and spread through a
 //! background grid so that the size grows by at most `gradation` per unit
@@ -43,6 +47,11 @@ pub struct SizingParams {
     pub thickness_cells: f64,
     /// Background grid nodes allowed; the cell grows to stay below it.
     pub max_nodes: usize,
+    /// A requested size per triangle (empty, or infinite where none): seeds
+    /// clamped to `[min_size, max_size]` like the others.
+    pub face_sizes: Vec<f64>,
+    /// The curvature and thickness terms; off, only `face_sizes` seed it.
+    pub surface_terms: bool,
 }
 
 impl SizingParams {
@@ -57,6 +66,8 @@ impl SizingParams {
             feature_degrees: 45.0,
             thickness_cells: 1.0,
             max_nodes: 2_000_000,
+            face_sizes: Vec::new(),
+            surface_terms: true,
         }
     }
 }
@@ -215,7 +226,7 @@ impl SizeField {
             p.feature_degrees.to_radians(),
         );
         let mut curved: Vec<((u32, u32), f64)> = Vec::new();
-        for (&(u, v), around) in &edges {
+        for (&(u, v), around) in edges.iter().filter(|_| p.surface_terms) {
             let &[s, t] = around.as_slice() else {
                 continue;
             };
@@ -262,23 +273,32 @@ impl SizeField {
             .into_par_iter()
             .map(|t| {
                 let n = normals[t];
-                if n == [0.0; 3] {
+                if n == [0.0; 3] || !p.surface_terms {
                     return None;
                 }
                 let step = 1e-9 * diag;
-                let ray = Ray {
-                    origin: sub(centroids[t], scale(n, step)),
-                    dir: scale(n, -1.0),
-                };
-                bvh.ray_cast(&ray).map(|hit| hit.t + step)
+                let dir = scale(n, -1.0);
+                // The first face met from inside; a few passed at most.
+                let mut travelled = step;
+                let mut origin = sub(centroids[t], scale(n, step));
+                for _ in 0..8 {
+                    let hit = bvh.ray_cast(&Ray { origin, dir })?;
+                    if dot(normals[hit.triangle as usize], dir) > 0.0 {
+                        return Some(travelled + hit.t);
+                    }
+                    travelled += hit.t + step;
+                    origin = add(origin, scale(dir, hit.t + step));
+                }
+                None
             })
             .collect();
         for (t, d) in thickness.into_iter().enumerate() {
-            if let Some(d) = d {
-                let h = clamp(d / p.thickness_cells);
-                if h < h0 {
-                    seeds.push((Seed::Triangle(corners(&triangles[t])), h));
-                }
+            let requested = p.face_sizes.get(t).copied().unwrap_or(f64::INFINITY);
+            let h = d
+                .map_or(f64::INFINITY, |d| d / p.thickness_cells)
+                .min(requested);
+            if h.is_finite() && clamp(h) < h0 {
+                seeds.push((Seed::Triangle(corners(&triangles[t])), clamp(h)));
             }
         }
         if seeds.is_empty() {
@@ -475,6 +495,52 @@ mod tests {
             [1, 7, 5],
         ];
         (p, f)
+    }
+
+    /// A size requested on one face (x = 1, triangles 10 and 11) is the size
+    /// there, graded away from it; without the surface terms nothing else
+    /// seeds the field.
+    #[test]
+    fn a_requested_face_size_is_graded_from_its_face() {
+        let (p, f) = boxed([0.0; 3], [1.0; 3]);
+        let mut params = params(0.2);
+        params.face_sizes = vec![f64::INFINITY; f.len()];
+        params.face_sizes[10] = 0.05;
+        params.face_sizes[11] = 0.05;
+        let field = SizeField::from_surface(&p, &f, &params);
+        assert!((field.min() - 0.05).abs() < 1e-12, "{}", field.min());
+        let near = field.at([1.0, 0.5, 0.5]);
+        assert!((near - 0.05).abs() < 0.01, "{near}");
+        // 0.4 per unit distance: 0.05 + 0.4 * 0.2 at 0.2 from the face (to
+        // the background grid's resolution), capped at 0.2 from 0.375 on.
+        let graded = field.at([0.8, 0.5, 0.5]);
+        assert!((graded - 0.13).abs() < 0.02, "{graded}");
+        assert_eq!(field.at([0.5, 0.5, 0.5]), 0.2);
+        assert_eq!(field.at([0.0, 0.5, 0.5]), 0.2);
+        params.surface_terms = false;
+        let only = SizeField::from_surface(&p, &f, &params);
+        assert_eq!(only, field, "a thick box has no other seeds");
+    }
+
+    /// The thickness is measured to the first face met from inside: a face
+    /// met from outside (an inner shell overlapping the box, oriented the
+    /// same way) is passed.
+    #[test]
+    fn thickness_passes_faces_met_from_outside() {
+        let (mut p, mut f) = boxed([0.0, 0.0, 0.0], [4.0, 4.0, 0.2]);
+        // A second, outward box overlapping the plate's middle: its faces
+        // across the plate are met from outside first, then its far ones
+        // from inside.
+        let (q, g) = boxed([1.0, 1.0, 0.05], [3.0, 3.0, 0.15]);
+        let n = p.len() as u32;
+        p.extend(q);
+        f.extend(g.into_iter().map(|t| t.map(|v| v + n)));
+        let field = SizeField::from_surface(&p, &f, &params(0.5));
+        // The plate's top face at its middle: the first face met inward is
+        // the inner box's top (met from outside, passed), then its bottom
+        // (from inside): 0.15 down, not 0.05.
+        let at = field.at([2.0, 2.0, 0.2]);
+        assert!(at > 0.1, "{at}");
     }
 
     #[test]

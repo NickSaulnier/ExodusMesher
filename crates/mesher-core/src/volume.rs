@@ -89,14 +89,33 @@ pub struct MeshOutcome {
     pub wrapped: Vec<RepairedPart>,
 }
 
-/// The size field's parameters at element size `h`: the feature angle, when
-/// set, for its curvature term too.
-fn sizing_params(h: f64, config: &JobConfig) -> SizingParams {
+/// The size field of a part at element size `h`: graded from its curvature
+/// and thickness, the feature angle (when set) for its curvature term too,
+/// and its patches' size controls; `None` under `uniform_size` with no patch
+/// sizes (the size is `h` everywhere).
+fn size_field(
+    model: &SurfaceModel,
+    r: &RepairedPart,
+    h: f64,
+    config: &JobConfig,
+) -> Option<SizeField> {
+    let diagonal = Aabb::of_points(&r.points).diagonal();
+    let face_sizes = crate::sizes::face_sizes(model, r, config, diagonal, h);
+    let smallest = face_sizes.iter().copied().fold(f64::INFINITY, f64::min);
+    if config.uniform_size && !smallest.is_finite() {
+        return None;
+    }
     let mut p = SizingParams::for_size(h);
     if let Some(a) = config.feature_angle {
         p.feature_degrees = a;
     }
-    p
+    // A patch may ask for less than the usual floor.
+    p.min_size = p.min_size.min(smallest);
+    p.surface_terms = !config.uniform_size;
+    if smallest.is_finite() {
+        p.face_sizes = face_sizes;
+    }
+    Some(SizeField::from_surface(&r.points, &r.faces, &p))
 }
 
 /// Mesh every repaired part.
@@ -107,6 +126,7 @@ pub fn mesh_parts(
     log: &mut RecordLog,
 ) -> Result<MeshOutcome, InternalError> {
     crate::features::record_ignored_overrides(model, repaired, config, log);
+    crate::sizes::record_ignored_controls(model, repaired, config, log);
     let mut outcome = MeshOutcome::default();
     for r in repaired {
         mesh_part(model, r, config, log, &mut outcome)?;
@@ -141,7 +161,7 @@ fn mesh_part(
     let soup = TriangleSoup::new(&r.points, &r.faces).map_err(|e| internal(e.to_string()))?;
     let bounds = Aabb::of_points(&r.points);
     let diagonal = bounds.diagonal();
-    let h = config.element_size * diagonal;
+    let h = crate::sizes::part_size(r, config) * diagonal;
     let winding = FastWindingNumber::new(soup);
     let attempt = |kernel: Kernel, ok: bool| Attempt {
         part: Some(name.to_owned()),
@@ -517,15 +537,11 @@ fn stuffing_candidate(
     bounds: &Aabb,
 ) -> Result<Result<Candidate, Record>, InternalError> {
     let _prof = mesher_tet::prof::scope("volume::stuffing_candidate");
-    let levels = if config.uniform_size {
-        0
-    } else {
-        let field = SizeField::from_surface(&r.points, &r.faces, &sizing_params(h, config));
-        if field.is_uniform() {
-            0
-        } else {
+    let levels = match size_field(model, r, h, config) {
+        Some(field) if !field.is_uniform() => {
             libm::log2(h / field.min()).ceil().clamp(0.0, 2.0) as u32
         }
+        _ => 0,
     };
     let leaf = h / f64::from(1u32 << levels);
     let level_fn = |p: Point3| 0.5 - winding.winding_number(p);
@@ -800,11 +816,7 @@ fn remeshed(
     config: &JobConfig,
 ) -> Result<(Remeshing, Candidate), String> {
     let _prof = mesher_tet::prof::scope("volume::remeshed");
-    let field = if config.uniform_size {
-        SizeField::uniform(h)
-    } else {
-        SizeField::from_surface(&r.points, &r.faces, &sizing_params(h, config))
-    };
+    let field = size_field(model, r, h, config).unwrap_or_else(|| SizeField::uniform(h));
     // Group boundaries (side sets) stay feature lines.
     let groups = crate::features::face_groups(model, r);
     let base = crate::features::remesh_params(r, config);
@@ -956,9 +968,7 @@ fn conformal(
     // The sizing field grades the size down where the surface curves or the
     // part is thin.
     let prof_size = mesher_tet::prof::scope("volume::conformal/size_field");
-    let size = (!config.uniform_size)
-        .then(|| SizeField::from_surface(&r.points, &r.faces, &sizing_params(h, config)))
-        .filter(|f| !f.is_uniform());
+    let size = size_field(model, r, h, config).filter(|f| !f.is_uniform());
     drop(prof_size);
     let min_size = size.as_ref().map(SizeField::min);
     let side_sets: Vec<u32> = (0..r.faces.len())

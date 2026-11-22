@@ -74,6 +74,14 @@ impl Project {
                 "`max_deviation` and `element_size` must be positive".to_owned(),
             ));
         }
+        if s.sizes
+            .iter()
+            .any(|c| !(c.element_size > 0.0 && c.element_size.is_finite()))
+        {
+            return Err(ProjectError::Invalid(
+                "every `sizes` entry's `element_size` must be positive".to_owned(),
+            ));
+        }
         if s.feature_angle.is_some_and(|a| !(a > 0.0 && a < 180.0)) {
             return Err(ProjectError::Invalid(
                 "`feature_angle` must be between 0 and 180 degrees".to_owned(),
@@ -192,6 +200,8 @@ mod tests {
             "input = \"m.obj\"\noutput = \"o\"\nunknown = 1\n",
             "input = \"m.obj\"\noutput = \"o\"\n[settings]\nelement_size = -1.0\n",
             "input = \"m.obj\"\noutput = \"o\"\n[settings]\nfeature_angle = 180.0\n",
+            "input = \"m.obj\"\noutput = \"o\"\n[[settings.sizes]]\npart = \"a\"\nelement_size = 0.0\n",
+            "input = \"m.obj\"\noutput = \"o\"\n[[settings.sizes]]\npart = \"a\"\nsize = 0.1\n",
             "input = \"\"\noutput = \"o\"\n",
             "not toml",
         ] {

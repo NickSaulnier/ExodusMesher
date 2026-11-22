@@ -11,6 +11,7 @@ pub mod project;
 pub mod protocol;
 pub mod repair;
 pub mod report;
+pub mod sizes;
 pub mod volume;
 
 pub use exit::ExitStatus;
@@ -20,5 +21,5 @@ pub use mesher_tet::prof;
 pub use report::{
     Action, Attempt, AttemptOutcome, DefectCode, InputInfo, InputStats, JobConfig, Kernel,
     KernelChoice, Location, MeshSummary, Outcome, PartSource, PartSummary, QualityMeasure, Record,
-    RecordLog, RepairSummary, Report, Severity, Stage, Summary, WorstCell,
+    RecordLog, RepairSummary, Report, Severity, SizeControl, Stage, Summary, WorstCell,
 };

@@ -283,6 +283,11 @@
           "const": "FEAT_OVERRIDE_IGNORED"
         },
         {
+          "description": "A size control took no effect",
+          "type": "string",
+          "const": "SIZE_CONTROL_IGNORED"
+        },
+        {
           "description": "Constrained Delaunay could not recover a facet",
           "type": "string",
           "const": "MESH_RECOVERY_FAILED"
@@ -562,6 +567,13 @@
           "default": [],
           "items": {
             "type": "string"
+          }
+        },
+        "sizes": {
+          "description": "Element sizes per part and per patch (OBJ group), overriding\n`element_size` there.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SizeControl"
           }
         },
         "smooth_edges": {
@@ -1109,6 +1121,35 @@
           "type": "string",
           "const": "fatal"
         }
+      ]
+    },
+    "SizeControl": {
+      "description": "One size control (`[[settings.sizes]]` in the project file).",
+      "type": "object",
+      "properties": {
+        "element_size": {
+          "description": "The element size, relative to the part's bounding-box diagonal. For a\nwhole part it replaces `element_size` (the last such control listed\nwins); for a patch it is the size on its faces, graded from there,\nand only refines: it cannot exceed the part's size.",
+          "type": "number",
+          "format": "double"
+        },
+        "group": {
+          "description": "The OBJ group (patch); absent: the whole part.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "part": {
+          "description": "The part, by name or 1-based index; absent: every part.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "element_size"
       ]
     },
     "Stage": {

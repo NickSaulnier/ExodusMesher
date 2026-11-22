@@ -102,6 +102,7 @@ defect_codes! {
     QualSliverFace = "QUAL_SLIVER_FACE", Warning, "Minimum angle below threshold";
     QualSuspectScale = "QUAL_SUSPECT_SCALE", Info, "Bounding box suggests wrong units";
     FeatOverrideIgnored = "FEAT_OVERRIDE_IGNORED", Warning, "A feature or smooth edge override took no effect";
+    SizeControlIgnored = "SIZE_CONTROL_IGNORED", Warning, "A size control took no effect";
     MeshRecoveryFailed = "MESH_RECOVERY_FAILED", Error, "Constrained Delaunay could not recover a facet";
     MeshBudgetExceeded = "MESH_BUDGET_EXCEEDED", Error, "Steiner-point or element budget hit";
     GeoCapacityExceeded = "GEO_CAPACITY_EXCEEDED", Fatal, "Part too large for 32-bit vertex and face indices";
@@ -593,6 +594,27 @@ pub struct JobConfig {
     /// a feature line).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub smooth_edges: Vec<[u32; 2]>,
+    /// Element sizes per part and per patch (OBJ group), overriding
+    /// `element_size` there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sizes: Vec<SizeControl>,
+}
+
+/// One size control (`[[settings.sizes]]` in the project file).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SizeControl {
+    /// The part, by name or 1-based index; absent: every part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    /// The OBJ group (patch); absent: the whole part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The element size, relative to the part's bounding-box diagonal. For a
+    /// whole part it replaces `element_size` (the last such control listed
+    /// wins); for a patch it is the size on its faces, graded from there,
+    /// and only refines: it cannot exceed the part's size.
+    pub element_size: f64,
 }
 
 /// The volume kernel tried first; the rest of the fallback ladder follows it.
@@ -631,6 +653,7 @@ impl Default for JobConfig {
             feature_angle: None,
             feature_edges: Vec::new(),
             smooth_edges: Vec::new(),
+            sizes: Vec::new(),
         }
     }
 }

@@ -35,6 +35,7 @@ The same input and settings give a byte-identical report.
 | `stuffing_only` | Present (true) when the client retried a worker that timed out or ran out of memory with the stuffing fallback only |
 | `feature_angle` | Present when set (`--feature-angle`): the feature angle in degrees, between 0 and 180. Edges where the surface turns by more than it are feature lines, which remeshing keeps (their vertices move only along them, corners never) and `features` lists. Unset, remeshing and `features` use 40° and the size field's curvature term 45°; set, all use it |
 | `feature_edges` | Present when set (project file only): edges made feature lines whatever the angle, each `[a, b]`, 0-based indices into the parsed vertex list as in record locations; every repaired edge between vertices that came from `a` and `b` counts. One that matches no edge of a selected part is `FEAT_OVERRIDE_IGNORED` |
+| `sizes` | Present when set (project file only, `[[settings.sizes]]`): size controls, each with `element_size` (relative to the part's bounding-box diagonal, like `element_size`) and `part` (a name or 1-based index; absent: every part) and/or `group` (an OBJ group, the patch). A control with a part and no group sets that part's element size (the last listed wins); one with a group sets the size on that group's faces, graded away from them (it only refines: the floor of a quarter of the size moves down to it, and it cannot exceed the part's size). Under `uniform_size` only the patch sizes grade the field. One that takes no effect is `SIZE_CONTROL_IGNORED` |
 | `smooth_edges` | Present when set (project file only): edges, as for `feature_edges`, that are not feature lines although they turn by more than the angle. A group boundary stays a feature line (`FEAT_OVERRIDE_IGNORED`) |
 
 ## Parts
@@ -146,6 +147,7 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `QUAL_SLIVER_FACE` | warning | Minimum angle below threshold | Remesh, warning |
 | `QUAL_SUSPECT_SCALE` | info | Bounding box suggests wrong units | Info; tolerances are relative |
 | `FEAT_OVERRIDE_IGNORED` | warning | A feature or smooth edge override took no effect | Warning: the override is ignored |
+| `SIZE_CONTROL_IGNORED` | warning | A size control took no effect | Warning: the control is ignored |
 | `MESH_RECOVERY_FAILED` | error | Constrained Delaunay could not recover a facet | Error, triggers fallback (stuffing, then the wrap of repair rung 3) |
 | `MESH_BUDGET_EXCEEDED` | error | Steiner-point or element budget hit | Error, triggers fallback |
 | `GEO_CAPACITY_EXCEEDED` | fatal | Part too large for 32-bit vertex and face indices | Fatal |
