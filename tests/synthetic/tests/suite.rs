@@ -60,6 +60,9 @@ struct Case {
     /// The conformal kernel should refuse the repaired surface (shells that
     /// touch at duplicated vertices), so stuffing must take over.
     conformal_fails: bool,
+    /// As `conformal_fails`, but stuffing is rejected too, so the part is
+    /// meshed from its wrap (repair rung 3, the last resort).
+    wrapped: bool,
 }
 
 fn case(name: &'static str, scene: Scene, expect: Vec<(DefectCode, Key)>) -> Case {
@@ -74,6 +77,7 @@ fn case(name: &'static str, scene: Scene, expect: Vec<(DefectCode, Key)>) -> Cas
         repair_fails: Vec::new(),
         open: false,
         conformal_fails: false,
+        wrapped: false,
     }
 }
 
@@ -315,6 +319,21 @@ fn cases() -> Vec<Case> {
             conformal_fails: true,
             ..case(
                 "non-manifold edge (cubes sharing an edge)",
+                Scene::single(s),
+                vec![(TopNonmanifoldEdge, verts(e))],
+            )
+        });
+    }
+    {
+        // A thin wall on a cube's edge: the shells touch along it, so no
+        // conformal kernel takes the repaired surface, and stuffing loses
+        // the wall (thinner than its lattice), so the wrap meshes it.
+        let s = cube().union(&Solid::cuboid([1.0, 1.0, 0.0], [2.0, 1.02, 1.0]));
+        let e = [[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]].map(|p| s.find(p).unwrap());
+        out.push(Case {
+            wrapped: true,
+            ..case(
+                "non-manifold edge, a thin wall on a cube",
                 Scene::single(s),
                 vec![(TopNonmanifoldEdge, verts(e))],
             )
@@ -603,10 +622,12 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
     if c.open {
         return tally;
     }
-    let sliver_input = c
-        .expect
-        .iter()
-        .any(|(code, _)| *code == DefectCode::QualSliverFace);
+    // A wrap's triangles are not the input's, so its cells are held to no
+    // bound, as for an input with sliver faces.
+    let sliver_input = c.wrapped
+        || c.expect
+            .iter()
+            .any(|(code, _)| *code == DefectCode::QualSliverFace);
     for r in &run.repaired {
         let Some((_, s)) = run.meshes.summaries.iter().find(|(i, _)| *i == r.part) else {
             failures.push(format!("{label}: part {} was not meshed", r.name));
@@ -625,6 +646,12 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
         }
         if c.conformal_fails && s.kernel != Kernel::Stuffing {
             failures.push(format!("{label}: part {} was meshed conformally", r.name));
+        }
+        if c.wrapped != run.meshes.wrapped.iter().any(|w| w.part == r.part) {
+            failures.push(format!(
+                "{label}: part {} wrapped = {}, expected {}",
+                r.name, !c.wrapped, c.wrapped
+            ));
         }
         if s.min_dihedral_degrees < lo || s.max_dihedral_degrees > hi {
             failures.push(format!(
@@ -648,6 +675,8 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
                 (s.volume - s.surface_volume).abs() / s.surface_volume.abs().max(f64::MIN_POSITIVE);
             let allowed = match s.kernel {
                 Kernel::Stuffing => 0.15,
+                // The wrap is at a small offset around the surface.
+                Kernel::Delaunay | Kernel::Exact if c.wrapped => 0.01,
                 Kernel::Delaunay | Kernel::Exact => 1e-9,
             };
             if error > allowed {
@@ -676,11 +705,11 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
     ] {
         let expected = match code {
             DefectCode::VolLowQuality => sliver_input,
-            DefectCode::MeshRecoveryFailed => c.conformal_fails,
+            DefectCode::MeshRecoveryFailed => c.conformal_fails || c.wrapped,
             _ => false,
         };
         let found = run.records.iter().any(|r| r.code == code);
-        if code == DefectCode::MeshRecoveryFailed && c.conformal_fails && !found {
+        if code == DefectCode::MeshRecoveryFailed && expected && !found {
             failures.push(format!("{label}: expected {}", code.as_str()));
         }
         if expected {
@@ -713,7 +742,7 @@ struct ExactTally {
 /// takes): every input triangle recovered, and the inside region exactly
 /// the enclosed volume; then (Milestone 13) rounded to f64 and untangled.
 fn check_exact(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>, t: &mut ExactTally) {
-    if c.open || !c.gate_fails.is_empty() || c.conformal_fails {
+    if c.open || !c.gate_fails.is_empty() || c.conformal_fails || c.wrapped {
         return;
     }
     for r in &run.repaired {

@@ -480,16 +480,19 @@ fn contact_ids(
     faces.iter().map(|t| t.map(&mut key)).collect()
 }
 
-/// Repair rung 3, the last resort (decided Nov 13, 2026): a part whose
-/// surface failed the gate and whose stuffing fallback was rejected (or not
-/// allowed, under `--strict`) is wrapped (`mesher_tet::wrap`: closed,
+/// Repair rung 3, the last resort (decided Nov 13, 2026): a part that found
+/// no mesh, its stuffing fallback rejected (or not allowed, under
+/// `--strict`), is wrapped (`mesher_tet::wrap`: closed,
 /// manifold, intersection-free, at a small offset around it, with the
 /// winding guard for an open surface). The wrap is kept if the faces
 /// bounding the solid the surface encloses are within the deviation limit
 /// of it; the part is then returned with the wrap as its surface (passing
 /// the gate) for the volume pipeline to mesh again, with one record per
-/// gate check it failed. `None` (with `failed` records) when it cannot be
-/// wrapped, or when the rung is off.
+/// gate check it failed, or, for a surface that passed the gate but did not
+/// mesh conformally (Nov 22, 2026: 13 of the Nov 21 benchmark's failures,
+/// stuffing beyond the deviation limit), one `MESH_RECOVERY_FAILED` record.
+/// `None` (with `failed` records) when it cannot be wrapped, or when the
+/// rung is off.
 pub(crate) fn wrap_part(
     model: &SurfaceModel,
     r: &RepairedPart,
@@ -518,8 +521,13 @@ pub(crate) fn wrap_part(
     let (points, faces) = (&r.points, &r.faces);
     let (origin, face_origin) = (&r.vertex_origin, &r.face_origin);
     let a2 = analyze_surface(points, faces, &contact(points, faces, origin), tol).map_err(err)?;
-    let failing = gate_codes(&a2);
-    if failing.is_empty() || tol.wrap_alpha <= 0.0 || faces.is_empty() {
+    let mut failing = gate_codes(&a2);
+    if failing.is_empty() {
+        // The surface passed the gate: what the wrap works around is the
+        // conformal kernel's failure on it.
+        failing.push(DefectCode::MeshRecoveryFailed);
+    }
+    if tol.wrap_alpha <= 0.0 || faces.is_empty() {
         return Ok(None);
     }
     {

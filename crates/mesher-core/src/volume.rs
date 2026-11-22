@@ -460,9 +460,12 @@ fn mesh_part(
     Ok(())
 }
 
-/// Repair rung 3 for a part whose surface failed the gate and found no
-/// mesh: wrap it and mesh the wrap through the whole pipeline. Whether the
-/// wrap meshed; its errors that sent the part here are then worked around.
+/// Repair rung 3 for a part that found no mesh (its surface failed the
+/// gate, or passed it and the conformal kernel and stuffing both failed):
+/// wrap it and mesh the wrap through the whole pipeline. Whether the wrap
+/// meshed; its errors that sent the part here are then worked around.
+/// Under `--strict` a surface that passed the gate is not wrapped: it is
+/// meshed conformally as it is, or the part fails.
 fn wrapped_and_meshed(
     model: &SurfaceModel,
     r: &RepairedPart,
@@ -471,7 +474,7 @@ fn wrapped_and_meshed(
     outcome: &mut MeshOutcome,
 ) -> Result<bool, InternalError> {
     let _prof = mesher_tet::prof::scope("volume::wrapped_and_meshed");
-    if r.summary.gate_passed || r.summary.rung >= 3 {
+    if r.summary.rung >= 3 || (r.summary.gate_passed && config.strict) {
         return Ok(false);
     }
     let Some(w) = wrap_part(model, r, &Tolerances::for_job(config), log)? else {
