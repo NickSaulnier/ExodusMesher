@@ -282,9 +282,18 @@ fn mesh_part(
                                     .action(Action::Fallback, Outcome::Applied),
                             );
                         }
+                        // What remeshing gave, though not kept.
+                        let remeshed = candidates.iter().find_map(|(_, m)| m.clone());
+                        let mut rec = Record::new(DefectCode::VolLowQuality, Stage::VolumeMesh);
+                        if let Some(m) = remeshed {
+                            rec = m
+                                .measure(rec)
+                                .measured("remeshed_worst_cell", remeshed_worst.unwrap_or(0.0));
+                        } else if let Some(reason) = remesh_failure.take() {
+                            rec = rec.measured("remesh_retry", reason);
+                        }
                         log.push(
-                            Record::new(DefectCode::VolLowQuality, Stage::VolumeMesh)
-                                .part(name)
+                            rec.part(name)
                                 .severity(Severity::Warning)
                                 .measured("conformal_worst_cell", conformal_worst)
                                 .measured("stuffing_worst_cell", stuffing_worst)
@@ -746,6 +755,8 @@ struct Remeshing {
     /// Features too small to mesh that were merged away (each moves the
     /// surface by at most a tenth of the local size).
     merged_small_features: usize,
+    /// The ladder rung whose surface this is (`remeshed`).
+    rung: String,
     /// The other remeshings tried: each rung's name and why it was not
     /// kept (it did not mesh, or its worst cell was worse).
     retried: Vec<String>,
@@ -753,7 +764,9 @@ struct Remeshing {
 
 impl Remeshing {
     fn measure(self, rec: Record) -> Record {
-        let mut rec = rec.measured("remeshed_triangles", self.triangles as u64);
+        let mut rec = rec
+            .measured("remeshed_triangles", self.triangles as u64)
+            .measured("remesh_rung", self.rung);
         if self.merged_small_features > 0 {
             rec = rec.measured("merged_small_features", self.merged_small_features as u64);
         }
@@ -803,14 +816,17 @@ fn remeshed(
         ("free collapses, checked", false, true, true),
         ("plain", false, false, false),
     ];
-    // A snapped surface that meshes with cells far beyond the limits
-    // (`FAR_WORST_CELL`) is compared with the first unsnapped one that
-    // meshes: on a few models snapping leaves worse cells than it removes.
-    // The better of the two is kept.
+    // A surface that meshes with cells far beyond the limits
+    // (`FAR_WORST_CELL`) does not end the ladder: on some models snapping or
+    // free collapses leave worse cells than they remove (72329, 1356636: the
+    // plain remesher's cells are within the limits). The rungs below are
+    // tried until one meshes within them, and the best kept. A checked rung
+    // only runs when the same rung unchecked did not mesh.
     let mut tried: Vec<String> = Vec::new();
     let mut best: Option<(f64, usize, Remeshing, Candidate)> = None;
+    let mut unchecked_meshed = false;
     for (name, snap_strips, free_small_collapses, check_crossings) in ladder {
-        if best.is_some() && snap_strips {
+        if check_crossings && unchecked_meshed {
             continue;
         }
         let params = RemeshParams {
@@ -821,23 +837,29 @@ fn remeshed(
         };
         match remeshed_with(model, r, h, config, &field, &groups, &params) {
             Ok((remeshing, c)) => {
+                unchecked_meshed = !check_crossings;
                 let w = worst_cell(&c);
                 tried.push(format!("{name}: worst cell {w:.3}"));
                 if best.as_ref().is_none_or(|b| w > b.0) {
                     best = Some((w, tried.len() - 1, remeshing, c));
                 }
-                if w >= FAR_WORST_CELL || !snap_strips {
+                if w >= FAR_WORST_CELL {
                     break;
                 }
             }
-            Err(reason) => tried.push(format!("{name}: {reason}")),
+            Err(reason) => {
+                unchecked_meshed = false;
+                tried.push(format!("{name}: {reason}"));
+            }
         }
     }
     match best {
         Some((_, kept, remeshing, c)) => {
+            let rung = ladder_rung(&tried[kept]);
             tried.remove(kept);
             Ok((
                 Remeshing {
+                    rung,
                     retried: tried,
                     ..remeshing
                 },
@@ -846,6 +868,11 @@ fn remeshed(
         }
         None => Err(tried.join("; ")),
     }
+}
+
+/// The rung's name in one of `remeshed`'s entries, `name: why`.
+fn ladder_rung(entry: &str) -> String {
+    entry.split(": ").next().unwrap_or(entry).to_owned()
 }
 
 /// `remeshed` with one rung's remesher.
@@ -864,6 +891,7 @@ fn remeshed_with(
     let remeshing = Remeshing {
         triangles: s.triangles.len(),
         merged_small_features: s.merged_small_features,
+        rung: String::new(),
         retried: Vec::new(),
     };
     let surface = RepairedPart {
