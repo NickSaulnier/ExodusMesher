@@ -348,6 +348,11 @@
           "const": "VOL_BOUNDARY_DEVIATION"
         },
         {
+          "description": "Neighbouring cells' sizes differ beyond the gradation limit",
+          "type": "string",
+          "const": "VOL_GRADATION"
+        },
+        {
           "description": "Part or set name over the Exodus limit",
           "type": "string",
           "const": "EXO_NAME_TRUNCATED"
@@ -731,6 +736,11 @@
           "format": "double",
           "default": 0.0
         },
+        "max_size_ratio": {
+          "description": "Largest ratio between face neighbours' sizes (each cell's longest\nedge), against `VOL_GRADATION`'s limit.",
+          "type": "number",
+          "format": "double"
+        },
         "max_skewness": {
           "type": "number",
           "format": "double",
@@ -806,6 +816,7 @@
         "surface_volume",
         "min_dihedral_degrees",
         "max_dihedral_degrees",
+        "max_size_ratio",
         "hausdorff",
         "hausdorff_relative"
       ]
@@ -963,6 +974,11 @@
           "description": "A face's distance from its centroid to where the centroid line\ncrosses it, over the centroid distance.",
           "type": "string",
           "const": "skewness"
+        },
+        {
+          "description": "The ratio of the sizes (longest edges) of a face's two cells.",
+          "type": "string",
+          "const": "size_ratio"
         }
       ]
     },

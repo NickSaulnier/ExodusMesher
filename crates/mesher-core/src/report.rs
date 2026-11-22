@@ -115,6 +115,7 @@ defect_codes! {
     VolNonmanifold = "VOL_NONMANIFOLD", Error, "Mesh face held by more than two tets, or by two on the same side";
     VolLowQuality = "VOL_LOW_QUALITY", Warning, "Non-orthogonality, skewness or volume ratio out of bounds";
     VolBoundaryDeviation = "VOL_BOUNDARY_DEVIATION", Error, "Hausdorff distance to input over tolerance";
+    VolGradation = "VOL_GRADATION", Warning, "Neighbouring cells' sizes differ beyond the gradation limit";
     ExoNameTruncated = "EXO_NAME_TRUNCATED", Warning, "Part or set name over the Exodus limit";
     ExoCapacityExceeded = "EXO_CAPACITY_EXCEEDED", Error, "Mesh too large for the 64-bit-offset format";
     OutWriteFailed = "OUT_WRITE_FAILED", Fatal, "An output file could not be written";
@@ -834,6 +835,9 @@ pub struct MeshSummary {
     pub max_skewness: f64,
     #[serde(default)]
     pub max_volume_ratio: f64,
+    /// Largest ratio between face neighbours' sizes (each cell's longest
+    /// edge), against `VOL_GRADATION`'s limit.
+    pub max_size_ratio: f64,
     /// Two-sided Hausdorff distance between the input surface and the mesh
     /// boundary (sampled at vertices and face centroids), absolute and
     /// relative to the part's bounding-box diagonal.
@@ -859,6 +863,8 @@ pub enum QualityMeasure {
     /// A face's distance from its centroid to where the centroid line
     /// crosses it, over the centroid distance.
     Skewness,
+    /// The ratio of the sizes (longest edges) of a face's two cells.
+    SizeRatio,
 }
 
 /// The worst cell or face for one measure.

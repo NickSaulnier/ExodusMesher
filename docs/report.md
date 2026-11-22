@@ -160,6 +160,7 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `VOL_NONMANIFOLD` | error | Mesh face held by more than two tets, or by two on the same side | Error |
 | `VOL_LOW_QUALITY` | warning | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
 | `VOL_BOUNDARY_DEVIATION` | error | Hausdorff distance to input over tolerance | Error |
+| `VOL_GRADATION` | warning | Neighbouring cells' sizes differ beyond the gradation limit | Warning, located at the face with the largest ratio of its cells' longest edges (`max_size_ratio` against 4; `element`, `neighbour`, `point`) |
 | `EXO_NAME_TRUNCATED` | warning | Part or set name over the Exodus limit | Truncate, warning |
 | `EXO_CAPACITY_EXCEEDED` | error | Mesh too large for the 64-bit-offset format | Error |
 | `OUT_WRITE_FAILED` | fatal | An output file could not be written | Fatal |
@@ -187,8 +188,9 @@ Each meshing attempt, in the order tried: `part`, `kernel` (`delaunay`, the cons
 | `max_non_orthogonality_degrees`, `mean_non_orthogonality_degrees` | On interior faces, the angle between the face normal and the line joining the two cell centroids; what a finite-volume solver's non-orthogonal correction has to make up |
 | `max_skewness` | On interior faces, the distance from the face centroid to where the line joining the two cell centroids crosses the face, over the distance between the cell centroids |
 | `max_volume_ratio` | Largest volume ratio between neighbouring cells, over pairs whose floating-point volumes are both positive |
+| `max_size_ratio` | Largest ratio between neighbouring cells' sizes (each cell's longest edge): how abruptly the size changes. Above 4 it is `VOL_GRADATION` (stuffing's graded lattice stays under 2.9) |
 | `hausdorff`, `hausdorff_relative` | Two-sided distance between the input surface and the mesh boundary (sampled at vertices and face centroids), absolute and relative to the part's diagonal; zero to rounding for a conformal mesh of the repaired surface |
-| `worst_cells` | Where the worst cells are, one entry per measure: `measure` (`min_dihedral`, `non_orthogonality` or `skewness`), `wall` (present for the worst over the wall-adjacent cells, those with a boundary face; their boundary faces count for non-orthogonality, by the line from the cell's centroid to the face's), `value`, `element` (the cell's 1-based number in the part's element block; for a face, the first of its two cells), `neighbour` (for an interior face, the cell across it) and `point` (the cell's centroid, or the face's). Entries in order: smallest dihedral angle, then non-orthogonality and skewness over every interior face, then both over the wall-adjacent cells. Ties go to the lowest element number |
+| `worst_cells` | Where the worst cells are, one entry per measure: `measure` (`min_dihedral`, `non_orthogonality`, `skewness` or `size_ratio`), `wall` (present for the worst over the wall-adjacent cells, those with a boundary face; their boundary faces count for non-orthogonality, by the line from the cell's centroid to the face's), `value`, `element` (the cell's 1-based number in the part's element block; for a face, the first of its two cells), `neighbour` (for an interior face, the cell across it) and `point` (the cell's centroid, or the face's). Entries in order: smallest dihedral angle, then non-orthogonality and skewness over every interior face, then both over the wall-adjacent cells. Ties go to the lowest element number |
 
 Every number is finite: JSON has no infinity or NaN. A value that could not be measured (the deviation of an empty mesh, for one) is written as -1.
 

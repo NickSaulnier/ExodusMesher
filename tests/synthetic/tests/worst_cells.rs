@@ -101,6 +101,7 @@ fn worst_cells_are_located() {
             (QualityMeasure::Skewness, false),
             (QualityMeasure::NonOrthogonality, true),
             (QualityMeasure::Skewness, true),
+            (QualityMeasure::SizeRatio, false),
         ]
     );
     let tets = part.tets.len() as u64;
@@ -152,7 +153,7 @@ fn a_remeshed_sliver_cube_has_no_quality_warning() {
     let (records, outcome) = mesh(&sliver_cube().0, false);
     let (_, summary) = outcome.summaries.first().expect("a summary");
     assert!(summary.accepted && summary.remeshed);
-    assert_eq!(summary.worst_cells.len(), 5);
+    assert_eq!(summary.worst_cells.len(), 6);
     assert!(
         !records
             .iter()

@@ -211,6 +211,7 @@ Every finding is a structured record with a stable code, a severity, a location 
 | `VOL_NONMANIFOLD` | Mesh face held by more than two tets, or by two on the same side | Error |
 | `VOL_LOW_QUALITY` | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
 | `VOL_BOUNDARY_DEVIATION` | Hausdorff distance to input over tolerance | Error |
+| `VOL_GRADATION` | Neighbouring cells' sizes differ beyond the gradation limit (largest ratio of their longest edges over 4; Milestone 18) | Warning, located |
 | `EXO_NAME_TRUNCATED` | Part or set name over the Exodus limit | Truncate, warning |
 | `EXO_CAPACITY_EXCEEDED` | Mesh too large for the 64-bit-offset format | Error |
 | `OUT_WRITE_FAILED` | An output file could not be written | Fatal |
@@ -1226,7 +1227,10 @@ Staged plan (proposed at the start; decided stage by stage):
   - *Thickness*: the inward ray now stops at the first face met from inside (facing along the ray), passing up to 8 faces met from outside (shells that touch or overlap); before, the first face of any orientation. No mesh changed: the synthetic goldens, and 12 Thingi10k models (6 remeshed clean ones, 6 dirty: kernel and tet count each).
   - *Proximity across parts, decided against* (Nov 22, 2026): the parts are meshed one at a time as separate blocks, and the space between two parts is in neither mesh, so a gap between them asks nothing of either part's cells; within a part, separate shells are already seen by the ray (a hollow part's cavity). Left for multi-region meshing (the open question on regions), where the gap is meshed.
   - *Tests*: `a_requested_face_size_is_graded_from_its_face` and `thickness_passes_faces_met_from_outside` (sizing); `tests/synthetic/tests/sizes.rs` (a part's control sets its size, by name and index, the last winning; a patch's control refines its patch to the requested size and leaves the other part alone; four controls without effect, each recorded with its reason, the meshes unchanged); the project file rejects a control's non-positive size.
-- [ ] Stage 4, the gradation check in the volume gate
+- [x] Stage 4, the gradation check in the volume gate (Nov 22, 2026)
+  - *Measure* (`FvQuality::max_size_ratio`, `worst_size_ratio`): across every interior face, the ratio of its two cells' sizes, each cell's longest edge (the longest edge, not the volume: a sliver next to a good cell has a huge volume ratio and a modest size ratio). In the mesh summary (`max_size_ratio`) and its `worst_cells` (`size_ratio`).
+  - *Limit* (`MAX_SIZE_RATIO`, 4), measured on the written meshes of the clean gap and both subsets (275 meshes): stuffing, whose graded lattice halves its size at each level, never exceeds 2.85 (78 meshes, median 2.47); the conformal meshes have a median largest ratio of 2.85, over 3 on 93 of 197, over 4 on 45, over 5 on 20, up to 31.8 (69260). The size field itself allows about 1.5 between neighbours (a growth of 0.4 per unit distance over half the two cells' sizes), but a Delaunay mesh following it varies by more than that from cell to cell, so the limit is where the jumps stand out of that spread, not the field's. Above it the volume gate warns, located at the face (`VOL_GRADATION`: `max_size_ratio`, `element`, `neighbour`, `point`); the mesh is still accepted. No warning on `max_volume_ratio`: it measures slivers, which `VOL_LOW_QUALITY` already reports.
+  - *Tests*: `size_ratio_across_a_face` (quality); in the synthetic suite `VOL_GRADATION` warns on the wrapped cases only (the two open bowls at their three scales, the thin wall on a cube at two), where the wrap's thin walls meet bulk cells; goldens regenerated for those 8 runs, their meshes unchanged.
 - [ ] Stage 5, checks
 - [ ] Exit criterion: sharp edges and named patches survive remeshing on the synthetic suite and the public CAD-derived set; neighbouring element sizes within the gradation limit
 

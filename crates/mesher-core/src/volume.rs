@@ -53,6 +53,13 @@ pub const MAX_NON_ORTHOGONALITY_DEGREES: f64 = 70.0;
 /// `ImproveParams`).
 pub const MAX_SKEWNESS: f64 = 2.0;
 
+/// The largest ratio between face neighbours' sizes (longest edges) before
+/// `VOL_GRADATION` warns. Measured Nov 22, 2026: stuffing, whose lattice
+/// halves its size at each level, never exceeds 2.85 (78 meshes); the
+/// conformal meshes of the subsets exceed 3 on 93 of 197, 4 on 45 and 5 on
+/// 20 (up to 31.8), where small cells crowd against large ones.
+pub const MAX_SIZE_RATIO: f64 = 4.0;
+
 /// A conformal mesh whose worst cell (`worst_cell`) is below this is far
 /// beyond the quality limits (a dihedral angle under 2.5°, a
 /// non-orthogonality over 85° or a skewness over 8): stuffing is tried too,
@@ -1181,6 +1188,15 @@ fn volume_gate(
             q.worst_skewness,
         ));
     }
+    if q.max_size_ratio > MAX_SIZE_RATIO {
+        log.push(located(
+            gate(DefectCode::VolGradation)
+                .measured("max_size_ratio", q.max_size_ratio)
+                .threshold("max_size_ratio", MAX_SIZE_RATIO)
+                .hint("a small cell meets a much larger one across a face (located: the worst); the size changes more abruptly than the gradation allows"),
+            q.worst_size_ratio,
+        ));
+    }
     let single = VolumeMesh {
         points: points.clone(),
         blocks: vec![Block {
@@ -1239,6 +1255,7 @@ fn volume_gate(
         mean_non_orthogonality_degrees: finite(q.mean_non_orthogonality_degrees),
         max_skewness: finite(q.max_skewness),
         max_volume_ratio: finite(q.max_volume_ratio),
+        max_size_ratio: finite(q.max_size_ratio),
         hausdorff: finite(distance),
         hausdorff_relative: finite(relative),
         worst_cells: worst_cells(&q),
@@ -1262,6 +1279,7 @@ fn worst_cells(q: &FvQuality) -> Vec<WorstCell> {
             q.wall_worst_non_orthogonality,
         ),
         (QualityMeasure::Skewness, true, q.wall_worst_skewness),
+        (QualityMeasure::SizeRatio, false, q.worst_size_ratio),
     ]
     .into_iter()
     .filter_map(|(measure, wall, w)| {

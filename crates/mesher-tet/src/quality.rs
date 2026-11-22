@@ -69,6 +69,9 @@ pub struct FvQuality {
     /// Largest volume ratio between face neighbours whose floating-point
     /// volumes are both positive; always finite.
     pub max_volume_ratio: f64,
+    /// Largest ratio between face neighbours' sizes (each cell's longest
+    /// edge): how abruptly the size changes from cell to cell.
+    pub max_size_ratio: f64,
     /// Tets whose volume, computed in floating point as a solver would, is
     /// not positive. Exact predicates can find such a tet positive (it is
     /// flat to rounding), but a finite-volume solver cannot use it.
@@ -90,6 +93,8 @@ pub struct FvQuality {
     pub worst_skewness: Option<WorstAt>,
     pub wall_worst_non_orthogonality: Option<WorstAt>,
     pub wall_worst_skewness: Option<WorstAt>,
+    /// The interior face with the largest size ratio.
+    pub worst_size_ratio: Option<WorstAt>,
 }
 
 /// Where a measure's worst value is.
@@ -252,6 +257,16 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
         }
     }
     q.wall_cells = wall.iter().filter(|&&w| w).count();
+    let longest: Vec<f64> = tets
+        .iter()
+        .map(|t| {
+            let p = corners(t);
+            [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+                .iter()
+                .map(|&(a, b)| norm(sub(p[a], p[b])))
+                .fold(0.0, f64::max)
+        })
+        .collect();
     let (mut sum, mut count) = (0.0f64, 0usize);
     for (j, kj, i) in interior {
         let (pj, pi) = (corners(&tets[j]), corners(&tets[i]));
@@ -300,6 +315,12 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
             let ratio = (vj.max(vi) / vj.min(vi)).min(f64::MAX);
             q.max_volume_ratio = q.max_volume_ratio.max(ratio);
         }
+        let (lj, li) = (longest[j], longest[i]);
+        if lj > 0.0 && li > 0.0 {
+            let ratio = (lj.max(li) / lj.min(li)).min(f64::MAX);
+            q.max_size_ratio = q.max_size_ratio.max(ratio);
+            keep(&mut q.worst_size_ratio, at(ratio), true);
+        }
     }
     q.mean_non_orthogonality_degrees = if count > 0 { sum / count as f64 } else { 0.0 };
     q
@@ -308,6 +329,30 @@ pub fn fv_quality(points: &[Point3], tets: &[[u32; 4]]) -> FvQuality {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two tets on one face, the second's apex far out: their longest edges
+    /// differ, and the size ratio names that face.
+    #[test]
+    fn size_ratio_across_a_face() {
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -5.0],
+        ];
+        // Both positive: 0 1 2 3, and 0 2 1 4 below the shared face 0 1 2.
+        let q = fv_quality(&p, &[[0, 1, 2, 3], [0, 2, 1, 4]]);
+        let first = 2f64.sqrt();
+        let second = 26f64.sqrt();
+        assert!(
+            (q.max_size_ratio - second / first).abs() < 1e-12,
+            "{}",
+            q.max_size_ratio
+        );
+        let w = q.worst_size_ratio.unwrap();
+        assert_eq!((w.tet, w.neighbour), (0, Some(1)));
+    }
 
     #[test]
     fn regular_tetrahedron() {
