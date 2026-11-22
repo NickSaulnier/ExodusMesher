@@ -3,6 +3,7 @@
 
 pub mod diagnose;
 pub mod exit;
+pub mod features;
 pub mod mesh;
 pub mod model;
 pub mod overlay;

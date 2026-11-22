@@ -1,5 +1,7 @@
-//! Defect overlay as VTK XML PolyData (.vtp), for ParaView.
+//! Defect overlay and feature lines as VTK XML PolyData (.vtp), for
+//! ParaView.
 //!
+//! The overlay (`overlay_vtp`):
 //! Cells are, in VTK's order: one vertex cell per vertex defect, one line per
 //! edge defect, then every model triangle. Cell arrays:
 //! - `defect`: index into the code list in the file's header comment (the
@@ -172,10 +174,140 @@ pub fn overlay_vtp(model: &SurfaceModel, part_of_triangle: &[u32], overlay: &Ove
     s
 }
 
+/// One part's feature lines, for `features_vtp`.
+#[derive(Debug, Clone, Copy)]
+pub struct FeatureLines<'a> {
+    /// 1-based part index.
+    pub part: u32,
+    /// The repaired surface's points.
+    pub points: &'a [[f64; 3]],
+    /// Feature edges, as point pairs.
+    pub segments: &'a [(u32, u32)],
+    /// Why each is a feature: 0 the angle, 1 a group boundary, 2 forced.
+    pub causes: &'a [u8],
+    /// Each segment's curve within the part.
+    pub curves: &'a [u32],
+}
+
+/// The feature lines of every part: one line cell per feature edge, with
+/// cell arrays `part` (1-based), `cause` (0 angle, 1 group boundary, 2
+/// forced) and `curve` (within the part), and the points each part's lines
+/// use. Deterministic: same inputs, same bytes.
+#[must_use]
+pub fn features_vtp(parts: &[FeatureLines<'_>]) -> String {
+    let mut points: Vec<[f64; 3]> = Vec::new();
+    let mut conn: Vec<u32> = Vec::new();
+    let (mut part, mut cause, mut curve) = (Vec::new(), Vec::new(), Vec::new());
+    for p in parts {
+        // Only the points the lines use, renumbered in order of first use.
+        let mut index: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+        for (s, &(u, v)) in p.segments.iter().enumerate() {
+            for x in [u, v] {
+                let next = points.len() as u32;
+                let i = *index.entry(x).or_insert_with(|| {
+                    points.push(p.points.get(x as usize).copied().unwrap_or([0.0; 3]));
+                    next
+                });
+                conn.push(i);
+            }
+            part.push(i64::from(p.part));
+            cause.push(i64::from(p.causes.get(s).copied().unwrap_or(0)));
+            curve.push(i64::from(p.curves.get(s).copied().unwrap_or(0)));
+        }
+    }
+    let mut s = String::new();
+    let _ = writeln!(s, r#"<?xml version="1.0"?>"#);
+    let _ = writeln!(
+        s,
+        "<!-- ExodusMesher feature lines. cause: 0=angle 1=group boundary 2=forced -->"
+    );
+    let _ = writeln!(
+        s,
+        r#"<VTKFile type="PolyData" version="1.0" byte_order="LittleEndian" header_type="UInt64">"#
+    );
+    let _ = writeln!(s, "  <PolyData>");
+    let _ = writeln!(
+        s,
+        r#"    <Piece NumberOfPoints="{}" NumberOfVerts="0" NumberOfLines="{}" NumberOfStrips="0" NumberOfPolys="0">"#,
+        points.len(),
+        part.len()
+    );
+    let _ = writeln!(s, "      <Points>");
+    let _ = write!(
+        s,
+        r#"        <DataArray type="Float64" NumberOfComponents="3" format="ascii">"#
+    );
+    for p in &points {
+        let _ = write!(s, " {} {} {}", p[0], p[1], p[2]);
+    }
+    let _ = writeln!(s, " </DataArray>");
+    let _ = writeln!(s, "      </Points>");
+    if !conn.is_empty() {
+        let _ = writeln!(s, "      <Lines>");
+        let _ = write!(
+            s,
+            r#"        <DataArray type="Int64" Name="connectivity" format="ascii">"#
+        );
+        for c in &conn {
+            let _ = write!(s, " {c}");
+        }
+        let _ = writeln!(s, " </DataArray>");
+        let _ = write!(
+            s,
+            r#"        <DataArray type="Int64" Name="offsets" format="ascii">"#
+        );
+        for k in 1..=part.len() {
+            let _ = write!(s, " {}", 2 * k);
+        }
+        let _ = writeln!(s, " </DataArray>");
+        let _ = writeln!(s, "      </Lines>");
+    }
+    let _ = writeln!(s, r#"      <CellData Scalars="cause">"#);
+    for (name, values) in [("part", &part), ("cause", &cause), ("curve", &curve)] {
+        let _ = write!(
+            s,
+            r#"        <DataArray type="Int32" Name="{name}" format="ascii">"#
+        );
+        for v in values {
+            let _ = write!(s, " {v}");
+        }
+        let _ = writeln!(s, " </DataArray>");
+    }
+    let _ = writeln!(s, "      </CellData>");
+    let _ = writeln!(s, "    </Piece>");
+    let _ = writeln!(s, "  </PolyData>");
+    let _ = writeln!(s, "</VTKFile>");
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mesher_core::model::Triangle;
+
+    #[test]
+    fn feature_lines_use_their_own_points() {
+        let pts = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [5.0, 5.0, 5.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let lines = [FeatureLines {
+            part: 2,
+            points: &pts,
+            segments: &[(0, 1), (1, 3)],
+            causes: &[0, 1],
+            curves: &[0, 0],
+        }];
+        let text = features_vtp(&lines);
+        // Point 2 is unused: three points, renumbered.
+        assert!(text.contains(r#"NumberOfPoints="3" NumberOfVerts="0" NumberOfLines="2""#));
+        assert!(text.contains(r#"Name="connectivity" format="ascii"> 0 1 1 2 </DataArray>"#));
+        assert!(text.contains(r#"Name="cause" format="ascii"> 0 1 </DataArray>"#));
+        assert!(text.contains(r#"Name="part" format="ascii"> 2 2 </DataArray>"#));
+        assert_eq!(text, features_vtp(&lines));
+    }
 
     #[test]
     fn counts_and_arrays_line_up() {

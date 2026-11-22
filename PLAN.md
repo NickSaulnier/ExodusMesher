@@ -197,6 +197,7 @@ Every finding is a structured record with a stable code, a severity, a location 
 | `INT_SHELL_OVERLAP` | Two shells of one part intersect | Resolve (repair rung 2, Milestone 16) for a closed part, warning; else error, triggers fallback (stuffing, then the wrap of repair rung 3, Milestone 17) |
 | `QUAL_SLIVER_FACE` | Minimum angle below threshold | Remesh, warning |
 | `QUAL_SUSPECT_SCALE` | Bounding box suggests wrong units | Info; tolerances are relative |
+| `FEAT_OVERRIDE_IGNORED` | A feature or smooth edge override took no effect (no such edge on a selected part, or a group boundary to smooth; Milestone 18) | Warning: the override is ignored |
 | `MESH_RECOVERY_FAILED` | Constrained Delaunay could not recover a facet | Error, triggers fallback (stuffing, then the wrap of repair rung 3, Milestone 17) |
 | `MESH_BUDGET_EXCEEDED` | Steiner-point or element budget hit | Error, triggers fallback |
 | `GEO_CAPACITY_EXCEEDED` | Part too large for 32-bit vertex and face indices | Fatal |
@@ -327,10 +328,18 @@ Build the reporting spine before any meshing, so every later feature lands with 
     - Exit: every part of the self-intersecting and multi-component strata resolves to a surface that passes the gate or fails with a located record.
 17. **Wrapping (repair rung 3).** Alpha wrapping for what the arrangement cannot fix.
     - Exit (and the phase's): the full benchmark on all 10,000 models and the valid subset; outputs checked by `mesher-fvm` and by the user's solver.
+18. **Features, patches and size controls.** Feature curves reported and controllable, OBJ groups as side sets on every path, size controls per part and per patch, a gradation check.
+    - Exit: sharp edges and named patches survive remeshing on the synthetic suite and a set of public CAD-derived OBJ files; neighbouring element sizes stay within the gradation limit.
+19. **Solver formats.** OpenFOAM polyMesh and Fluent `.msh` writers, `.meshb` read and write, `checkMesh` in CI.
+    - Exit: `checkMesh` passes on every synthetic output; a Fluent `.msh` and a `.meshb` file round-trip through independent readers.
+20. **Python API.** `mesher-py` (PyO3, maturin) over the worker, with machine-readable suggested remedies on records.
+    - Exit: a Python script meshes the synthetic suite and reproduces the CLI's reports byte for byte; wheels build in CI on Linux and Windows.
+21. **Experimental polyhedral dual.** A vertex-centred dual of the tet mesh, `mesher-fvm` on polyhedral cells.
+    - Exit: a controlled tet-against-dual comparison on the same geometries and solver (error per degree of freedom, iterations to converge).
 
 ## Phases and task breakdown
 
-The milestones group into seven phases. Phases run in order, except the GUI phase, which can start once Phase 2 is done. A milestone's tasks are ticked when they land; the milestone is done only when its exit criterion passes under `cargo fmt`, `cargo clippy -D warnings` and `cargo test --workspace`.
+The milestones group into eight phases. Phases run in order, except the GUI phase, which can start once Phase 2 is done. A milestone's tasks are ticked when they land; the milestone is done only when its exit criterion passes under `cargo fmt`, `cargo clippy -D warnings` and `cargo test --workspace`.
 
 | Phase | Milestones | Delivers |
 | --- | --- | --- |
@@ -341,6 +350,7 @@ The milestones group into seven phases. Phases run in order, except the GUI phas
 | 5. GUI | 9 | egui front end over the worker (can start after Phase 2) |
 | 6. Hardening | 10 | Sizing, Thingi10k benchmark, CI regression gate |
 | 7. Exact kernel and repair ladder | 11–17 | Indirect predicates, exact constrained Delaunay kernel, f64 rounding, terminating refinement, finite-volume quality, exact arrangement, wrapping (Phase 1 of `ROADMAP.md`) |
+| 8. Surfaces and formats | 18–21 | Feature curves and patches on every path, size controls, solver formats, a Python API, an experimental polyhedral dual (Phase 2 of `ROADMAP.md`) |
 
 Crates are created when their first milestone starts, so early builds do not pull in GUI or solver dependencies.
 
@@ -1088,7 +1098,7 @@ Staged plan (decided at the start; the outline tasks below are ticked as the sta
     - **The two that do not:** 466329 (67,888 faces) and 498459 (40,542) time out in the worker (600 s) before any part is reported, so their only record is `MESH_WORKER_FAILED` without a location. On 466329 rung 2 takes 3 s (16 intersecting pairs); the time is elsewhere. On 498459 `resolve_rounded` takes 87 s (`--example arrange`: 76,189 intersecting pairs, 368,368 pieces, 229,997 dropped, rounded clean to 125,916 triangles), so most of the time is also elsewhere (diagnosis of the pairs, meshing the resolved surface). Timeouts and point budgets are deferred by decision (improvements 5 and 6).
     - **Fixed by the run** (and rerun on the 13 models they touched): (1) vertices rung 2 makes have no model vertex, and the copies a later split makes of one were different points of contact, so the gate counted the triangles meeting there as intersecting (9 resolved parts failed the gate; now 6 pass, the other 3 fail on non-manifold edges and an open sheet, located); contact ids of such vertices now go by position. (2) The record cap was per code, so when diagnosis had filled its 100 records of `INT_SELF_INTERSECTION`, rung 2's outcome and the gate's located records of it were dropped (7 parts); the cap is now per code and stage (`log_caps_per_code_and_stage`). The synthetic goldens are unchanged by both.
 
-**Milestone 17: Wrapping (repair rung 3).** Started Nov 13, 2026.
+**Milestone 17: Wrapping (repair rung 3).** Started Nov 13, 2026. Landed with its exit criterion (and the phase's) deferred by decision (Nov 22, 2026, the user): stages 1 to 5 are in, and Phase 8 starts before the 10,000-model benchmark, the `mesher-fvm` check on every output (`mesher-fvm` is not yet called by the harness) and the user's solver check.
 
 Staged plan (decided at the start, clean-room from the paper's description; no CGAL code is read):
 
@@ -1116,7 +1126,7 @@ Staged plan (decided at the start, clean-room from the paper's description; no C
     - **Decision** (Nov 13, 2026, the user): the wrap is the last resort. It moved out of `repair_part` into `repair::wrap_part`, called by the volume pipeline (`wrapped_and_meshed`) for a part whose surface failed the gate once stuffing on it is rejected (or, under `--strict`, instead of stuffing); the wrapped part is meshed through the whole pipeline again (never wrapped twice), `MeshOutcome::wrapped` carries it, and the worker writes its summary and the wrap to `repaired.obj`. Once it meshes, the errors that sent the part there become warnings (`RecordLog::worked_around` with `wrap`). `Tolerances::for_job` gives the wrap's α from the job's element size (the synthetic suite's coarser size now sets it too). The synthetic accounting checks a wrapped part against its wrap's counts. Goldens: the bowl cases fail the gate again in repair and are wrapped after stuffing's rejection (the open bowl: stuffing rejected, then conformal on the wrap at all three scales; the bowl with a box: stuffing on the wrap at two scales, conformal at the third).
     - **On the 10 subset models**: the 3 whose stuffing was rejected (47564, 68434, 448014; exit 30) are wrapped and mesh conformally (exit 10); the other 7 keep stuffing's mesh as at the Milestone 16 close. Whole subset: conformal 45 to 48, exit codes 10: 43 to 46, 20: 45, 30: 10 to 7. α stays 1: at 0.333 the three fit the input better (IoU 0.77 and 0.44 against 0.32 and 0.24) but their cells are far worse (smallest dihedral 0.7 to 1.8° against 7.1 to 10.7°, non-orthogonality 85 to 89° against 72 to 78°), with twice the tets and the time.
 - [x] The wrapped surface goes through the exact kernel; stuffing stays last. Changed by decision at stage 5 (Nov 13, 2026): the wrap is the last resort, after stuffing on the repaired surface is rejected; the wrapped part then goes through the whole volume pipeline (the exact kernel first under `--kernel exact`, the conformal kernel, stuffing on the wrap)
-- [ ] Exit criterion (and the phase's): the full benchmark on all 10,000 models and the valid subset; outputs checked by `mesher-fvm` and by the user's solver
+- [ ] Exit criterion (and the phase's): the full benchmark on all 10,000 models and the valid subset; outputs checked by `mesher-fvm` and by the user's solver. Deferred by decision (Nov 22, 2026), with the other open work deferred with it: wiring `mesher-fvm` into the benchmark harness, the stuffing fallbacks (308 of the 1,000-model sample, 163 self-intersecting), the 4 wraps beyond `max_deviation` (52134, 116879, 135803, 1489676), the clean gap's 31 stuffing meshes kept for quality and 5 recovery failures, and the 4 models lost by dropping item 12's guards
 
 **Improvements 5 and 6: early stop and point budgets.** Closed Nov 14, 2026, by decision, with the early stop in (stage 2) and stage 3 not kept; insertion speed (improvement 7) is what most remaining timeouts need. Started Nov 14, 2026, on the user's go-ahead, before Milestone 17's full benchmark (improvements 5 and 6 under "Things to consider improving"). In the Nov 13 rerun 38 of the 1,000 models hit the 600 s worker limit, many of them small (80, 178, 444 faces).
 
@@ -1175,6 +1185,49 @@ Staged plan:
   - The synthetic goldens unchanged (the suite 77 to 14 s); the workspace tests, fmt and clippy pass. The 1,000-model rerun is the user's to start.
   - These numbers were measured before item 12 (disconnected vertex stars, "Things to consider improving") landed on main (Nov 15, 2026); the combined tree passes the synthetic goldens (item 12's) and the workspace tests, and its subsets were not rerun.
 
+### Phase 8: Surfaces and formats
+
+This is Phase 2 of [ROADMAP.md](ROADMAP.md), moved here when it started on Nov 22, 2026, with Phase 7's exit criterion deferred by decision (Milestone 17).
+
+**Goal.** Meshes that respect sharp features and named boundaries, size themselves sensibly, and load in the major open solvers.
+
+**Phase exit.** Sharp edges and named patches survive remeshing on the synthetic suite and a set of public CAD-derived OBJ files; neighbouring element sizes stay within the gradation limit; output passes OpenFOAM's `checkMesh` with no errors.
+
+Open before the phase can close: which public CAD-derived OBJ set (its licence checked first), and `ROADMAP.md`'s decision 3, whether the user's solver reads polyhedral Exodus blocks (`NFACED`), which decides Milestone 21.
+
+**Milestone 18: Features, patches and size controls.** Started Nov 22, 2026.
+
+Where it starts (Nov 22, 2026):
+
+- *Features.* `mesher_tet::remesh` marks an edge a feature where its faces' normals differ by more than `feature_degrees` (40°, fixed: every rung of the remesh ladder uses the default), where a normal is zero, or where the faces' OBJ groups differ (fill faces are a group of their own). The size field uses its own angle (`SizingParams::feature_degrees`, 45°). Nothing reports the features: `Remeshed` returns no feature edges or corners, the mesh summary and the writers carry none, and no setting changes the angle or an edge.
+- *Patches.* OBJ groups become side sets on the conformal, remeshed and exact paths (`face_groups`), named by the group; a stuffed part gets only `<part>_boundary` (`face_groups` empty on every stuffing branch), and a wrapped part gets groups only when its wrap meshes conformally. The same group name in two parts gives two side sets of one name. No synthetic case has groups (`to_obj` writes `o` names only), and no end-to-end test checks a side set by name.
+- *Size controls.* One global `element_size`, relative to each part's diagonal. The thickness term casts one ray per face centroid against the part's own surface and takes the first hit, whatever its orientation; other parts are not seen. Gradation (0.4) shapes the field only; nothing checks it on the volume mesh, and `max_volume_ratio` (neighbour volumes) is recorded but never warned on.
+
+Staged plan (proposed at the start; decided stage by stage):
+
+1. *Feature curves reported.* `remesh` returns its feature segments and corners (positions and input edges); the mesh summary gains a `features` section per part (feature edges, corners, total length) and the worker writes the lines (`features.vtp`, a polyline per feature curve, with the part and whether each came from the angle or a group boundary). One angle for both the remesher and the size field, from a new `feature_angle` setting (default 40°; the sizing default moves from 45° only if the subsets and goldens allow). Per-edge overrides in the project file, by OBJ vertex numbers: edges forced to be features, and edges forced smooth. Tests: remesh unit tests on the overrides; a synthetic case per override kind.
+2. *Patches on every path.* A stuffed mesh's boundary faces take the group of the nearest input triangle (as the wrap's triangles do), so stuffed and wrapped parts get group side sets; fill faces stay in `<part>_boundary` only. Side sets of one name across parts are merged into one (an Exodus side set can span blocks), recorded. `to_obj` learns `g` groups, and synthetic cases with named faces (a box with six, a cylinder with its caps) check every side set by name and area on every kernel.
+3. *Size controls.* Per-part and per-patch element sizes in the project file (`[[settings.sizes]]`: a part or a group, and a size relative to the part's diagonal), seeding the size field at those faces and graded from there; the thickness term sees the other parts' surfaces too (proximity), and only hits facing the ray. Closes the open question on size controls.
+4. *Gradation check.* The volume gate measures, across every interior face, the ratio of the two cells' sizes (longest edges) against the limit the gradation implies, and warns, located, beyond it (a proposed code, `VOL_GRADATION`; `max_volume_ratio` warned on with it if the subsets support a limit). Schema, `docs/report.md`, the defect table, a synthetic case.
+5. *Checks.* Feature survival measured: each input feature curve against the output's feature edges (the largest distance, relative to the size) and each named patch against its side set (area); on the synthetic suite, the subsets and the public CAD-derived set; the goldens regenerated where meshes change.
+
+- [x] Stage 1, feature curves reported, with the feature angle and per-edge overrides (Nov 22, 2026)
+  - *Detection* (`mesher_tet::remesh::features`): the remesher's own rule, moved out so the report and the remesher share it; an edge with one triangle each way is a feature by angle (or a degenerate face), group boundary, or `RemeshParams::forced_features`, less `forced_smooth` (a group boundary stays one); each segment keeps its cause (`FeatureCause`), and the corners are listed. Without overrides the segments and their order are exactly as before (the synthetic goldens unchanged).
+  - *Settings* (`JobConfig`): `feature_angle` (`--feature-angle`, or the project file; between 0 and 180°): unset, the remesher and the report use 40° and the size field 45° as before; set, all three use it. `feature_edges` and `smooth_edges` (project file only): pairs of 0-based parsed vertex indices, as record locations give them, applied to every repaired edge whose vertices came from them (`mesher_core::features::remesh_params`, on every rung of the remesh ladder). One that matches no edge of a selected part, or would smooth a group boundary, is the new warning `FEAT_OVERRIDE_IGNORED` (located at the two vertices, with `setting` and `reason`). Overrides do not reach a wrapped part (its vertices have no model vertex) or the size field.
+  - *Report and output*: each repaired part has `features` (`FeatureSummary`: the angle, edges by cause, smoothed edges, corners, curves, total length), of its final surface (the wrap, for a wrapped part); the worker writes `features.vtp`, a line cell per feature edge with `part`, `cause` and `curve` (segments chained through vertices that are not corners). Schema and `docs/report.md` updated.
+  - *Tests*: `features_follow_the_angle_groups_and_overrides` (remesh: a box's 12 edges and 8 corners, a forced diagonal kept by remeshing, a smoothed edge, a group boundary that stays); `cube_end_to_end_writes_a_valid_exodus_mesh` (the worker: the cube's features in the report and `features.vtp`, a smoothed edge, an unmatched pair as `FEAT_OVERRIDE_IGNORED`); `feature_lines_use_their_own_points` (the writer); the project file's feature settings and angle check. No synthetic case: the suite runs default settings only, and overrides are not diagnosis or repair.
+- [ ] Stage 2, patches on every path
+- [ ] Stage 3, size controls per part and per patch, proximity in the thickness term
+- [ ] Stage 4, the gradation check in the volume gate
+- [ ] Stage 5, checks
+- [ ] Exit criterion: sharp edges and named patches survive remeshing on the synthetic suite and the public CAD-derived set; neighbouring element sizes within the gradation limit
+
+**Milestone 19: Solver formats.** Outline in `ROADMAP.md`; tasks when it starts.
+
+**Milestone 20: Python API.** Outline in `ROADMAP.md`; tasks when it starts.
+
+**Milestone 21: Experimental polyhedral dual.** Outline in `ROADMAP.md`; tasks when it starts (after decision 3).
+
 ## Risks and open questions
 
 The biggest technical risk is boundary recovery in the in-house constrained Delaunay kernel: it is where TetGen spent years on degenerate cases, and it may never match TetGen's robustness. The stuffing fallback keeps the pipeline useful regardless.
@@ -1195,7 +1248,7 @@ The biggest technical risk is boundary recovery in the in-house constrained Dela
 - [x] Which downstream solver will consume the meshes: finite element or finite volume? It decides output formats and which quality metrics matter most.
 - [ ] Single region only, or multi-region meshes where nested or touching shells become separate material zones?
 - [ ] Should open sheets be rejected, or optionally closed by thickening?
-- [ ] What mesh-size controls should users get in v1: a global target size, or per-region overrides too?
+- [ ] What mesh-size controls should users get in v1: a global target size, or per-region overrides too? Proposed in Milestone 18 (stage 3): the global size plus overrides per part and per patch.
 - [x] Does the finite-volume solver read Exodus II directly, or does it need OpenFOAM polyMesh, CGNS or Fluent .msh as well?
 
 ## Things to consider improving

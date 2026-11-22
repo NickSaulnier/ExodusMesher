@@ -74,6 +74,11 @@ impl Project {
                 "`max_deviation` and `element_size` must be positive".to_owned(),
             ));
         }
+        if s.feature_angle.is_some_and(|a| !(a > 0.0 && a < 180.0)) {
+            return Err(ProjectError::Invalid(
+                "`feature_angle` must be between 0 and 180 degrees".to_owned(),
+            ));
+        }
         p.input = base.join(&p.input);
         p.output = base.join(&p.output);
         Ok(p)
@@ -173,10 +178,20 @@ mod tests {
         let p = Project::from_toml("input = \"m.obj\"\noutput = \"o\"\n", Path::new("")).unwrap();
         assert_eq!(p.settings, JobConfig::default());
         assert_eq!(p.job().input, "m.obj");
+        // Feature settings: an angle and edge overrides.
+        let p = Project::from_toml(
+            "input = \"m.obj\"\noutput = \"o\"\n[settings]\nfeature_angle = 30.0\nfeature_edges = [[0, 3]]\nsmooth_edges = [[1, 2], [4, 5]]\n",
+            Path::new(""),
+        )
+        .unwrap();
+        assert_eq!(p.settings.feature_angle, Some(30.0));
+        assert_eq!(p.settings.feature_edges, vec![[0, 3]]);
+        assert_eq!(p.settings.smooth_edges, vec![[1, 2], [4, 5]]);
         for bad in [
             "input = \"m.obj\"\n",
             "input = \"m.obj\"\noutput = \"o\"\nunknown = 1\n",
             "input = \"m.obj\"\noutput = \"o\"\n[settings]\nelement_size = -1.0\n",
+            "input = \"m.obj\"\noutput = \"o\"\n[settings]\nfeature_angle = 180.0\n",
             "input = \"\"\noutput = \"o\"\n",
             "not toml",
         ] {

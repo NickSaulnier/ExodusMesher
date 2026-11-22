@@ -56,6 +56,12 @@ pub struct RemeshParams {
     /// Off by default: the checks also refuse crossings later passes would
     /// undo, and the pipeline turns them on only for a surface that failed.
     pub check_crossings: bool,
+    /// Edges (input vertex pairs, either order) that are features whatever
+    /// the angle: the user's overrides. Pairs that are not edges are ignored.
+    pub forced_features: Vec<(u32, u32)>,
+    /// Edges that are not features although they turn by more than
+    /// `feature_degrees` (a group boundary stays a feature).
+    pub forced_smooth: Vec<(u32, u32)>,
 }
 
 impl Default for RemeshParams {
@@ -68,8 +74,150 @@ impl Default for RemeshParams {
             free_small_collapses: true,
             snap_strips: true,
             check_crossings: false,
+            forced_features: Vec::new(),
+            forced_smooth: Vec::new(),
         }
     }
+}
+
+/// Why an edge is a feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FeatureCause {
+    /// Its faces' normals differ by more than the feature angle (or one is
+    /// zero).
+    Angle,
+    /// Its faces are in different groups.
+    Group,
+    /// The user made it a feature (`RemeshParams::forced_features`).
+    Forced,
+}
+
+/// The feature lines of a surface, as the remesher keeps them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Features {
+    /// Feature edges (input vertex pairs, smaller first), in a fixed order.
+    pub segments: Vec<(u32, u32)>,
+    /// Why each segment is a feature.
+    pub causes: Vec<FeatureCause>,
+    /// Feature vertices that are not on one smooth line through them: the
+    /// remesher never moves them.
+    pub corners: Vec<u32>,
+    /// Edges `forced_smooth` turned from features into smooth edges.
+    pub smoothed: usize,
+}
+
+/// The feature edges of a surface: where its faces turn by more than
+/// `feature_degrees`, where their groups differ (`groups` per triangle,
+/// missing ones group 0), and the forced ones, less the forced smooth ones.
+/// Only edges with exactly one triangle each way count (a boundary or
+/// non-manifold edge is no feature).
+#[must_use]
+pub fn features(
+    points: &[Point3],
+    triangles: &[[u32; 3]],
+    groups: &[u32],
+    params: &RemeshParams,
+) -> Features {
+    let group = |t: usize| groups.get(t).copied().unwrap_or(0);
+    let normals: Vec<Point3> = triangles
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|v| points[v as usize]);
+            unit(normal(a, b, c))
+        })
+        .collect();
+    let mut directed: HashMap<(u32, u32), Option<u32>> = HashMap::new();
+    for (t, tri) in triangles.iter().enumerate() {
+        for k in 0..3 {
+            directed
+                .entry((tri[k], tri[(k + 1) % 3]))
+                .and_modify(|e| *e = None)
+                .or_insert(Some(t as u32));
+        }
+    }
+    let smooth: HashSet<(u32, u32)> = params
+        .forced_smooth
+        .iter()
+        .map(|&(u, v)| key(u, v))
+        .collect();
+    let forced: HashSet<(u32, u32)> = params
+        .forced_features
+        .iter()
+        .map(|&(u, v)| key(u, v))
+        .collect();
+    let cos_feature = libm::cos(params.feature_degrees.to_radians());
+    let mut f = Features::default();
+    let mut sorted: Vec<(&(u32, u32), &Option<u32>)> = directed.iter().collect();
+    sorted.sort_unstable();
+    for (&(u, v), &t) in sorted {
+        if u >= v {
+            continue;
+        }
+        let (Some(t), Some(&Some(s))) = (t, directed.get(&(v, u))) else {
+            continue;
+        };
+        let sharp = dot(normals[t as usize], normals[s as usize]) < cos_feature
+            || normals[t as usize] == [0.0; 3]
+            || normals[s as usize] == [0.0; 3];
+        let cause = if group(t as usize) != group(s as usize) {
+            Some(FeatureCause::Group)
+        } else if sharp && smooth.contains(&(u, v)) {
+            f.smoothed += 1;
+            None
+        } else if sharp {
+            Some(FeatureCause::Angle)
+        } else if forced.contains(&(u, v)) {
+            Some(FeatureCause::Forced)
+        } else {
+            None
+        };
+        if let Some(cause) = cause {
+            f.segments.push((u, v));
+            f.causes.push(cause);
+        }
+    }
+    let vertex_segments = vertex_segments(points.len(), &f.segments);
+    f.corners = (0..points.len())
+        .filter(|&v| {
+            !vertex_segments[v].is_empty()
+                && !on_one_line(points, &f.segments, &vertex_segments, v, cos_feature)
+        })
+        .map(|v| v as u32)
+        .collect();
+    f
+}
+
+/// The segments at each vertex.
+fn vertex_segments(n: usize, segments: &[(u32, u32)]) -> Vec<Vec<u32>> {
+    let mut at = vec![Vec::new(); n];
+    for (s, &(u, v)) in segments.iter().enumerate() {
+        at[u as usize].push(s as u32);
+        at[v as usize].push(s as u32);
+    }
+    at
+}
+
+/// Whether vertex `v` is on one feature line through it: two segments, not
+/// turning by more than the feature angle.
+fn on_one_line(
+    points: &[Point3],
+    segments: &[(u32, u32)],
+    vertex_segments: &[Vec<u32>],
+    v: usize,
+    cos_feature: f64,
+) -> bool {
+    let segs = &vertex_segments[v];
+    if segs.len() != 2 {
+        return false;
+    }
+    let other = |s: u32| {
+        let (a, b) = segments[s as usize];
+        if a as usize == v { b } else { a }
+    };
+    let p = points[v];
+    let d0 = unit(sub(points[other(segs[0]) as usize], p));
+    let d1 = unit(sub(points[other(segs[1]) as usize], p));
+    dot(d0, d1) < -cos_feature
 }
 
 /// A remeshed surface.
@@ -527,7 +675,6 @@ pub fn remesh(
 ) -> Result<Remeshed, RemeshError> {
     let soup =
         TriangleSoup::new(points, triangles).map_err(|e| RemeshError::Surface(e.to_string()))?;
-    let group = |t: usize| groups.get(t).copied().unwrap_or(0);
     let normals: Vec<Point3> = triangles
         .iter()
         .map(|t| {
@@ -555,44 +702,18 @@ pub fn remesh(
             }
         }
     }
+    if directed
+        .keys()
+        .any(|&(u, v)| !directed.contains_key(&(v, u)))
+    {
+        return Err(RemeshError::Surface("the surface is open".into()));
+    }
     let cos_feature = libm::cos(params.feature_degrees.to_radians());
-    let mut segments: Vec<(u32, u32)> = Vec::new();
-    let mut sorted: Vec<(&(u32, u32), &u32)> = directed.iter().collect();
-    sorted.sort_unstable();
-    for (&(u, v), &t) in sorted {
-        let Some(&s) = directed.get(&(v, u)) else {
-            return Err(RemeshError::Surface("the surface is open".into()));
-        };
-        if u < v {
-            let sharp = dot(normals[t as usize], normals[s as usize]) < cos_feature
-                || normals[t as usize] == [0.0; 3]
-                || normals[s as usize] == [0.0; 3];
-            if sharp || group(t as usize) != group(s as usize) {
-                segments.push((u, v));
-            }
-        }
-    }
-    let mut vertex_segments = vec![Vec::new(); points.len()];
-    for (s, &(u, v)) in segments.iter().enumerate() {
-        vertex_segments[u as usize].push(s as u32);
-        vertex_segments[v as usize].push(s as u32);
-    }
+    let segments = features(points, triangles, groups, params).segments;
+    let vertex_segments = vertex_segments(points.len(), &segments);
     // A vertex on one line through it, unless the line turns sharply there.
     let line: Vec<bool> = (0..points.len())
-        .map(|v| {
-            let segs = &vertex_segments[v];
-            if segs.len() != 2 {
-                return false;
-            }
-            let other = |s: u32| {
-                let (a, b) = segments[s as usize];
-                if a as usize == v { b } else { a }
-            };
-            let p = points[v];
-            let d0 = unit(sub(points[other(segs[0]) as usize], p));
-            let d1 = unit(sub(points[other(segs[1]) as usize], p));
-            dot(d0, d1) < -cos_feature
-        })
+        .map(|v| on_one_line(points, &segments, &vertex_segments, v, cos_feature))
         .collect();
     let input = Input {
         points,
@@ -1367,6 +1488,51 @@ mod tests {
         e.iter()
             .map(|&(a, b)| norm(sub(r.points[a as usize], r.points[b as usize])))
             .collect()
+    }
+
+    /// A box's feature lines: its 12 edges by angle and 8 corners; a face
+    /// diagonal forced in and an edge smoothed out; and a group boundary,
+    /// which smoothing leaves a feature.
+    #[test]
+    fn features_follow_the_angle_groups_and_overrides() {
+        let (p, f) = boxed([0.0; 3], [1.0; 3]);
+        let plain = features(&p, &f, &[], &RemeshParams::default());
+        assert_eq!(plain.segments.len(), 12);
+        assert!(plain.causes.iter().all(|&c| c == FeatureCause::Angle));
+        assert_eq!(plain.corners, (0..8).collect::<Vec<u32>>());
+        let params = RemeshParams {
+            // Either order: (3, 0) is the z = 0 face's diagonal.
+            forced_features: vec![(3, 0)],
+            forced_smooth: vec![(1, 0)],
+            ..RemeshParams::default()
+        };
+        let o = features(&p, &f, &[], &params);
+        let cause = |f: &Features, e: (u32, u32)| {
+            f.segments.iter().position(|&s| s == e).map(|i| f.causes[i])
+        };
+        assert_eq!(cause(&o, (0, 3)), Some(FeatureCause::Forced));
+        assert_eq!(cause(&o, (0, 1)), None);
+        assert_eq!((o.segments.len(), o.smoothed), (12, 1));
+        // Faces z = 0 (triangles 0 and 1) in a group of their own: edge
+        // (0, 1) is a group boundary and stays a feature.
+        let mut groups = vec![0; f.len()];
+        groups[0] = 1;
+        groups[1] = 1;
+        let g = features(&p, &f, &groups, &params);
+        assert_eq!(cause(&g, (0, 1)), Some(FeatureCause::Group));
+        assert_eq!(g.smoothed, 0);
+        // The remesher takes the overrides: the forced diagonal is kept as a
+        // line, so its midpoint region keeps vertices on it.
+        let r = remesh(&p, &f, &[], &|_| 0.2, &params).unwrap();
+        let on_diagonal = r
+            .points
+            .iter()
+            .filter(|q| q[2] == 0.0 && (q[0] - q[1]).abs() < 1e-12 && q[0] > 0.0 && q[0] < 1.0)
+            .count();
+        assert!(
+            on_diagonal >= 3,
+            "{on_diagonal} vertices on the forced diagonal"
+        );
     }
 
     #[test]

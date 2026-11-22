@@ -278,6 +278,11 @@
           "const": "QUAL_SUSPECT_SCALE"
         },
         {
+          "description": "A feature or smooth edge override took no effect",
+          "type": "string",
+          "const": "FEAT_OVERRIDE_IGNORED"
+        },
+        {
           "description": "Constrained Delaunay could not recover a facet",
           "type": "string",
           "const": "MESH_RECOVERY_FAILED"
@@ -352,6 +357,75 @@
           "type": "string",
           "const": "OUT_WRITE_FAILED"
         }
+      ]
+    },
+    "FeatureSummary": {
+      "description": "The feature lines of a part's surface: edges where it turns by more than\nthe feature angle, where OBJ groups meet, and those the user forced, as\nthe remesher keeps them. `features.vtp` holds the lines.",
+      "type": "object",
+      "properties": {
+        "angle_edges": {
+          "description": "Of them, edges turning by more than the angle.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "corners": {
+          "description": "Feature vertices not on one smooth line (they never move).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "curves": {
+          "description": "Chains of feature edges between corners (or closed loops).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "edges": {
+          "description": "Feature edges in all.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "feature_angle_degrees": {
+          "description": "The angle used, degrees.",
+          "type": "number",
+          "format": "double"
+        },
+        "forced_edges": {
+          "description": "Edges forced by `feature_edges`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "group_edges": {
+          "description": "Edges between faces of different OBJ groups (fill faces are a group\nof their own).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "length": {
+          "description": "Total length of the feature edges, in model units.",
+          "type": "number",
+          "format": "double"
+        },
+        "smoothed_edges": {
+          "description": "Edges `smooth_edges` turned smooth.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "feature_angle_degrees",
+        "edges",
+        "angle_edges",
+        "group_edges",
+        "forced_edges",
+        "smoothed_edges",
+        "corners",
+        "curves",
+        "length"
       ]
     },
     "InputInfo": {
@@ -441,6 +515,28 @@
           "format": "double",
           "default": 0.03
         },
+        "feature_angle": {
+          "description": "The feature angle, degrees: edges where the surface turns by more\nthan this are feature lines, which remeshing keeps and the report\nlists. Unset: 40° for remeshing and the report, 45° for the size\nfield's curvature term; set, both use it.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "feature_edges": {
+          "description": "Edges made feature lines whatever the angle, each a pair of 0-based\nindices into the parsed vertex list (as in report locations).",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
         "kernel": {
           "description": "The volume kernel tried first.",
           "$ref": "#/$defs/KernelChoice"
@@ -466,6 +562,20 @@
           "default": [],
           "items": {
             "type": "string"
+          }
+        },
+        "smooth_edges": {
+          "description": "Edges that are not feature lines although they turn by more than the\nfeature angle, as pairs like `feature_edges` (a group boundary stays\na feature line).",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "maxItems": 2,
+            "minItems": 2
           }
         },
         "strict": {
@@ -746,6 +856,17 @@
           },
           "maxItems": 2,
           "minItems": 2
+        },
+        "features": {
+          "description": "The feature lines of the repaired surface (the final one: the wrap,\nfor a wrapped part), present when the part was repaired.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FeatureSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "index": {
           "description": "1-based; `--parts` accepts this or the name.",

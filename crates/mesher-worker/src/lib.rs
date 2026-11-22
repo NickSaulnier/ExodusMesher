@@ -13,8 +13,8 @@ use std::path::Path;
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
 use mesher_core::model::SurfaceModel;
 use mesher_core::protocol::{
-    Job, MESH_EXODUS_FILE, MESH_MSH_FILE, MESH_VTU_FILE, OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE,
-    WorkerMessage,
+    FEATURES_FILE, Job, MESH_EXODUS_FILE, MESH_MSH_FILE, MESH_VTU_FILE, OVERLAY_FILE,
+    REPAIRED_FILE, REPORT_FILE, WorkerMessage,
 };
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::volume::{assemble, mesh_parts};
@@ -150,10 +150,35 @@ fn process(
                 .unwrap_or(r)
         })
         .collect();
-    for r in &repaired {
+    // The feature lines of each final surface.
+    let features: Vec<mesher_core::features::PartFeatures> = repaired
+        .iter()
+        .map(|r| mesher_core::features::part_features(model, r, &job.config))
+        .collect();
+    for (r, f) in repaired.iter().zip(&features) {
         if let Some(p) = report.parts.get_mut(r.part) {
             p.repair = Some(r.summary);
+            p.features = Some(f.summary(&r.points));
         }
+    }
+    if !repaired.is_empty() {
+        let causes: Vec<Vec<u8>> = features
+            .iter()
+            .map(mesher_core::features::PartFeatures::cause_codes)
+            .collect();
+        let lines: Vec<mesher_io::vtp::FeatureLines<'_>> = repaired
+            .iter()
+            .zip(&features)
+            .zip(&causes)
+            .map(|((r, f), c)| mesher_io::vtp::FeatureLines {
+                part: r.part as u32 + 1,
+                points: &r.points,
+                segments: &f.features.segments,
+                causes: c,
+                curves: &f.curves,
+            })
+            .collect();
+        files.push((FEATURES_FILE, mesher_io::vtp::features_vtp(&lines)));
     }
     if !repaired.is_empty() {
         let surfaces: Vec<mesher_io::NamedSurface<'_>> = repaired

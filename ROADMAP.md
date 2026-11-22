@@ -153,6 +153,8 @@ About 45% of Thingi10k models self-intersect and 29% have several components; th
 
 ## Phase 2 · Surfaces and formats
 
+Milestones 18 to 21 moved to `PLAN.md` (Phase 8) when Milestone 18 started on Nov 22, 2026, with Phase 1's exit criterion deferred by decision; the descriptions here stay as the outline.
+
 **Goal.** Meshes that respect sharp features and named boundaries, size themselves sensibly, and load in the major open solvers.
 
 **Phase exit criteria.** Sharp edges and named patches survive remeshing on the synthetic suite and a set of public CAD-derived OBJ files; neighbouring element sizes stay within the gradation limit; output passes OpenFOAM's `checkMesh` with no errors.

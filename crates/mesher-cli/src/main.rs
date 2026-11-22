@@ -29,7 +29,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Mesh an OBJ file, or replay a project file (.toml) saved by the GUI.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Print the JSON schema of report.json.
     Schema,
 }
@@ -81,6 +81,12 @@ struct RunArgs {
     /// 2α [default: 1].
     #[arg(long, value_parser = positive)]
     wrap_alpha: Option<f64>,
+    /// The feature angle in degrees: edges where the surface turns by more
+    /// than this are feature lines, kept by remeshing and listed in the
+    /// report and features.vtp [default: 40 for remeshing, 45 for the size
+    /// field's curvature term].
+    #[arg(long, value_parser = angle)]
+    feature_angle: Option<f64>,
     /// Kill the worker after this many seconds.
     #[arg(long, default_value_t = 3600.0, value_parser = positive)]
     timeout: f64,
@@ -105,7 +111,7 @@ fn main() -> ExitCode {
             print!("{}", Report::json_schema());
             0
         }
-        Command::Run(args) => run(args),
+        Command::Run(args) => run(*args),
     };
     ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX))
 }
@@ -154,6 +160,9 @@ fn run(args: RunArgs) -> i32 {
     if let Some(a) = args.wrap_alpha {
         c.wrap_alpha = a;
     }
+    if let Some(a) = args.feature_angle {
+        c.feature_angle = Some(a);
+    }
     let worker = args
         .worker
         .unwrap_or_else(mesher_client::default_worker_path);
@@ -195,6 +204,13 @@ fn positive(text: &str) -> Result<f64, String> {
     match text.parse::<f64>() {
         Ok(s) if s > 0.0 && s.is_finite() => Ok(s),
         _ => Err("expected a positive number".to_owned()),
+    }
+}
+
+fn angle(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(a) if a > 0.0 && a < 180.0 => Ok(a),
+        _ => Err("expected an angle between 0 and 180 degrees".to_owned()),
     }
 }
 

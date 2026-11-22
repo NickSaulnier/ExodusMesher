@@ -17,6 +17,9 @@ pub const OVERLAY_FILE: &str = "defects.vtp";
 /// Name of the repaired surface the worker writes after repair.
 pub const REPAIRED_FILE: &str = "repaired.obj";
 
+/// Name of the feature lines of the repaired surfaces.
+pub const FEATURES_FILE: &str = "features.vtp";
+
 /// Names of the volume mesh files.
 pub const MESH_EXODUS_FILE: &str = "mesh.exo";
 pub const MESH_MSH_FILE: &str = "mesh.msh";

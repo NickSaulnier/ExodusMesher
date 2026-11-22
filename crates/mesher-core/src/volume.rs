@@ -88,6 +88,16 @@ pub struct MeshOutcome {
     pub wrapped: Vec<RepairedPart>,
 }
 
+/// The size field's parameters at element size `h`: the feature angle, when
+/// set, for its curvature term too.
+fn sizing_params(h: f64, config: &JobConfig) -> SizingParams {
+    let mut p = SizingParams::for_size(h);
+    if let Some(a) = config.feature_angle {
+        p.feature_degrees = a;
+    }
+    p
+}
+
 /// Mesh every repaired part.
 pub fn mesh_parts(
     model: &SurfaceModel,
@@ -95,6 +105,7 @@ pub fn mesh_parts(
     config: &JobConfig,
     log: &mut RecordLog,
 ) -> Result<MeshOutcome, InternalError> {
+    crate::features::record_ignored_overrides(model, repaired, config, log);
     let mut outcome = MeshOutcome::default();
     for r in repaired {
         mesh_part(model, r, config, log, &mut outcome)?;
@@ -507,7 +518,7 @@ fn stuffing_candidate(
     let levels = if config.uniform_size {
         0
     } else {
-        let field = SizeField::from_surface(&r.points, &r.faces, &SizingParams::for_size(h));
+        let field = SizeField::from_surface(&r.points, &r.faces, &sizing_params(h, config));
         if field.is_uniform() {
             0
         } else {
@@ -790,18 +801,11 @@ fn remeshed(
     let field = if config.uniform_size {
         SizeField::uniform(h)
     } else {
-        SizeField::from_surface(&r.points, &r.faces, &SizingParams::for_size(h))
+        SizeField::from_surface(&r.points, &r.faces, &sizing_params(h, config))
     };
     // Group boundaries (side sets) stay feature lines.
-    let groups: Vec<u32> = r
-        .face_origin
-        .iter()
-        .map(|o| {
-            o.and_then(|t| model.polygon_of(t))
-                .and_then(|p| p.group)
-                .unwrap_or(u32::MAX)
-        })
-        .collect();
+    let groups = crate::features::face_groups(model, r);
+    let base = crate::features::remesh_params(r, config);
     // Snapping and free small collapses merge the narrow strips along
     // feature edges, which otherwise leave needles. A remeshed surface that
     // does not mesh (most often one that crosses itself) is remeshed again
@@ -836,7 +840,7 @@ fn remeshed(
             snap_strips,
             free_small_collapses,
             check_crossings,
-            ..RemeshParams::default()
+            ..base.clone()
         };
         match remeshed_with(model, r, h, config, &field, &groups, &params) {
             Ok((remeshing, c)) => {
@@ -951,7 +955,7 @@ fn conformal(
     // part is thin.
     let prof_size = mesher_tet::prof::scope("volume::conformal/size_field");
     let size = (!config.uniform_size)
-        .then(|| SizeField::from_surface(&r.points, &r.faces, &SizingParams::for_size(h)))
+        .then(|| SizeField::from_surface(&r.points, &r.faces, &sizing_params(h, config)))
         .filter(|f| !f.is_uniform());
     drop(prof_size);
     let min_size = size.as_ref().map(SizeField::min);

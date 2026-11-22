@@ -33,6 +33,9 @@ The same input and settings give a byte-identical report.
 | `no_remesh` | Present (true) when remeshing a part's surface was turned off |
 | `wrap_alpha` | The wrap's α for repair rung 3, relative to `element_size` (default 1): openings narrower than about 2α are closed |
 | `stuffing_only` | Present (true) when the client retried a worker that timed out or ran out of memory with the stuffing fallback only |
+| `feature_angle` | Present when set (`--feature-angle`): the feature angle in degrees, between 0 and 180. Edges where the surface turns by more than it are feature lines, which remeshing keeps (their vertices move only along them, corners never) and `features` lists. Unset, remeshing and `features` use 40° and the size field's curvature term 45°; set, all use it |
+| `feature_edges` | Present when set (project file only): edges made feature lines whatever the angle, each `[a, b]`, 0-based indices into the parsed vertex list as in record locations; every repaired edge between vertices that came from `a` and `b` counts. One that matches no edge of a selected part is `FEAT_OVERRIDE_IGNORED` |
+| `smooth_edges` | Present when set (project file only): edges, as for `feature_edges`, that are not feature lines although they turn by more than the angle. A group boundary stays a feature line (`FEAT_OVERRIDE_IGNORED`) |
 
 ## Parts
 
@@ -48,6 +51,7 @@ Each part is an OBJ object (`o`), or in a file without objects an OBJ group (`g`
 | `selected` | Whether the job meshed it |
 | `repair` | `faces_before`, `faces_after`, `vertices_before`, `vertices_after`, and `gate_passed`: whether the repaired surface is a valid closed solid; `rung`: the highest repair rung that changed the surface (1 for local fixes or none, 2 when its intersections were resolved, 3 when it was wrapped as the last resort); `components_before`, `components_after`, `euler_before`, `euler_after`: the surface's connected pieces and Euler characteristic (vertices − edges + faces, 2 per sphere-like shell, 0 for a ring) entering repair and after it |
 | `mesh` | Present when a volume mesh was attempted; see [Mesh quality](#mesh-quality) |
+| `features` | Present when the part was repaired: the feature lines of its final surface (the wrap, for a wrapped part), as the remesher keeps them. `feature_angle_degrees` (the angle used); `edges` in all, of them `angle_edges` (turning by more than the angle, or with a degenerate face), `group_edges` (between faces of different OBJ groups; fill faces are a group of their own) and `forced_edges` (`feature_edges`); `smoothed_edges` (`smooth_edges` that took effect); `corners` (feature vertices not on one smooth line: never moved); `curves` (chains of feature edges between corners, or closed loops); `length` (total, in model units). The lines are in `features.vtp` |
 
 ## Records
 
@@ -141,6 +145,7 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `INT_SHELL_OVERLAP` | error | Two shells of one part intersect | Resolve (repair rung 2) for a closed part, warning; else error, triggers fallback (stuffing, then the wrap of repair rung 3) |
 | `QUAL_SLIVER_FACE` | warning | Minimum angle below threshold | Remesh, warning |
 | `QUAL_SUSPECT_SCALE` | info | Bounding box suggests wrong units | Info; tolerances are relative |
+| `FEAT_OVERRIDE_IGNORED` | warning | A feature or smooth edge override took no effect | Warning: the override is ignored |
 | `MESH_RECOVERY_FAILED` | error | Constrained Delaunay could not recover a facet | Error, triggers fallback (stuffing, then the wrap of repair rung 3) |
 | `MESH_BUDGET_EXCEEDED` | error | Steiner-point or element budget hit | Error, triggers fallback |
 | `GEO_CAPACITY_EXCEEDED` | fatal | Part too large for 32-bit vertex and face indices | Fatal |
@@ -205,4 +210,5 @@ Beside `report.json`, a run writes:
 - `mesh.msh` (Gmsh 4) and `mesh.vtu` (VTK), the same mesh.
 - `repaired.obj`: the repaired surface.
 - `defects.vtp`: the findings' faces, edges and vertices, for ParaView.
+- `features.vtp`: the feature lines of every repaired part (as `features` counts them), one line cell per feature edge, with cell arrays `part` (1-based), `cause` (0 the angle, 1 a group boundary, 2 forced) and `curve` (within the part); written whenever a part was repaired.
 - `project.toml`, when the GUI ran the job: the input, output directory and settings, for `mesher run project.toml`.

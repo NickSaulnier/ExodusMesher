@@ -101,6 +101,7 @@ defect_codes! {
     IntShellOverlap = "INT_SHELL_OVERLAP", Error, "Two shells of one part intersect";
     QualSliverFace = "QUAL_SLIVER_FACE", Warning, "Minimum angle below threshold";
     QualSuspectScale = "QUAL_SUSPECT_SCALE", Info, "Bounding box suggests wrong units";
+    FeatOverrideIgnored = "FEAT_OVERRIDE_IGNORED", Warning, "A feature or smooth edge override took no effect";
     MeshRecoveryFailed = "MESH_RECOVERY_FAILED", Error, "Constrained Delaunay could not recover a facet";
     MeshBudgetExceeded = "MESH_BUDGET_EXCEEDED", Error, "Steiner-point or element budget hit";
     GeoCapacityExceeded = "GEO_CAPACITY_EXCEEDED", Fatal, "Part too large for 32-bit vertex and face indices";
@@ -577,6 +578,21 @@ pub struct JobConfig {
     /// The wrap's α (repair rung 3: openings narrower than about 2α are
     /// closed), relative to the element size.
     pub wrap_alpha: f64,
+    /// The feature angle, degrees: edges where the surface turns by more
+    /// than this are feature lines, which remeshing keeps and the report
+    /// lists. Unset: 40° for remeshing and the report, 45° for the size
+    /// field's curvature term; set, both use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_angle: Option<f64>,
+    /// Edges made feature lines whatever the angle, each a pair of 0-based
+    /// indices into the parsed vertex list (as in report locations).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feature_edges: Vec<[u32; 2]>,
+    /// Edges that are not feature lines although they turn by more than the
+    /// feature angle, as pairs like `feature_edges` (a group boundary stays
+    /// a feature line).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub smooth_edges: Vec<[u32; 2]>,
 }
 
 /// The volume kernel tried first; the rest of the fallback ladder follows it.
@@ -612,7 +628,18 @@ impl Default for JobConfig {
             no_remesh: false,
             kernel: KernelChoice::Conformal,
             wrap_alpha: 1.0,
+            feature_angle: None,
+            feature_edges: Vec::new(),
+            smooth_edges: Vec::new(),
         }
+    }
+}
+
+impl JobConfig {
+    /// The remesher's feature angle, degrees.
+    #[must_use]
+    pub fn remesh_feature_degrees(&self) -> f64 {
+        self.feature_angle.unwrap_or(40.0)
     }
 }
 
@@ -710,6 +737,36 @@ pub struct PartSummary {
     /// Present when a volume mesh was attempted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh: Option<MeshSummary>,
+    /// The feature lines of the repaired surface (the final one: the wrap,
+    /// for a wrapped part), present when the part was repaired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<FeatureSummary>,
+}
+
+/// The feature lines of a part's surface: edges where it turns by more than
+/// the feature angle, where OBJ groups meet, and those the user forced, as
+/// the remesher keeps them. `features.vtp` holds the lines.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FeatureSummary {
+    /// The angle used, degrees.
+    pub feature_angle_degrees: f64,
+    /// Feature edges in all.
+    pub edges: u64,
+    /// Of them, edges turning by more than the angle.
+    pub angle_edges: u64,
+    /// Edges between faces of different OBJ groups (fill faces are a group
+    /// of their own).
+    pub group_edges: u64,
+    /// Edges forced by `feature_edges`.
+    pub forced_edges: u64,
+    /// Edges `smooth_edges` turned smooth.
+    pub smoothed_edges: u64,
+    /// Feature vertices not on one smooth line (they never move).
+    pub corners: u64,
+    /// Chains of feature edges between corners (or closed loops).
+    pub curves: u64,
+    /// Total length of the feature edges, in model units.
+    pub length: f64,
 }
 
 /// The volume mesh of one part and its quality.

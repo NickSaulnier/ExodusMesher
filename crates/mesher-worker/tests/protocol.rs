@@ -389,6 +389,36 @@ fn cube_end_to_end_writes_a_valid_exodus_mesh() {
     let exo = std::fs::read(dir.path().join("mesh.exo")).unwrap();
     assert_eq!(&exo[..4], b"CDF\x02", "64-bit-offset netCDF");
 
+    // Its feature lines: the cube's 12 edges, 8 corners, in the report and
+    // features.vtp.
+    let features = report.parts[0].features.unwrap();
+    assert_eq!(
+        (features.edges, features.angle_edges, features.corners),
+        (12, 12, 8)
+    );
+    assert!((features.length - 12.0).abs() < 1e-12);
+    let vtp = std::fs::read_to_string(dir.path().join("features.vtp")).unwrap();
+    assert!(vtp.contains(r#"NumberOfLines="12""#), "{vtp}");
+
+    // Overrides: an edge smoothed, and a pair that is no edge (opposite
+    // corners), which is reported and changes nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cube.obj"), dir.path());
+    job.config.smooth_edges = vec![[1, 0]];
+    job.config.feature_edges = vec![[0, 6]];
+    let run = run_job(&job, dir.path());
+    let report = run.report_file.unwrap();
+    let features = report.parts[0].features.unwrap();
+    assert_eq!((features.edges, features.smoothed_edges), (11, 1));
+    let ignored: Vec<_> = report
+        .records
+        .iter()
+        .filter(|r| r.code == DefectCode::FeatOverrideIgnored)
+        .collect();
+    assert_eq!(ignored.len(), 1, "{ignored:?}");
+    assert_eq!(ignored[0].location.vertices, vec![0, 6]);
+    assert_eq!(ignored[0].severity, Severity::Warning);
+
     // Strict mode on a clean cube: the conformal mesh is all it needs.
     let dir = tempfile::tempdir().unwrap();
     let mut job = job_for(&fixture("cube.obj"), dir.path());
