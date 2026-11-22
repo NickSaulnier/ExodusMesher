@@ -40,6 +40,15 @@ pub struct RemeshParams {
     /// strips beside long feature edges, whose edges are already near it,
     /// never merge and leave needles along them.
     pub free_small_collapses: bool,
+    /// Merge narrow strips whose two sides' vertices do not line up: a
+    /// feature vertex closer than `small_feature` of the size to a feature
+    /// edge of another line is snapped onto it (the edge split at its foot,
+    /// then the vertex collapsed into the new vertex), and a corner merges
+    /// into another corner closer than that along any edge, not only a
+    /// feature edge. A collapse merging two lines may not make a triangle's
+    /// smallest angle worse once it is under 1° (the merged lines can
+    /// otherwise leave a flat triangle on them).
+    pub snap_strips: bool,
     /// Refuse any operation that would make the surface cross itself: each
     /// triangle it would make is tested exactly against the live triangles
     /// near it. The input must not cross itself; then neither does the
@@ -57,6 +66,7 @@ impl Default for RemeshParams {
             max_triangles: 2_000_000,
             small_feature: 0.1,
             free_small_collapses: true,
+            snap_strips: true,
             check_crossings: false,
         }
     }
@@ -733,12 +743,17 @@ pub fn remesh(
             }
             let h = target(&m, u, v);
             let small = params.small_feature * h;
-            let free = params.free_small_collapses;
-            if !(try_collapse(&mut m, u, v, h, small, free)
-                || try_collapse(&mut m, v, u, h, small, free))
+            let rules = Rules::of(params);
+            if !(try_collapse(&mut m, u, v, h, small, rules)
+                || try_collapse(&mut m, v, u, h, small, rules))
             {
                 continue;
             }
+        }
+
+        // 2b. Snap feature vertices onto the other side of narrow strips.
+        if params.snap_strips {
+            snap_strips(&mut m, &input, size, params);
         }
 
         // 3. Flip edges to Delaunay.
@@ -764,12 +779,31 @@ pub fn remesh(
 /// see `RemeshParams::free_small_collapses`). A corner collapses only into another corner along a
 /// feature edge shorter than `small`; a feature vertex along its line, or
 /// into a feature vertex or corner of another line closer than `small`.
-fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64, free: bool) -> bool {
+/// The collapse rules `RemeshParams` turns on.
+#[derive(Debug, Clone, Copy)]
+struct Rules {
+    /// `free_small_collapses`.
+    free: bool,
+    /// `snap_strips`.
+    strips: bool,
+}
+
+impl Rules {
+    fn of(params: &RemeshParams) -> Rules {
+        Rules {
+            free: params.free_small_collapses,
+            strips: params.snap_strips,
+        }
+    }
+}
+
+fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64, rules: Rules) -> bool {
+    let Rules { free, strips } = rules;
     let (kx, ky) = (m.kind[x as usize], m.kind[y as usize]);
     match kx {
         Kind::Corner => {
             if ky != Kind::Corner
-                || !m.feature.contains(&key(x, y))
+                || !(strips || m.feature.contains(&key(x, y)))
                 || norm(sub(m.pos[x as usize], m.pos[y as usize])) >= small
             {
                 return false;
@@ -787,6 +821,9 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64, free: bool) ->
         }
         Kind::Smooth => {}
     }
+    // A collapse merging a feature too small to mesh (two corners, or two
+    // feature lines).
+    let merge = kx == Kind::Corner || (kx == Kind::Feature && !m.feature.contains(&key(x, y)));
     let edge = m.edge_tris(x, y);
     if edge.len() != 2 {
         return false;
@@ -829,6 +866,16 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64, free: bool) ->
         if dot(unit(old), unit(new)) < 0.5 || norm(new) <= 0.0 {
             return false;
         }
+        if strips && merge {
+            // No needle made worse: a triangle whose smallest angle falls
+            // below 1° keeps at least its old one (merging two feature lines
+            // can otherwise leave a flat triangle with all three edges on
+            // the merged line).
+            let floor = 1f64.to_radians().min(smallest_angle(m, tri));
+            if smallest_angle_of(moved) < floor {
+                return false;
+            }
+        }
         for &w in &tri {
             if w != x && norm(sub(m.pos[w as usize], py)) > longest {
                 return false;
@@ -845,7 +892,7 @@ fn try_collapse(m: &mut Mesh, x: u32, y: u32, h: f64, small: f64, free: bool) ->
         return false;
     }
     // Do it.
-    if kx == Kind::Corner || (kx == Kind::Feature && !m.feature.contains(&key(x, y))) {
+    if merge {
         m.merged += 1;
     }
     for &t in &edge {
@@ -993,7 +1040,11 @@ fn flip_crosses(m: &Mesh, f: &Flip) -> bool {
 
 /// The smallest angle of the triangle `tri`, radians.
 fn smallest_angle(m: &Mesh, tri: [u32; 3]) -> f64 {
-    let p = tri.map(|w| m.pos[w as usize]);
+    smallest_angle_of(tri.map(|w| m.pos[w as usize]))
+}
+
+/// The smallest angle of the triangle with corners `p`, radians.
+fn smallest_angle_of(p: [Point3; 3]) -> f64 {
     (0..3)
         .map(|k| {
             let (d0, d1) = (
@@ -1184,6 +1235,86 @@ fn finish(m: &Mesh) -> Result<Remeshed, RemeshError> {
     })
 }
 
+/// Snap feature vertices onto a feature edge of another line closer than
+/// `small_feature` of the size: split the edge at the vertex's foot on the
+/// input line, then collapse the vertex into it.
+fn snap_strips(
+    m: &mut Mesh,
+    input: &Input<'_>,
+    size: &dyn Fn(Point3) -> f64,
+    params: &RemeshParams,
+) {
+    let count = m.tris.len();
+    for t in 0..count {
+        if !m.alive[t] {
+            continue;
+        }
+        let tri = m.tris[t];
+        for r in 0..3 {
+            let (x, a, b) = (tri[r], tri[(r + 1) % 3], tri[(r + 2) % 3]);
+            if m.kind[x as usize] != Kind::Feature
+                || !m.feature.contains(&key(a, b))
+                || m.feature.contains(&key(x, a))
+                || m.feature.contains(&key(x, b))
+            {
+                continue;
+            }
+            let (pa, pb, px) = (m.pos[a as usize], m.pos[b as usize], m.pos[x as usize]);
+            let ab = sub(pb, pa);
+            let l2 = dot(ab, ab);
+            if l2.is_nan() || l2 <= 0.0 {
+                continue;
+            }
+            let l = libm::sqrt(l2);
+            let st = dot(sub(px, pa), ab) / l2;
+            let q = add(pa, scale(ab, st));
+            let h = size(q);
+            let small = params.small_feature * h;
+            if norm(sub(px, q)) >= small || st * l < small || (1.0 - st) * l < small {
+                continue;
+            }
+            let edge = m.edge_tris(a, b);
+            if edge.len() != 2 {
+                continue;
+            }
+            let starts = if m.kind[a as usize] == Kind::Feature {
+                vec![m.home[a as usize]]
+            } else if m.kind[b as usize] == Kind::Feature {
+                vec![m.home[b as usize]]
+            } else {
+                input.vertex_segments[a as usize].clone()
+            };
+            let (p, seg) = input.project_feature(q, &starts);
+            let i = m.pos.len() as u32;
+            let made: Vec<[u32; 3]> = edge
+                .iter()
+                .flat_map(|&e| {
+                    let tri = m.tris[e as usize];
+                    let r = (0..3)
+                        .find(|&k| key(tri[k], tri[(k + 1) % 3]) == key(a, b))
+                        .unwrap_or(0);
+                    let (u, v, w) = (tri[r], tri[(r + 1) % 3], tri[(r + 2) % 3]);
+                    [[u, i, w], [i, v, w]]
+                })
+                .collect();
+            if m.crosses(
+                &made,
+                &|w| if w == i { p } else { m.pos[w as usize] },
+                &edge,
+            ) {
+                continue;
+            }
+            m.pos.push(p);
+            m.kind.push(Kind::Feature);
+            m.home.push(seg);
+            m.vt.push(Vec::new());
+            m.split(a, b, i);
+            try_collapse(m, x, i, h, small, Rules::of(params));
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -1355,6 +1486,15 @@ mod tests {
     /// A flat 5 × 5 grid with unit spacing, each square split along its
     /// rising diagonal, the node at (3, 2) moved to (2.01, 2): the edge from
     /// it to the node at (2, 2) is a needle's short edge.
+    const FREE: Rules = Rules {
+        free: true,
+        strips: false,
+    };
+    const STRICT: Rules = Rules {
+        free: false,
+        strips: false,
+    };
+
     fn needle_grid() -> Mesh {
         let (mut pos, tris) = grid_sheet(0.0, 0);
         pos[13] = [2.01, 2.0, 0.0];
@@ -1432,7 +1572,7 @@ mod tests {
         let (mut pos, tris) = grid_sheet(0.0, 0);
         pos[13] = [2.01, 2.0, 0.0];
         let mut m = mesh_of(pos, tris, 0.5);
-        assert!(try_collapse(&mut m, 12, 13, 1.0, 0.1, true));
+        assert!(try_collapse(&mut m, 12, 13, 1.0, 0.1, FREE));
         for (u, v) in m.edges() {
             if let Some(f) = flippable(&m, u, v) {
                 flip(&mut m, &f);
@@ -1469,11 +1609,11 @@ mod tests {
     fn a_needle_collapses_when_small_collapses_are_free() {
         let (x, y) = (12, 13);
         let mut m = needle_grid();
-        assert!(!try_collapse(&mut m, x, y, 1.0, 0.1, false));
+        assert!(!try_collapse(&mut m, x, y, 1.0, 0.1, STRICT));
         assert_eq!(m.vt[x as usize].len(), 6);
         // Not free when the edge is not small.
-        assert!(!try_collapse(&mut m, x, y, 1.0, 0.005, true));
-        assert!(try_collapse(&mut m, x, y, 1.0, 0.1, true));
+        assert!(!try_collapse(&mut m, x, y, 1.0, 0.005, FREE));
+        assert!(try_collapse(&mut m, x, y, 1.0, 0.1, FREE));
         assert!(m.vt[x as usize].is_empty());
         assert_eq!(m.alive.iter().filter(|&&a| a).count(), 30);
         assert_eq!(m.merged, 0);
@@ -1641,6 +1781,131 @@ mod tests {
             remesh(&p, &f, &[], &|_| 0.2, &RemeshParams::default()),
             Err(RemeshError::Surface(_))
         ));
+    }
+
+    /// A strip 0.05 wide between two feature lines (y = 0 and y = 0.05)
+    /// whose vertices sit half a spacing apart, so no vertex is near one
+    /// across: a vertex of one line is snapped onto the other, no triangle
+    /// turns over, and every vertex added lies on a line.
+    #[test]
+    fn a_strip_with_offset_sides_is_snapped_shut() {
+        let w = 0.05;
+        // Rows: d (y = -1, x = 0..3), a (y = 0, x = 0..3, the lower line),
+        // b (y = w, x = 0.5..2.5, the upper line), c (y = 1, x = 0.5..2.5).
+        let mut pos: Vec<Point3> = Vec::new();
+        let d: Vec<u32> = (0..4)
+            .map(|i| {
+                pos.push([f64::from(i), -1.0, 0.0]);
+                pos.len() as u32 - 1
+            })
+            .collect();
+        let a: Vec<u32> = (0..4)
+            .map(|i| {
+                pos.push([f64::from(i), 0.0, 0.0]);
+                pos.len() as u32 - 1
+            })
+            .collect();
+        let b: Vec<u32> = (0..3)
+            .map(|i| {
+                pos.push([f64::from(i) + 0.5, w, 0.0]);
+                pos.len() as u32 - 1
+            })
+            .collect();
+        let c: Vec<u32> = (0..3)
+            .map(|i| {
+                pos.push([f64::from(i) + 0.5, 1.0, 0.0]);
+                pos.len() as u32 - 1
+            })
+            .collect();
+        let mut tris = Vec::new();
+        for i in 0..3 {
+            tris.push([d[i], d[i + 1], a[i + 1]]);
+            tris.push([d[i], a[i + 1], a[i]]);
+        }
+        for i in 0..3 {
+            tris.push([a[i], a[i + 1], b[i]]);
+            if i < 2 {
+                tris.push([a[i + 1], b[i + 1], b[i]]);
+            }
+        }
+        for i in 0..2 {
+            tris.push([b[i], b[i + 1], c[i + 1]]);
+            tris.push([b[i], c[i + 1], c[i]]);
+        }
+        // The input: the same patch, its two lines as feature segments.
+        let mut segments: Vec<(u32, u32)> = Vec::new();
+        for i in 0..3 {
+            segments.push((a[i], a[i + 1]));
+        }
+        for i in 0..2 {
+            segments.push((b[i], b[i + 1]));
+        }
+        let mut vertex_segments = vec![Vec::new(); pos.len()];
+        for (s, &(u, v)) in segments.iter().enumerate() {
+            vertex_segments[u as usize].push(s as u32);
+            vertex_segments[v as usize].push(s as u32);
+        }
+        let mut vertex_tris = vec![Vec::new(); pos.len()];
+        for (t, tri) in tris.iter().enumerate() {
+            for &v in tri {
+                vertex_tris[v as usize].push(t as u32);
+            }
+        }
+        let line: Vec<bool> = (0..pos.len())
+            .map(|v| vertex_segments[v].len() == 2)
+            .collect();
+        let input = Input {
+            points: &pos,
+            triangles: &tris,
+            normals: vec![[0.0, 0.0, 1.0]; tris.len()],
+            bvh: Bvh::new(TriangleSoup::new(&pos, &tris).unwrap()),
+            vertex_tris,
+            segments: segments.clone(),
+            vertex_segments: vertex_segments.clone(),
+            line: line.clone(),
+        };
+        let mut m = mesh_of(pos.clone(), tris.clone(), 0.0);
+        for (s, &(u, v)) in segments.iter().enumerate() {
+            m.feature.insert(key(u, v));
+            for x in [u, v] {
+                m.kind[x as usize] = if line[x as usize] {
+                    Kind::Feature
+                } else {
+                    Kind::Corner
+                };
+                m.home[x as usize] = s as u32;
+            }
+        }
+        snap_strips(&mut m, &input, &|_| 1.0, &RemeshParams::default());
+        let live: Vec<[u32; 3]> = (0..m.tris.len())
+            .filter(|&t| m.alive[t])
+            .map(|t| m.tris[t])
+            .collect();
+        // A line vertex between two others is gone, merged onto the other
+        // line.
+        assert!(
+            [a[1], a[2], b[1]]
+                .iter()
+                .any(|&v| m.vt[v as usize].is_empty()),
+            "nothing snapped"
+        );
+        assert!(m.merged >= 1);
+        for t in &live {
+            let [p0, p1, p2] = t.map(|v| m.pos[v as usize]);
+            let n = normal(p0, p1, p2);
+            assert!(n[2] > 0.0, "triangle {t:?} turned over or flat: {n:?}");
+        }
+        // Every vertex added lies on a line.
+        for v in pos.len()..m.pos.len() {
+            if !m.vt[v].is_empty() {
+                let y = m.pos[v][1];
+                assert!(
+                    y.abs() < 1e-12 || (y - w).abs() < 1e-12,
+                    "vertex {v} at {:?}",
+                    m.pos[v]
+                );
+            }
+        }
     }
 
     /// Two feature lines leave one corner 3° apart (the two walls of a thin

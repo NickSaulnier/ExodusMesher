@@ -746,9 +746,9 @@ struct Remeshing {
     /// Features too small to mesh that were merged away (each moves the
     /// surface by at most a tenth of the local size).
     merged_small_features: usize,
-    /// Why the earlier remeshings failed, when this one is a retry: the
-    /// record's key for each, and the reason.
-    retried: Vec<(&'static str, String)>,
+    /// The other remeshings tried: each rung's name and why it was not
+    /// kept (it did not mesh, or its worst cell was worse).
+    retried: Vec<String>,
 }
 
 impl Remeshing {
@@ -757,8 +757,8 @@ impl Remeshing {
         if self.merged_small_features > 0 {
             rec = rec.measured("merged_small_features", self.merged_small_features as u64);
         }
-        for (key, reason) in self.retried {
-            rec = rec.measured(key, reason);
+        if !self.retried.is_empty() {
+            rec = rec.measured("other_remeshings", self.retried);
         }
         rec
     }
@@ -786,50 +786,69 @@ fn remeshed(
                 .unwrap_or(u32::MAX)
         })
         .collect();
-    // Free small collapses merge the narrow strips along long feature
-    // edges, which otherwise leave needles. A remeshed surface that does
-    // not mesh (most often one that crosses itself) is remeshed again with
-    // every operation checked against crossing, and then, if that fails
-    // too, as before free small collapses. The checks refuse moves that
-    // later passes would undo, so they are not the first attempt: on the
-    // subsets they lost as many models as they won.
-    let ladder: [(Option<&'static str>, &str, bool, bool); 3] = [
-        (Some("unchecked_remesh_failed"), "", true, false),
-        (
-            Some("checked_remesh_failed"),
-            "; with crossing checks: ",
-            true,
-            true,
-        ),
-        (None, "; without free small collapses: ", false, false),
+    // Snapping and free small collapses merge the narrow strips along
+    // feature edges, which otherwise leave needles. A remeshed surface that
+    // does not mesh (most often one that crosses itself) is remeshed again
+    // with every operation checked against crossing, then with each of
+    // those merges turned off in turn, back to the remesher as it was. Each
+    // rung only runs when the one before did not mesh, so a model that
+    // meshed on an earlier remesher still does. The checks refuse moves
+    // that later passes would undo, so they are never the first attempt:
+    // on the subsets they lost as many models as they won.
+    let ladder: [(&str, bool, bool, bool); 5] = [
+        // (name, snap strips, free small collapses, check crossings)
+        ("snapped", true, true, false),
+        ("snapped, checked", true, true, true),
+        ("free collapses", false, true, false),
+        ("free collapses, checked", false, true, true),
+        ("plain", false, false, false),
     ];
-    let mut retried = Vec::new();
-    let mut reasons = String::new();
-    for (key, label, free, checked) in ladder {
-        match remeshed_with(model, r, h, config, &field, &groups, free, checked) {
+    // A snapped surface that meshes with cells far beyond the limits
+    // (`FAR_WORST_CELL`) is compared with the first unsnapped one that
+    // meshes: on a few models snapping leaves worse cells than it removes.
+    // The better of the two is kept.
+    let mut tried: Vec<String> = Vec::new();
+    let mut best: Option<(f64, usize, Remeshing, Candidate)> = None;
+    for (name, snap_strips, free_small_collapses, check_crossings) in ladder {
+        if best.is_some() && snap_strips {
+            continue;
+        }
+        let params = RemeshParams {
+            snap_strips,
+            free_small_collapses,
+            check_crossings,
+            ..RemeshParams::default()
+        };
+        match remeshed_with(model, r, h, config, &field, &groups, &params) {
             Ok((remeshing, c)) => {
-                return Ok((
-                    Remeshing {
-                        retried,
-                        ..remeshing
-                    },
-                    c,
-                ));
-            }
-            Err(reason) => {
-                reasons.push_str(label);
-                reasons.push_str(&reason);
-                if let Some(key) = key {
-                    retried.push((key, reason));
+                let w = worst_cell(&c);
+                tried.push(format!("{name}: worst cell {w:.3}"));
+                if best.as_ref().is_none_or(|b| w > b.0) {
+                    best = Some((w, tried.len() - 1, remeshing, c));
+                }
+                if w >= FAR_WORST_CELL || !snap_strips {
+                    break;
                 }
             }
+            Err(reason) => tried.push(format!("{name}: {reason}")),
         }
     }
-    Err(reasons)
+    match best {
+        Some((_, kept, remeshing, c)) => {
+            tried.remove(kept);
+            Ok((
+                Remeshing {
+                    retried: tried,
+                    ..remeshing
+                },
+                c,
+            ))
+        }
+        None => Err(tried.join("; ")),
+    }
 }
 
-/// `remeshed`, with or without free small collapses and crossing checks.
-#[allow(clippy::too_many_arguments)]
+/// `remeshed` with one rung's remesher.
 fn remeshed_with(
     model: &SurfaceModel,
     r: &RepairedPart,
@@ -837,22 +856,11 @@ fn remeshed_with(
     config: &JobConfig,
     field: &SizeField,
     groups: &[u32],
-    free_small_collapses: bool,
-    check_crossings: bool,
+    params: &RemeshParams,
 ) -> Result<(Remeshing, Candidate), String> {
     let prof_remesh = mesher_tet::prof::scope("volume::remeshed/remesh");
-    let s = remesh(
-        &r.points,
-        &r.faces,
-        groups,
-        &|p| field.at(p),
-        &RemeshParams {
-            free_small_collapses,
-            check_crossings,
-            ..RemeshParams::default()
-        },
-    )
-    .map_err(|e| e.to_string())?;
+    let s =
+        remesh(&r.points, &r.faces, groups, &|p| field.at(p), params).map_err(|e| e.to_string())?;
     let remeshing = Remeshing {
         triangles: s.triangles.len(),
         merged_small_features: s.merged_small_features,
