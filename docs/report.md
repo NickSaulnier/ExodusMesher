@@ -206,7 +206,7 @@ Every number is finite: JSON has no infinity or NaN. A value that could not be m
 
 Beside `report.json`, a run writes:
 
-- `mesh.exo`: Exodus II (netCDF-3 64-bit offset). One `TETRA4` element block per meshed part, named after it; a side set `<part>_boundary` per block, and one per OBJ group on a conformal mesh, using Exodus's tetrahedron face numbering; QA records with the tool and version. Names longer than 32 characters are truncated (`EXO_NAME_TRUNCATED`).
+- `mesh.exo`: Exodus II (netCDF-3 64-bit offset). One `TETRA4` element block per meshed part, named after it; a side set `<part>_boundary` per block, and one per OBJ group (on every kernel: a stuffed mesh's boundary faces take the group of a nearby input triangle facing their way, so near a group boundary they may go to either side; fill faces are in `<part>_boundary` only; a group in several parts is one side set spanning their blocks), using Exodus's tetrahedron face numbering; QA records with the tool and version. Names longer than 32 characters are truncated (`EXO_NAME_TRUNCATED`).
 - `mesh.msh` (Gmsh 4) and `mesh.vtu` (VTK), the same mesh.
 - `repaired.obj`: the repaired surface.
 - `defects.vtp`: the findings' faces, edges and vertices, for ParaView.

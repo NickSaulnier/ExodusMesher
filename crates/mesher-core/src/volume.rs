@@ -19,8 +19,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use mesher_geom::bvh::closest_point_on_triangle;
 use mesher_geom::predicates::orient3d;
-use mesher_geom::vec3::{cross, dot, sub};
+use mesher_geom::vec3::{cross, dot, norm, scale, sub};
 use mesher_geom::{Aabb, Bvh, FastWindingNumber, Point3, Sign, TriangleSoup};
 use mesher_tet::cdt::{
     FaceError, RegionError, RoundingError, SegmentError, Untangle, mesh_region, round_region,
@@ -262,7 +263,7 @@ fn mesh_part(
         let best = candidates.first().map(|(c, _)| worst_cell(c));
         if let Some(conformal_worst) = best.filter(|&w| w < FAR_WORST_CELL && !config.strict) {
             let mut trial = RecordLog::new();
-            if let Ok(s) = stuffing_candidate(r, h, config, &winding, &bounds)? {
+            if let Ok(s) = stuffing_candidate(model, r, h, config, &winding, &bounds)? {
                 let stuffing_worst = worst_cell(&s);
                 if stuffing_worst > conformal_worst {
                     let (accepted, summary) =
@@ -321,7 +322,7 @@ fn mesh_part(
                             kernel: Kernel::Stuffing,
                             points: s.points,
                             tets: s.tets,
-                            face_groups: Vec::new(),
+                            face_groups: s.face_groups,
                         });
                         return Ok(());
                     }
@@ -426,7 +427,7 @@ fn mesh_part(
     }
 
     // 4. Fallback: isosurface stuffing.
-    let stuffed = match stuffing_candidate(r, h, config, &winding, &bounds)? {
+    let stuffed = match stuffing_candidate(model, r, h, config, &winding, &bounds)? {
         Ok(c) => Some(c),
         Err(rec) => {
             log.push(rec.part(name));
@@ -450,7 +451,7 @@ fn mesh_part(
                 kernel: Kernel::Stuffing,
                 points: c.points,
                 tets: c.tets,
-                face_groups: Vec::new(),
+                face_groups: c.face_groups,
             });
         }
     }
@@ -508,6 +509,7 @@ fn wrapped_and_meshed(
 /// smallest size, at most twice), coarsening to h inside, which keeps the
 /// proven angle bounds.
 fn stuffing_candidate(
+    model: &SurfaceModel,
     r: &RepairedPart,
     h: f64,
     config: &JobConfig,
@@ -552,11 +554,11 @@ fn stuffing_candidate(
     match stuffed {
         Ok(s) => Ok(Ok(Candidate {
             kernel: Kernel::Stuffing,
+            face_groups: stuffed_groups(model, r, &s.points, &s.tets),
             points: s.points,
             tets: s.tets,
             dropped: s.dropped,
             steiner: 0,
-            face_groups: Vec::new(),
             min_size: (levels > 0).then_some(leaf),
             remeshed: false,
         })),
@@ -1266,8 +1268,100 @@ fn worst_cells(q: &FvQuality) -> Vec<WorstCell> {
     .collect()
 }
 
+/// The OBJ groups of a stuffed mesh's boundary: each boundary face takes the
+/// group of a repaired triangle near its centroid (none for a fill face):
+/// of the nearest one and those around its corners, the one facing most its
+/// way, weighed against how far it is. Stuffing's boundary only approximates
+/// the surface and cuts sharp edges at an angle, so faces near a group
+/// boundary may go to either side.
+fn stuffed_groups(
+    model: &SurfaceModel,
+    r: &RepairedPart,
+    points: &[Point3],
+    tets: &[[u32; 4]],
+) -> Vec<(String, Vec<[u32; 3]>)> {
+    let groups = crate::features::face_groups(model, r);
+    if groups.iter().all(|&g| g == u32::MAX) {
+        return Vec::new();
+    }
+    let Ok(soup) = TriangleSoup::new(&r.points, &r.faces) else {
+        return Vec::new();
+    };
+    let bvh = Bvh::new(soup);
+    let unit = |a: Point3, b: Point3, c: Point3| {
+        let n = cross(sub(b, a), sub(c, a));
+        let l = norm(n);
+        if l > 0.0 { scale(n, 1.0 / l) } else { [0.0; 3] }
+    };
+    let normals: Vec<Point3> = r
+        .faces
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|v| r.points[v as usize]);
+            unit(a, b, c)
+        })
+        .collect();
+    let mut around: Vec<Vec<u32>> = vec![Vec::new(); r.points.len()];
+    for (t, f) in r.faces.iter().enumerate() {
+        for &v in f {
+            around[v as usize].push(t as u32);
+        }
+    }
+    // Each boundary face, with the tet's fourth vertex (to orient it out).
+    let mut count: BTreeMap<[u32; 3], ([u32; 3], u32, u32)> = BTreeMap::new();
+    for &t in tets {
+        for side in 1..=4u8 {
+            if let Some(f) = tet_side_nodes(t, side) {
+                let mut k = f;
+                k.sort_unstable();
+                let opposite = t.iter().copied().find(|v| !f.contains(v)).unwrap_or(f[0]);
+                count.entry(k).or_insert((f, 0, opposite)).1 += 1;
+            }
+        }
+    }
+    let mut out: BTreeMap<String, Vec<[u32; 3]>> = BTreeMap::new();
+    for (f, n, opposite) in count.into_values() {
+        if n != 1 {
+            continue;
+        }
+        let [a, b, c] = f.map(|v| points[v as usize]);
+        let m = [0, 1, 2].map(|k| (a[k] + b[k] + c[k]) / 3.0);
+        let mut nf = unit(a, b, c);
+        if dot(nf, sub(points[opposite as usize], a)) > 0.0 {
+            nf = scale(nf, -1.0);
+        }
+        let Some(near) = bvh.nearest(m) else {
+            continue;
+        };
+        // Score: distance, doubled for a triangle facing across.
+        let score = |t: u32| {
+            let tri = r.faces[t as usize].map(|v| r.points[v as usize]);
+            let d = norm(sub(m, closest_point_on_triangle(m, tri)));
+            (d + 1e-300) * (2.0 - dot(nf, normals[t as usize]))
+        };
+        let mut best = (score(near.triangle), near.triangle);
+        for &v in &r.faces[near.triangle as usize] {
+            for &t in &around[v as usize] {
+                let s = score(t);
+                if s < best.0 || (s == best.0 && t < best.1) {
+                    best = (s, t);
+                }
+            }
+        }
+        let name = groups
+            .get(best.1 as usize)
+            .copied()
+            .and_then(|g| model.groups.get(g as usize));
+        if let Some(name) = name {
+            out.entry(name.clone()).or_default().push(f);
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// One volume mesh from the accepted parts: an element block and a
-/// `<part>_boundary` side set each, plus a side set per OBJ group.
+/// `<part>_boundary` side set each, plus a side set per OBJ group (one for
+/// a group in several parts, spanning their blocks).
 #[must_use]
 pub fn assemble(parts: &[MeshedPart]) -> VolumeMesh {
     let mut mesh = VolumeMesh::default();
@@ -1283,6 +1377,9 @@ pub fn assemble(parts: &[MeshedPart]) -> VolumeMesh {
     }
     mesh.add_boundary_side_sets();
     let offsets = mesh.block_offsets();
+    // The group side sets, by name, in order of first appearance.
+    let mut named: BTreeMap<String, usize> = BTreeMap::new();
+    let mut group_sets: Vec<SideSet> = Vec::new();
     for (b, p) in parts.iter().enumerate() {
         if p.face_groups.is_empty() {
             continue;
@@ -1298,7 +1395,7 @@ pub fn assemble(parts: &[MeshedPart]) -> VolumeMesh {
         }
         let offset = point_offsets[b];
         for (group, faces) in &p.face_groups {
-            let mut sides: Vec<(u32, u8)> = faces
+            let sides: Vec<(u32, u8)> = faces
                 .iter()
                 .filter_map(|f| {
                     let mut k = f.map(|v| v + offset);
@@ -1306,14 +1403,22 @@ pub fn assemble(parts: &[MeshedPart]) -> VolumeMesh {
                     by_face.get(&k).copied()
                 })
                 .collect();
-            sides.sort_unstable();
-            if !sides.is_empty() {
-                mesh.side_sets.push(SideSet {
-                    name: group.clone(),
-                    sides,
-                });
+            if sides.is_empty() {
+                continue;
             }
+            let at = *named.entry(group.clone()).or_insert_with(|| {
+                group_sets.push(SideSet {
+                    name: group.clone(),
+                    sides: Vec::new(),
+                });
+                group_sets.len() - 1
+            });
+            group_sets[at].sides.extend(sides);
         }
+    }
+    for mut set in group_sets {
+        set.sides.sort_unstable();
+        mesh.side_sets.push(set);
     }
     mesh
 }

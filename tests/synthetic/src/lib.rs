@@ -2,8 +2,9 @@
 //!
 //! Shapes are triangle meshes with shared vertices, outward-oriented and free
 //! of defects. A [`Scene`] writes one or more of them as OBJ text, optionally
-//! under `o` names; triangle `t` of the scene is the `t`-th `f` line, so test
-//! expectations can name faces by index.
+//! under `o` names and with OBJ groups (`g`) on its faces; triangle `t` of
+//! the scene is the `t`-th `f` line, so test expectations can name faces by
+//! index.
 
 use std::collections::BTreeMap;
 
@@ -276,6 +277,9 @@ impl Solid {
 #[derive(Debug, Clone, Default)]
 pub struct Scene {
     pub solids: Vec<(Option<String>, Solid)>,
+    /// Per solid (by position), each triangle's OBJ group (`g`), if it has
+    /// groups.
+    pub groups: BTreeMap<usize, Vec<String>>,
 }
 
 impl Scene {
@@ -283,7 +287,18 @@ impl Scene {
     pub fn single(solid: Solid) -> Scene {
         Scene {
             solids: vec![(None, solid)],
+            groups: BTreeMap::new(),
         }
+    }
+
+    /// Add a solid whose triangles carry OBJ groups, one name each. Under an
+    /// `o` name its groups are side sets of one part; without one, in a file
+    /// with no objects, they would be parts.
+    #[must_use]
+    pub fn with_groups(mut self, name: Option<&str>, solid: Solid, groups: Vec<String>) -> Scene {
+        assert_eq!(groups.len(), solid.tris.len(), "one group per triangle");
+        self.groups.insert(self.solids.len(), groups);
+        self.with(name, solid)
     }
 
     #[must_use]
@@ -307,6 +322,7 @@ impl Scene {
                     (n.clone(), s)
                 })
                 .collect(),
+            groups: self.groups.clone(),
         }
     }
 
@@ -315,14 +331,22 @@ impl Scene {
     pub fn to_obj(&self) -> String {
         let mut out = String::from("# synthetic\n");
         let mut base = 1u32;
-        for (name, solid) in &self.solids {
+        for (s, (name, solid)) in self.solids.iter().enumerate() {
             if let Some(name) = name {
                 out.push_str(&format!("o {name}\n"));
             }
             for p in &solid.points {
                 out.push_str(&format!("v {} {} {}\n", p[0], p[1], p[2]));
             }
-            for t in &solid.tris {
+            let groups = self.groups.get(&s);
+            let mut current: Option<&str> = None;
+            for (i, t) in solid.tris.iter().enumerate() {
+                if let Some(g) = groups.and_then(|g| g.get(i)) {
+                    if current != Some(g.as_str()) {
+                        out.push_str(&format!("g {g}\n"));
+                        current = Some(g.as_str());
+                    }
+                }
                 out.push_str(&format!(
                     "f {} {} {}\n",
                     t[0] + base,
