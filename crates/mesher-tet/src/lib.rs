@@ -7,6 +7,7 @@ pub mod chamfer;
 pub mod conforming;
 pub mod delaunay;
 mod fxhash;
+pub mod grade;
 mod graded;
 pub mod improve;
 pub mod prof;
@@ -20,6 +21,7 @@ pub mod wrap;
 
 pub use conforming::{ConformingError, ConformingMesh, ConformingParams, Stall, conforming_mesh};
 pub use delaunay::{Delaunay, DelaunayError, Inserted, Tetrahedralization, delaunay};
+pub use grade::{GradeParams, GradeStats, Graded, grade};
 pub use improve::{ImproveParams, ImproveStats, Improved, improve};
 pub use quality::{FvQuality, WorstAt, dihedral_angles, dihedral_range, fv_quality};
 pub use remesh::{RemeshError, RemeshParams, Remeshed, remesh};

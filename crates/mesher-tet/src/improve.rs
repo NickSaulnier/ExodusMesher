@@ -28,6 +28,14 @@
 //! A cell's quality is the worst of its own angle and its four faces',
 //! capped at 1: a cell on target in every measure is not improved further.
 //!
+//! **Grading** is a constraint, not a target: with
+//! `ImproveParams::max_size_ratio` set, a face whose two cells' sizes
+//! (longest edges) differ by more than it scores below 1, and no operation
+//! lowers the worst such score of the region it changes. So improvement
+//! never makes a jump in sizes beyond the limit where there was none (its
+//! collapses and insertions otherwise can), and does not remove the jumps
+//! there are (`crate::grade` does).
+//!
 //! Each operation is accepted only if every tet it makes is positive
 //! exactly (and in floating point, as a solver computes it) and the worst
 //! quality of the region it changes (the new tets and every face of them,
@@ -140,6 +148,11 @@ pub struct ImproveParams {
     pub max_non_orthogonality_degrees: f64,
     /// Largest skewness of an interior face.
     pub max_skewness: f64,
+    /// Largest ratio between the sizes (longest edges) of a face's two
+    /// cells; infinite turns it off. A constraint, not a target: no
+    /// operation makes a region's worst face over it worse, so improvement
+    /// makes no jump in sizes where there was none (`grade` removes them).
+    pub max_size_ratio: f64,
     /// Passes over the poor cells; stops early when nothing changes.
     pub passes: usize,
     /// Whether vertices may collapse, edges split, and vertices be inserted
@@ -155,6 +168,7 @@ impl Default for ImproveParams {
             target_degrees: 15.0,
             max_non_orthogonality_degrees: 70.0,
             max_skewness: 2.0,
+            max_size_ratio: f64::INFINITY,
             passes: 8,
             collapses: true,
             splits: true,
@@ -221,6 +235,16 @@ struct Targets {
     dihedral: f64,
     non_orthogonality: f64,
     skewness: f64,
+    size_ratio: f64,
+}
+
+/// A tet's longest edge.
+fn longest(p: [Point3; 4]) -> f64 {
+    const EDGES: [[usize; 2]; 6] = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+    EDGES
+        .iter()
+        .map(|&[i, j]| norm(sub(p[i], p[j])))
+        .fold(0.0, f64::max)
 }
 
 impl Targets {
@@ -229,6 +253,18 @@ impl Targets {
             dihedral: params.target_degrees,
             non_orthogonality: params.max_non_orthogonality_degrees,
             skewness: params.max_skewness,
+            size_ratio: params.max_size_ratio,
+        }
+    }
+
+    /// The sizes of a face's two cells (their longest edges) against the
+    /// size ratio; on the boundary, `other` is `None`.
+    fn grading(&self, size: f64, other: Option<f64>) -> f64 {
+        match other {
+            Some(o) if self.size_ratio.is_finite() && size > 0.0 && o > 0.0 => {
+                self.size_ratio * size.min(o) / size.max(o)
+            }
+            _ => f64::INFINITY,
         }
     }
 
@@ -292,8 +328,8 @@ fn even(t: [u32; 4], order: [u32; 4]) -> bool {
 enum Across {
     /// Another new tet, by index.
     New(usize),
-    /// A tet the operation keeps, by its centroid.
-    Cell(Point3),
+    /// A tet the operation keeps, by its centroid and longest edge.
+    Cell(Point3, f64),
     /// The boundary.
     Wall,
 }
@@ -332,10 +368,22 @@ enum Kind {
 /// 1, the smallest dihedral angle and the worst face (non-orthogonality and
 /// skewness), negative infinity where a tet is not usable; then the
 /// region's shortfall, the sum over its tets and faces of the square of
-/// how far each is below 1 (zero in a cached cell score).
-type Score = [f64; 3];
+/// how far each is below 1 (zero in a cached cell score); last, the worst
+/// face's grading (`Targets::grading`, capped at 1), which is not a target
+/// but a constraint: no operation lowers it.
+type Score = [f64; 4];
 
-const UNUSABLE: Score = [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY];
+const UNUSABLE: Score = [
+    f64::NEG_INFINITY,
+    f64::NEG_INFINITY,
+    f64::INFINITY,
+    f64::NEG_INFINITY,
+];
+
+/// Whether `after` keeps the grading of `before`.
+fn graded(before: Score, after: Score) -> bool {
+    after[3] >= before[3]
+}
 
 /// A measure's contribution to the shortfall.
 fn shortfall(s: f64) -> f64 {
@@ -361,14 +409,15 @@ fn high(s: Score) -> f64 {
     s[0].max(s[1])
 }
 
-/// Whether `after` may replace `before`: neither measure falls below its
-/// floor, the worst of both does not fall, and the worst strictly improves,
+/// Whether `after` may replace `before`: the grading does not fall,
+/// neither measure falls below its floor, the worst of both does not fall, and the worst strictly improves,
 /// or the other measure does, or the shortfall falls. So a measure that
 /// cannot improve (a face fixed by the boundary) does not stop the other,
 /// and a cluster of poor cells, whose worst face no single operation can
 /// reach, is worn down one operation at a time.
 fn improves(before: Score, after: Score) -> bool {
-    after[0] >= floor(before, 0)
+    graded(before, after)
+        && after[0] >= floor(before, 0)
         && after[1] >= floor(before, 1)
         && low(after) >= low(before)
         && (low(after) > low(before) + GAIN
@@ -458,7 +507,7 @@ impl Mesh {
         let ok = usable(p);
         let c = centroid(p);
         let mut q = if ok {
-            [self.targets.tet(p), f64::INFINITY, 0.0]
+            [self.targets.tet(p), f64::INFINITY, 0.0, f64::INFINITY]
         } else {
             UNUSABLE
         };
@@ -467,8 +516,10 @@ impl Mesh {
             let other = self.across(f.map(|k| tet[k]), &[t]);
             wall |= other.is_none();
             if ok {
-                let other = other.map(|u| centroid(self.corners(self.tets[u as usize])));
-                q[1] = q[1].min(self.targets.face(p, i, c, other));
+                let other = other.map(|u| self.corners(self.tets[u as usize]));
+                let face = self.targets.face(p, i, c, other.map(centroid));
+                q[1] = q[1].min(face);
+                q[3] = q[3].min(self.targets.grading(longest(p), other.map(longest)));
             }
         }
         (
@@ -476,6 +527,7 @@ impl Mesh {
                 q[0].min(1.0),
                 q[1].min(1.0),
                 if ok { 0.0 } else { f64::INFINITY },
+                q[3].min(1.0),
             ],
             wall,
         )
@@ -555,11 +607,13 @@ impl Mesh {
 
     /// The worst of the cached scores of tets `ids` (no shortfall).
     fn worst(&self, ids: &[u32]) -> Score {
-        ids.iter()
-            .fold([f64::INFINITY, f64::INFINITY, 0.0], |w, &t| {
+        ids.iter().fold(
+            [f64::INFINITY, f64::INFINITY, 0.0, f64::INFINITY],
+            |w, &t| {
                 let q = self.q_of(t);
-                [w[0].min(q[0]), w[1].min(q[1]), 0.0]
-            })
+                [w[0].min(q[0]), w[1].min(q[1]), 0.0, w[3].min(q[3])]
+            },
+        )
     }
 
     /// The score of tets `ids` and their faces as they are, with the
@@ -604,7 +658,10 @@ impl Mesh {
                 t.contains(&k[1]) && t.contains(&k[2]) && old.binary_search(&u).is_err()
             });
             let across = match kept {
-                Some(u) => Across::Cell(centroid(self.corners(self.tet(u)))),
+                Some(u) => {
+                    let q = self.corners(self.tet(u));
+                    Across::Cell(centroid(q), longest(q))
+                }
                 None if k
                     .iter()
                     .all(|&v| self.fixed.get(v as usize).copied().unwrap_or(false)) =>
@@ -628,9 +685,10 @@ impl Mesh {
             Some((m, x)) if m == v => x,
             _ => self.points[v as usize],
         };
-        let mut worst = [f64::INFINITY, f64::INFINITY, 0.0];
+        let mut worst = [f64::INFINITY, f64::INFINITY, 0.0, f64::INFINITY];
         let mut corners = Vec::with_capacity(new.len());
         let mut centroids = Vec::with_capacity(new.len());
+        let mut sizes = Vec::with_capacity(new.len());
         for t in new {
             let p = t.map(pos);
             if !usable(p) {
@@ -641,18 +699,27 @@ impl Mesh {
             worst[2] += shortfall(s);
             corners.push(p);
             centroids.push(centroid(p));
+            sizes.push(longest(p));
         }
         for &(n, l, across) in frame {
             let other = match across {
-                Across::New(j) => Some(centroids[j]),
-                Across::Cell(c) => Some(c),
+                Across::New(j) => Some((centroids[j], sizes[j])),
+                Across::Cell(c, size) => Some((c, size)),
                 Across::Wall => None,
             };
-            let s = self.targets.face(corners[n], l, centroids[n], other);
+            let s = self
+                .targets
+                .face(corners[n], l, centroids[n], other.map(|o| o.0));
+            worst[3] = worst[3].min(self.targets.grading(sizes[n], other.map(|o| o.1)));
             worst[1] = worst[1].min(s);
             worst[2] += shortfall(s);
         }
-        [worst[0].min(1.0), worst[1].min(1.0), worst[2]]
+        [
+            worst[0].min(1.0),
+            worst[1].min(1.0),
+            worst[2],
+            worst[3].min(1.0),
+        ]
     }
 
     /// `old` replaced by `new` if that improves the region's worst.
@@ -1045,6 +1112,7 @@ impl Mesh {
     /// not usable or a measure falls below its floor (`floor`).
     fn admissible(&self, before: Score, after: Score) -> Option<f64> {
         (low(after) > f64::NEG_INFINITY
+            && graded(before, after)
             && after[0] >= floor(before, 0)
             && after[1] >= floor(before, 1))
         .then_some(key(after))
@@ -1502,6 +1570,39 @@ mod tests {
             assert_eq!(again.points, r.points);
             assert_eq!(again.tets, r.tets);
         }
+    }
+
+    /// With a size ratio set, no operation makes a face's jump in sizes
+    /// worse than the worst before or the limit; without it, improvement
+    /// on these meshes does.
+    #[test]
+    fn the_size_ratio_is_a_constraint() {
+        use crate::quality::fv_quality;
+        let mut unguarded_worse = false;
+        for seed in [1, 2, 3, 6] {
+            let (p, t) = random_mesh(300, seed);
+            let before = fv_quality(&p, &t).max_size_ratio;
+            let params = ImproveParams {
+                target_degrees: 25.0,
+                max_size_ratio: 4.0,
+                ..ImproveParams::default()
+            };
+            let r = improve(&p, &t, &params);
+            check_valid(&r.points, &r.tets);
+            let after = fv_quality(&r.points, &r.tets).max_size_ratio;
+            assert!(after <= before.max(4.0) * (1.0 + 1e-12), "{after} {before}");
+            let free = improve(
+                &p,
+                &t,
+                &ImproveParams {
+                    max_size_ratio: f64::INFINITY,
+                    ..params
+                },
+            );
+            unguarded_worse |=
+                fv_quality(&free.points, &free.tets).max_size_ratio > before.max(4.0);
+        }
+        assert!(unguarded_worse);
     }
 
     /// The parallel pass gives the serial pass's mesh, bit for bit, at any

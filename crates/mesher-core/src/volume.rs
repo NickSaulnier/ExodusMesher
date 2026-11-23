@@ -28,9 +28,9 @@ use mesher_tet::cdt::{
 };
 use mesher_tet::stuffing::{DIHEDRAL_MAX_DEGREES, DIHEDRAL_MIN_DEGREES};
 use mesher_tet::{
-    ConformingError, ConformingParams, FvQuality, ImproveParams, RemeshParams, SizeField,
-    SizingParams, Stall, StuffingError, StuffingParams, WorstAt, conforming_mesh, fv_quality,
-    improve, remesh, stuff, stuff_graded,
+    ConformingError, ConformingParams, FvQuality, GradeParams, ImproveParams, RemeshParams,
+    SizeField, SizingParams, Stall, StuffingError, StuffingParams, WorstAt, conforming_mesh,
+    fv_quality, grade, improve, remesh, stuff, stuff_graded,
 };
 
 use crate::diagnose::{InternalError, Tolerances};
@@ -57,7 +57,9 @@ pub const MAX_SKEWNESS: f64 = 2.0;
 /// `VOL_GRADATION` warns. Measured Nov 22, 2026: stuffing, whose lattice
 /// halves its size at each level, never exceeds 2.85 (78 meshes); the
 /// conformal meshes of the subsets exceed 3 on 93 of 197, 4 on 45 and 5 on
-/// 20 (up to 31.8), where small cells crowd against large ones.
+/// 20 (up to 31.8), where small cells crowd against large ones. Since then
+/// conformal meshes are graded to it (`improve_cells`), so it warns only
+/// where grading could not split a cell or ran out of budget.
 pub const MAX_SIZE_RATIO: f64 = 4.0;
 
 /// A conformal mesh whose worst cell (`worst_cell`) is below this is far
@@ -759,9 +761,61 @@ fn worst_cell(c: &Candidate) -> f64 {
     if w.is_nan() { 0.0 } else { w }
 }
 
+/// Grade a candidate's cells to `MAX_SIZE_RATIO` (`mesher_tet::grade`),
+/// its side sets following split boundary faces; whether it split any.
+fn grade_cells(c: &mut Candidate) -> bool {
+    let _prof = mesher_tet::prof::scope("volume::grade_cells");
+    let tagged: Vec<([u32; 3], u32)> = c
+        .face_groups
+        .iter()
+        .enumerate()
+        .flat_map(|(g, (_, faces))| faces.iter().map(move |&f| (f, g as u32)))
+        .collect();
+    let g = grade(
+        &c.points,
+        &c.tets,
+        &tagged,
+        &GradeParams {
+            limit: MAX_SIZE_RATIO,
+            ..GradeParams::default()
+        },
+    );
+    if g.stats.splits == 0 {
+        return false;
+    }
+    for (_, faces) in &mut c.face_groups {
+        faces.clear();
+    }
+    for (f, tag) in g.faces {
+        if let Some((_, faces)) = c.face_groups.get_mut(tag as usize) {
+            faces.push(f);
+        }
+    }
+    c.points = g.points;
+    c.tets = g.tets;
+    true
+}
+
+/// Improve a candidate's cells (`mesher_tet::improve`), never making a jump
+/// in sizes beyond `MAX_SIZE_RATIO`; grade the jumps the kernel left
+/// (`grade_cells`), and if that split any cells, improve again, still
+/// without making one. Grading after improvement, not before: improvement
+/// works on the kernel's cells, and the second pass repairs the quality
+/// bisection costs around the graded cells.
 fn improve_cells(c: &mut Candidate) {
     let _prof = mesher_tet::prof::scope("volume::improve_cells");
-    let r = improve(&c.points, &c.tets, &ImproveParams::default());
+    improve_once(c);
+    if grade_cells(c) {
+        improve_once(c);
+    }
+}
+
+fn improve_once(c: &mut Candidate) {
+    let params = ImproveParams {
+        max_size_ratio: MAX_SIZE_RATIO,
+        ..ImproveParams::default()
+    };
+    let r = improve(&c.points, &c.tets, &params);
     let renumbered: Option<Vec<(String, Vec<[u32; 3]>)>> = c
         .face_groups
         .iter()

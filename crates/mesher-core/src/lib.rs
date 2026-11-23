@@ -12,6 +12,7 @@ pub mod protocol;
 pub mod repair;
 pub mod report;
 pub mod sizes;
+pub mod survival;
 pub mod volume;
 
 pub use exit::ExitStatus;

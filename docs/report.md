@@ -160,7 +160,7 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `VOL_NONMANIFOLD` | error | Mesh face held by more than two tets, or by two on the same side | Error |
 | `VOL_LOW_QUALITY` | warning | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
 | `VOL_BOUNDARY_DEVIATION` | error | Hausdorff distance to input over tolerance | Error |
-| `VOL_GRADATION` | warning | Neighbouring cells' sizes differ beyond the gradation limit | Warning, located at the face with the largest ratio of its cells' longest edges (`max_size_ratio` against 4; `element`, `neighbour`, `point`) |
+| `VOL_GRADATION` | warning | Neighbouring cells' sizes differ beyond the gradation limit | Warning, located at the face with the largest ratio of its cells' longest edges (`max_size_ratio` against 4; `element`, `neighbour`, `point`). Conformal meshes are graded to the limit before the gate, so it is rare: where a cell could not be split, or grading ran out of budget |
 | `EXO_NAME_TRUNCATED` | warning | Part or set name over the Exodus limit | Truncate, warning |
 | `EXO_CAPACITY_EXCEEDED` | error | Mesh too large for the 64-bit-offset format | Error |
 | `OUT_WRITE_FAILED` | fatal | An output file could not be written | Fatal |
