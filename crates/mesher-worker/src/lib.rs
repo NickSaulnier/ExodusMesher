@@ -18,7 +18,9 @@ use mesher_core::protocol::{
 };
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::volume::{assemble, mesh_parts};
-use mesher_core::{Action, DefectCode, ExitStatus, Outcome, Record, RecordLog, Report, Stage};
+use mesher_core::{
+    Action, DefectCode, ExitStatus, Outcome, OutputFormat, Record, RecordLog, Report, Stage,
+};
 use mesher_io::exodus::{ExodusError, ExodusOptions, QaRecord, write_exodus};
 
 /// Run a job to completion, sending progress, records and the final result to
@@ -200,9 +202,16 @@ fn process(
     }
     let mesh = assemble(&meshes.meshed);
     report.stages_run.push(Stage::Emit);
-    files.push((MESH_MSH_FILE, mesher_io::msh::msh_text(&mesh)));
-    files.push((MESH_VTU_FILE, mesher_io::vtu::vtu_text(&mesh)));
-    write_mesh_exodus(job, &mesh, &meshes.meshed, log);
+    let config = &job.config;
+    if config.writes(OutputFormat::Gmsh) {
+        files.push((MESH_MSH_FILE, mesher_io::msh::msh_text(&mesh)));
+    }
+    if config.writes(OutputFormat::Vtu) {
+        files.push((MESH_VTU_FILE, mesher_io::vtu::vtu_text(&mesh)));
+    }
+    if config.writes(OutputFormat::Exodus) {
+        write_mesh_exodus(job, &mesh, &meshes.meshed, log);
+    }
     Ok(files)
 }
 

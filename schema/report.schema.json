@@ -547,6 +547,13 @@
             "minItems": 2
           }
         },
+        "formats": {
+          "description": "The mesh files written: by default Exodus II, Gmsh and VTU.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OutputFormat"
+          }
+        },
         "kernel": {
           "description": "The volume kernel tried first.",
           "$ref": "#/$defs/KernelChoice"
@@ -838,6 +845,26 @@
           "description": "Left for a later stage to decide.",
           "type": "string",
           "const": "deferred"
+        }
+      ]
+    },
+    "OutputFormat": {
+      "description": "A mesh file format the worker writes.",
+      "oneOf": [
+        {
+          "description": "Exodus II (`mesh.exo`): a `TETRA4` block per part, side sets.",
+          "type": "string",
+          "const": "exodus"
+        },
+        {
+          "description": "Gmsh MSH 4.1 (`mesh.msh`).",
+          "type": "string",
+          "const": "gmsh"
+        },
+        {
+          "description": "VTK unstructured grid (`mesh.vtu`).",
+          "type": "string",
+          "const": "vtu"
         }
       ]
     },

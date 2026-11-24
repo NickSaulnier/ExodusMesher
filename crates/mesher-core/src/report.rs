@@ -599,6 +599,57 @@ pub struct JobConfig {
     /// `element_size` there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sizes: Vec<SizeControl>,
+    /// The mesh files written: by default Exodus II, Gmsh and VTU.
+    #[serde(
+        default = "OutputFormat::defaults",
+        skip_serializing_if = "OutputFormat::are_defaults"
+    )]
+    pub formats: Vec<OutputFormat>,
+}
+
+/// A mesh file format the worker writes.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFormat {
+    /// Exodus II (`mesh.exo`): a `TETRA4` block per part, side sets.
+    Exodus,
+    /// Gmsh MSH 4.1 (`mesh.msh`).
+    Gmsh,
+    /// VTK unstructured grid (`mesh.vtu`).
+    Vtu,
+}
+
+impl OutputFormat {
+    /// Every format, in the order written.
+    pub const ALL: [OutputFormat; 3] =
+        [OutputFormat::Exodus, OutputFormat::Gmsh, OutputFormat::Vtu];
+
+    /// The formats written by default.
+    #[must_use]
+    pub fn defaults() -> Vec<OutputFormat> {
+        OutputFormat::ALL.to_vec()
+    }
+
+    /// Whether `formats` is the default set, in any order.
+    #[must_use]
+    pub fn are_defaults(formats: &[OutputFormat]) -> bool {
+        let mut f = formats.to_vec();
+        f.sort_unstable();
+        f.dedup();
+        f == OutputFormat::defaults()
+    }
+
+    /// The name used on the command line and in the project file.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutputFormat::Exodus => "exodus",
+            OutputFormat::Gmsh => "gmsh",
+            OutputFormat::Vtu => "vtu",
+        }
+    }
 }
 
 /// One size control (`[[settings.sizes]]` in the project file).
@@ -655,11 +706,18 @@ impl Default for JobConfig {
             feature_edges: Vec::new(),
             smooth_edges: Vec::new(),
             sizes: Vec::new(),
+            formats: OutputFormat::defaults(),
         }
     }
 }
 
 impl JobConfig {
+    /// Whether `format` is written.
+    #[must_use]
+    pub fn writes(&self, format: OutputFormat) -> bool {
+        self.formats.contains(&format)
+    }
+
     /// The remesher's feature angle, degrees.
     #[must_use]
     pub fn remesh_feature_degrees(&self) -> f64 {

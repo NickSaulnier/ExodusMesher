@@ -370,6 +370,21 @@ fn exact_kernel_meshes_a_cube_and_falls_back_where_it_cannot() {
 }
 
 #[test]
+fn only_the_chosen_formats_are_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cube.obj"), dir.path());
+    job.config.formats = vec![mesher_core::OutputFormat::Vtu];
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 0);
+    assert!(dir.path().join("mesh.vtu").exists());
+    for file in ["mesh.exo", "mesh.msh"] {
+        assert!(!dir.path().join(file).exists(), "{file} written");
+    }
+    let report = run.report_file.unwrap();
+    assert_eq!(report.config.formats, vec![mesher_core::OutputFormat::Vtu]);
+}
+
+#[test]
 fn cube_end_to_end_writes_a_valid_exodus_mesh() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube.obj"), dir.path());

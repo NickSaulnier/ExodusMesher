@@ -1252,7 +1252,39 @@ Staged plan (proposed at the start; decided stage by stage):
 - [x] Exit criterion: sharp edges and named patches survive remeshing on the synthetic suite and the public CAD-derived set; neighbouring element sizes within the gradation limit (met Nov 22, 2026)
   - Sharp edges and named patches: on the synthetic suite and the ABC sample, to the mesh's resolution (patches under one square element size may be lost on remeshing; stuffing rounds edges off and is measured, not held to it). Gradation: within the limit on every conformal mesh of the ABC sample and the Thingi10k subsets after stage 6 (stuffing at most 2.86).
 
-**Milestone 19: Solver formats.** Outline in `ROADMAP.md`; tasks when it starts.
+**Milestone 19: Solver formats.** Started Nov 22, 2026.
+
+Where it starts (Nov 22, 2026):
+
+- *Writers* (`mesher-io`): Exodus II (`TETRA4` blocks per part, side sets), Gmsh MSH 4.1 (a physical volume per block, a physical surface per side set) and VTU, all three written on every run (`mesh.exo`, `mesh.msh`, `mesh.vtu`); no setting chooses formats. Exodus names over 32 characters are truncated (`EXO_NAME_TRUNCATED`); no other format changes a name.
+- *Side sets overlap*: every part has `<part>_boundary` (all its boundary faces), and each OBJ group's side set is a subset of those faces. Exodus and Gmsh allow that; OpenFOAM and Fluent need each boundary face in exactly one patch.
+- *Faces*: nothing outside `mesher-fvm` (which builds its own) lists a mesh's unique faces with owner and neighbour cells. Parts are meshed separately, so two parts that touch have coincident boundary faces, not shared ones.
+- *Input*: OBJ only.
+- *Tools*: no OpenFOAM in CI; locally, WSL (Ubuntu) and Docker are available to run it; meshio is not installed.
+
+Staged plan (proposed at the start; decided stage by stage):
+
+1. *Faces, patches and format choice.* In `mesher_core::mesh`, a face view of a `VolumeMesh`: each unique face once, internal faces with owner and neighbour cells in OpenFOAM's order (by owner, then neighbour), boundary faces each in exactly one patch (a face in an OBJ group's side set goes to that group's patch, the rest to `<part>_boundary`), and a cell zone per block. A `formats` setting (`--formats`, the project file), defaulting to the three written today. Names a format cannot hold are changed and recorded (a proposed warning, `OUT_NAME_CHANGED`, with the format, old and new name). Tests: a single tet and two tets (owner, neighbour, orientation, patches), every face once on the synthetic shapes.
+2. *OpenFOAM polyMesh writer* (`mesher_io::foam`): ASCII `points`, `faces`, `owner`, `neighbour`, `boundary` and `cellZones` in `constant/polyMesh/` of a case directory with a minimal `system/controlDict`, so `checkMesh` runs on it as written; patches of type `patch`. Tests: a two-tet mesh's files exactly; `checkMesh` run locally (WSL or Docker) on the synthetic suite's meshes, and any failure diagnosed against OpenFOAM's definitions (its skewness and non-orthogonality differ from ours in detail).
+3. *`checkMesh` in CI*: a Linux job installs a pinned OpenFOAM, the synthetic suite writes each case's polyMesh (an environment variable naming the directory), and a script runs `checkMesh` on each and fails on any failed check. OpenFOAM runs as a separate process and is never a dependency (GPL).
+4. *Fluent `.msh` writer* (`mesher_io::fluent`, text): nodes, a cell zone of tetrahedra per block, an interior face zone and a face zone per patch with each face's two cells, and zone names, implemented from the format's public description (the face node order against its two cells checked on a single tet). Round trip: OpenFOAM's `fluent3DMeshToFoam` in the same CI job, then `checkMesh`, with cell, face and patch counts compared to ours.
+5. *`.meshb` read and write* (`mesher_io::meshb`, libMeshb's binary format, version chosen by size): write vertices, tetrahedra (reference = block) and boundary triangles (reference = patch); read a surface's vertices and triangles as an input beside OBJ (references become groups), with parse records as for OBJ. Round trip: meshio (MIT; Python, in CI) reads our `.meshb`, and we read meshio's.
+6. *Checks*: the exit criterion; the report reference, the README's formats, the defect table.
+
+CGNS stays later (it needs HDF5).
+
+- [x] Stage 1, faces, patches and format choice (Nov 22, 2026)
+  - *Faces* (`VolumeMesh::faces`, `FaceMesh`): each unique face once, in OpenFOAM's layout: internal faces first, by owner (the lower-numbered cell) and then neighbour, each listed out of its owner (right-hand normal from owner to neighbour); then each patch's faces together, out of the mesh, patches in side set order; cell zones are the blocks. A face on more than two tets is `MeshProblem::FaceOnManyCells` (a bug upstream, like the other mesh problems).
+  - *Patches*: each boundary face in exactly one, the first side set listing it other than a block's `<block>_boundary` (an OBJ group's), else that set, which so keeps the boundary faces in no group; faces in no side set go to `boundary`; empty patches are left out. So a box with six named faces has six patches and no `<box>_boundary` patch, while its Exodus file keeps `<box>_boundary` with every face.
+  - *Formats* (`JobConfig::formats`, `--formats`, the project file's `formats`): which of `exodus`, `gmsh` and `vtu` the worker writes, all three by default; written to the report only when not the default; an empty list is rejected in the project file (the command line needs at least one value).
+  - *Names*: no stage 1 format changes a name, so the proposed `OUT_NAME_CHANGED` waits for the first writer that must (OpenFOAM's words, stage 2).
+  - *Tests*: `a_single_tet_is_four_boundary_faces_out_of_it`, `two_tets_have_one_internal_face_and_patches_partition_the_boundary`, `a_face_on_three_tets_is_a_problem` (mesh); in the synthetic suite every accepted mesh's faces are checked (internal and boundary counts against its cells, every boundary face in one patch), and `side_sets.rs` checks each group's patch has exactly its side set's area and the patches together the boundary's; `only_the_chosen_formats_are_written` (worker); the project file's `formats` (kept, the default left out, empty or unknown rejected).
+- [ ] Stage 2, OpenFOAM polyMesh writer
+- [ ] Stage 3, `checkMesh` in CI
+- [ ] Stage 4, Fluent `.msh` writer
+- [ ] Stage 5, `.meshb` read and write
+- [ ] Stage 6, checks
+- [ ] Exit criterion: `checkMesh` passes on every synthetic output; a Fluent `.msh` and a `.meshb` file round-trip through independent readers
 
 **Milestone 20: Python API.** Outline in `ROADMAP.md`; tasks when it starts.
 

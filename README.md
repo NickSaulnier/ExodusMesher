@@ -48,6 +48,7 @@ mesher: model.obj
 | `--no-remesh` | Keep each part's own surface triangulation: never remesh it (by default a part's surface is remeshed to the element size when its conformal mesh fails or its cells are beyond the quality limits) |
 | `--kernel exact` | Try the exact constrained Delaunay kernel first: the surface tetrahedralized exactly and rounded to f64, without refinement (so few, often thin, tets); the conformal kernel and stuffing follow if it fails. Default `conformal` |
 | `--wrap-alpha F` | The wrap's α for repair rung 3, relative to the element size (default 1): a part still not a valid solid after local repairs and resolving its intersections, whose stuffing fallback is rejected, is wrapped as the last resort, closing openings narrower than about 2α |
+| `--formats exodus,gmsh,vtu` | The mesh files written: `mesh.exo`, `mesh.msh`, `mesh.vtu` (default all three) |
 | `--no-repair` | Diagnose and report only (a linter) |
 | `--timeout S`, `--memory-limit MiB` | Limits for the worker (defaults 3600 s, 8192 MiB) |
 

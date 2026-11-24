@@ -696,6 +696,25 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
                 m.name
             ));
         }
+        // The face view: every face once, every boundary face in one patch.
+        match mesh.faces() {
+            Ok(f) => {
+                let boundary = mesh.boundary_sides(0).len();
+                let patched: usize = f.patches.iter().map(|p| p.count).sum();
+                if patched != boundary
+                    || 2 * f.internal() + boundary != 4 * f.cells
+                    || f.faces.len() != f.internal() + boundary
+                {
+                    failures.push(format!(
+                        "{label}: part {} faces: {} internal, {patched} in patches, {boundary} boundary, {} cells",
+                        m.name,
+                        f.internal(),
+                        f.cells
+                    ));
+                }
+            }
+            Err(e) => failures.push(format!("{label}: part {} faces: {e:?}", m.name)),
+        }
     }
     for code in [
         DefectCode::VolInvertedTet,

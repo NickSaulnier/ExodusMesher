@@ -11,8 +11,8 @@ use clap::{Parser, Subcommand};
 use mesher_core::project::{Project, ProjectError};
 use mesher_core::protocol::{Job, REPORT_FILE};
 use mesher_core::{
-    Action, DefectCode, ExitStatus, JobConfig, KernelChoice, Outcome, Record, RecordLog, Report,
-    Severity, Stage,
+    Action, DefectCode, ExitStatus, JobConfig, KernelChoice, Outcome, OutputFormat, Record,
+    RecordLog, Report, Severity, Stage,
 };
 
 #[derive(Parser)]
@@ -87,6 +87,10 @@ struct RunArgs {
     /// field's curvature term].
     #[arg(long, value_parser = angle)]
     feature_angle: Option<f64>,
+    /// The mesh files to write, comma-separated: `exodus` (mesh.exo),
+    /// `gmsh` (mesh.msh), `vtu` (mesh.vtu) [default: all three].
+    #[arg(long, value_enum, value_delimiter = ',', num_args = 1..)]
+    formats: Vec<FormatArg>,
     /// Kill the worker after this many seconds.
     #[arg(long, default_value_t = 3600.0, value_parser = positive)]
     timeout: f64,
@@ -96,6 +100,23 @@ struct RunArgs {
     /// Path to the mesher-worker binary [default: $MESHER_WORKER, else next to this executable].
     #[arg(long)]
     worker: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum FormatArg {
+    Exodus,
+    Gmsh,
+    Vtu,
+}
+
+impl FormatArg {
+    fn format(self) -> OutputFormat {
+        match self {
+            FormatArg::Exodus => OutputFormat::Exodus,
+            FormatArg::Gmsh => OutputFormat::Gmsh,
+            FormatArg::Vtu => OutputFormat::Vtu,
+        }
+    }
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -162,6 +183,12 @@ fn run(args: RunArgs) -> i32 {
     }
     if let Some(a) = args.feature_angle {
         c.feature_angle = Some(a);
+    }
+    if !args.formats.is_empty() {
+        let mut formats: Vec<OutputFormat> = args.formats.iter().map(|f| f.format()).collect();
+        formats.sort_unstable();
+        formats.dedup();
+        c.formats = formats;
     }
     let worker = args
         .worker

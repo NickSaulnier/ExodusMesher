@@ -161,7 +161,42 @@ fn check(label: &str, scene: &Scene) {
             scene.solids.len(),
             "{label}, {kernel}: every part meshed"
         );
-        let got = side_set_areas(&assemble(&outcome.meshed));
+        let assembled = assemble(&outcome.meshed);
+        let got = side_set_areas(&assembled);
+        // As patches (the face-based formats), each group has its faces
+        // exactly, and `<part>_boundary` keeps only what no group has.
+        let faces = assembled.faces().expect("faces");
+        let patch_area = |name: &str| -> f64 {
+            faces
+                .patches
+                .iter()
+                .filter(|p| p.name == name)
+                .flat_map(|p| p.start..p.start + p.count)
+                .map(|k| {
+                    let [a, b, c] = faces.faces[k].map(|v| assembled.points[v as usize]);
+                    0.5 * norm(cross(sub(b, a), sub(c, a)))
+                })
+                .sum()
+        };
+        for (name, &(a, _)) in &got {
+            if !name.ends_with("_boundary") {
+                let p = patch_area(name);
+                assert!(
+                    (p - a).abs() <= 1e-12 * a,
+                    "{label}, {kernel}: patch {name} {p} against its side set {a}"
+                );
+            }
+        }
+        let total: f64 = faces.patches.iter().map(|p| patch_area(&p.name)).sum();
+        let boundary: f64 = got
+            .iter()
+            .filter(|(n, _)| n.ends_with("_boundary"))
+            .map(|(_, (a, _))| a)
+            .sum();
+        assert!(
+            (total - boundary).abs() <= 1e-9 * boundary,
+            "{label}, {kernel}: patches {total} against the boundary {boundary}"
+        );
         for (name, &area) in &want {
             let Some(&(a, sets)) = got.get(name) else {
                 panic!("{label}, {kernel}: no side set {name}: {got:?}");

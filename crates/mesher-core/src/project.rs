@@ -82,6 +82,11 @@ impl Project {
                 "every `sizes` entry's `element_size` must be positive".to_owned(),
             ));
         }
+        if s.formats.is_empty() {
+            return Err(ProjectError::Invalid(
+                "`formats` must name at least one format".to_owned(),
+            ));
+        }
         if s.feature_angle.is_some_and(|a| !(a > 0.0 && a < 180.0)) {
             return Err(ProjectError::Invalid(
                 "`feature_angle` must be between 0 and 180 degrees".to_owned(),
@@ -195,11 +200,30 @@ mod tests {
         assert_eq!(p.settings.feature_angle, Some(30.0));
         assert_eq!(p.settings.feature_edges, vec![[0, 3]]);
         assert_eq!(p.settings.smooth_edges, vec![[1, 2], [4, 5]]);
+        // Formats: a chosen set is kept; the default set is not written.
+        let p = Project::from_toml(
+            "input = \"m.obj\"\noutput = \"o\"\n[settings]\nformats = [\"exodus\"]\n",
+            Path::new(""),
+        )
+        .unwrap();
+        assert_eq!(
+            p.settings.formats,
+            vec![crate::report::OutputFormat::Exodus]
+        );
+        assert!(p.to_toml(Path::new("")).contains("formats = [\"exodus\"]"));
+        let default = Project {
+            input: "m.obj".into(),
+            output: "o".into(),
+            settings: JobConfig::default(),
+        };
+        assert!(!default.to_toml(Path::new("")).contains("formats"));
         for bad in [
             "input = \"m.obj\"\n",
             "input = \"m.obj\"\noutput = \"o\"\nunknown = 1\n",
             "input = \"m.obj\"\noutput = \"o\"\n[settings]\nelement_size = -1.0\n",
             "input = \"m.obj\"\noutput = \"o\"\n[settings]\nfeature_angle = 180.0\n",
+            "input = \"m.obj\"\noutput = \"o\"\n[settings]\nformats = []\n",
+            "input = \"m.obj\"\noutput = \"o\"\n[settings]\nformats = [\"stl\"]\n",
             "input = \"m.obj\"\noutput = \"o\"\n[[settings.sizes]]\npart = \"a\"\nelement_size = 0.0\n",
             "input = \"m.obj\"\noutput = \"o\"\n[[settings.sizes]]\npart = \"a\"\nsize = 0.1\n",
             "input = \"\"\noutput = \"o\"\n",
