@@ -215,7 +215,7 @@ Every finding is a structured record with a stable code, a severity, a location 
 | `VOL_GRADATION` | Neighbouring cells' sizes differ beyond the gradation limit (largest ratio of their longest edges over 4, left after grading; Milestone 18) | Warning, located |
 | `EXO_NAME_TRUNCATED` | Part or set name over the Exodus limit | Truncate, warning |
 | `EXO_CAPACITY_EXCEEDED` | Mesh too large for the 64-bit-offset format | Error |
-| `OUT_NAME_CHANGED` | A part or patch name was changed to one the output format accepts (OpenFOAM words, Fluent zone names; Milestone 19) | Rename, warning |
+| `OUT_NAME_CHANGED` | A part or patch name was changed to one the output format accepts (OpenFOAM words, Fluent zone names; Milestone 19) | Rename, warning; info when only the letter case changed |
 | `OUT_WRITE_FAILED` | An output file could not be written | Fatal |
 
 **Record shape.**
@@ -1254,7 +1254,7 @@ Staged plan (proposed at the start; decided stage by stage):
 - [x] Exit criterion: sharp edges and named patches survive remeshing on the synthetic suite and the public CAD-derived set; neighbouring element sizes within the gradation limit (met Nov 22, 2026)
   - Sharp edges and named patches: on the synthetic suite and the ABC sample, to the mesh's resolution (patches under one square element size may be lost on remeshing; stuffing rounds edges off and is measured, not held to it). Gradation: within the limit on every conformal mesh of the ABC sample and the Thingi10k subsets after stage 6 (stuffing at most 2.86).
 
-**Milestone 19: Solver formats.** Started Nov 22, 2026.
+**Milestone 19: Solver formats.** Started Nov 22, 2026; done Nov 26, 2026 (exit criterion met locally and in CI).
 
 Where it starts (Nov 22, 2026):
 
@@ -1299,8 +1299,12 @@ CGNS stays later (it needs HDF5).
   - *Reader* (`mesher_io::meshb::read_meshb`: every version, either byte order; keywords followed by their next positions, so unknown ones are skipped) and input (`parse_meshb`, `mesher_io::read_surface`, which picks it by the `.meshb` extension, in the worker, the CLI and the GUI): the triangles are the surface, each reference a group `ref<k>`. The groups are patches only (`SurfaceModel::groups_are_patches`): with no objects, parts are the connected components, as for an OBJ file without groups. Records: `PARSE_FORMAT_INVALID` (new, error) for a file it cannot follow (bad byte-order code, unknown version, truncation, a bad next position), keeping what was read before; `PARSE_BAD_LINE` for a vertex that is not finite; `PARSE_BAD_INDEX` for a triangle naming a missing vertex; `PARSE_UNSUPPORTED_ELEMENT` (info) per other keyword, tetrahedra included; `PARSE_NO_GEOMETRY` when no triangle survives. Records have no line numbers (`measured` names the vertex or triangle).
   - *Tests*: `two_tets_round_trip` (sizes, header, references, the unused point left out), `every_version_and_byte_order_reads_as_a_surface` (hand-written files of versions 1 to 4, both byte orders, with a keyword to skip), `a_broken_file_keeps_what_came_before` (truncation, garbage, a bad index) in `mesher_io::meshb`; `a_meshb_file_is_written_and_read_back_as_input` (worker: the cube meshed to `.meshb`, then that file meshed again from its boundary triangles, one part, group `ref1`).
   - *Round trip through meshio* (MIT, 5.3.5, Python): with `SUITE_FOAM_DIR` the suite and `side_sets.rs` write each case's `.meshb` beside its OpenFOAM case; `tests/meshb/meshio_roundtrip.py` reads each with meshio and checks its points against the case's `points` exactly, its tetrahedra per reference against the cell zones and its triangles per reference against the patches, then writes meshio's copy (`meshio.meshb`, which meshio writes as version 3); `tests/synthetic/tests/meshb_meshio.rs` (with `MESHB_MESHIO_DIR`) reads meshio's copy with our reader and compares it with ours. All 110 cases pass both locally; CI runs the same after `checkMesh`.
-- [ ] Stage 6, checks
-- [ ] Exit criterion: `checkMesh` passes on every synthetic output; a Fluent `.msh` and a `.meshb` file round-trip through independent readers
+- [x] Stage 6, checks (Nov 26, 2026)
+  - *Exit run* (clean, at `e5bfe8a`): the 110 synthetic outputs (101 suite cases, 9 side set cases) all `Mesh OK` in `checkMesh` (OpenFOAM v2512), all 110 Fluent files converted by `fluent3DMeshToFoam` to the same counts and patches and `Mesh OK`, all 110 `.meshb` files read by meshio to the same points, zones and patches and meshio's copies read back to ours. CI ran the same steps green for the first time at `9c6cf07` (Nov 26, 2026), after the Linux test failure (open since Milestone 15) was fixed in its own session.
+  - *Beyond the synthetic set*: the CLI with `--formats exodus,openfoam,fluent,meshb` on the 12 ABC models with the most CAD surfaces (219 to 679 patches, 1 to 13 parts, up to 889,497 tets; a 600 s limit, one at a time): every part meshed; all 12 `Mesh OK`, all 12 Fluent round trips to the same counts and patches, all 12 `.meshb` files through meshio and back. `checkMesh`'s warnings: several regions for the multi-body models, and faces over 70° non-orthogonality on 6 (up to 84.8°), which `VOL_LOW_QUALITY` reports too.
+  - *Names*: every ABC patch name has capitals (`p0_Plane`), so Fluent lowered all of them, one `OUT_NAME_CHANGED` warning each (227 on one model, which made a clean run exit 10). By the user's decision (Nov 26, 2026) a change of letter case alone is now information (`Severity::Info`): nothing is lost; any other change (a character replaced, a suffix) stays a warning. That model now exits 0.
+  - *Docs*: the report reference (formats, outputs, `OUT_NAME_CHANGED`, `PARSE_FORMAT_INVALID`, the input stats of a `.meshb` file), the README's inputs, outputs and `--formats`, and the defect tables are current.
+- [x] Exit criterion: `checkMesh` passes on every synthetic output; a Fluent `.msh` and a `.meshb` file round-trip through independent readers. Met Nov 26, 2026, locally and in CI.
 
 **Milestone 20: Python API.** Outline in `ROADMAP.md`; tasks when it starts.
 

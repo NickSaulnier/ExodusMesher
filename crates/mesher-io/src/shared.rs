@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use mesher_core::mesh::FaceMesh;
-use mesher_core::{Action, DefectCode, Outcome, Record, RecordLog, Stage};
+use mesher_core::{Action, DefectCode, Outcome, Record, RecordLog, Severity, Stage};
 
 /// A format's rule for names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +54,8 @@ impl NameRule {
 }
 
 /// Names for `items` (each an entity kind and its name) under `rule`,
-/// distinct, each recorded as `OUT_NAME_CHANGED` where it differs. A name
+/// distinct, each recorded as `OUT_NAME_CHANGED` where it differs (a
+/// warning, or information when only the letter case changed). A name
 /// that already follows the rule and is not repeated keeps it (the first of
 /// a repeated name keeps it); the others take the first of `w`, `w_2`,
 /// `w_3`, ... that is free.
@@ -78,8 +79,16 @@ pub(crate) fn names(rule: NameRule, items: &[(&str, &str)], log: &mut RecordLog)
             k += 1;
         }
         used.insert(w.clone());
+        // Only the letter case changed (Fluent's lowercase names): nothing
+        // is lost, so it is recorded as information.
+        let severity = if w == name.to_ascii_lowercase() {
+            Severity::Info
+        } else {
+            Severity::Warning
+        };
         log.push(
             Record::new(DefectCode::OutNameChanged, Stage::Emit)
+                .severity(severity)
                 .measured("format", rule.format())
                 .measured("entity", entity)
                 .measured("name", name)
@@ -127,6 +136,7 @@ mod tests {
                 ("patch", "interior"),
                 ("patch", "a+b.c-d"),
                 ("patch", "9 lives"),
+                ("patch", "Wall"),
             ],
             &mut log,
         );
@@ -138,10 +148,23 @@ mod tests {
                 "body",
                 "interior_2",
                 "a+b.c-d",
-                "_9_lives"
+                "_9_lives",
+                "wall"
             ]
         );
-        assert_eq!(log.records().len(), 3);
+        assert_eq!(log.records().len(), 4);
+        // Lowering `Wall` alone loses nothing: information; `Body`, which also
+        // took a suffix, is a warning.
+        let severity = |name: &str| {
+            log.records()
+                .iter()
+                .find(|r| r.measured["name"].as_str() == Some(name))
+                .unwrap()
+                .severity
+        };
+        assert_eq!(severity("Wall"), Severity::Info);
+        assert_eq!(severity("Body"), Severity::Warning);
+        assert_eq!(severity("9 lives"), Severity::Warning);
         assert!(
             log.records()
                 .iter()
