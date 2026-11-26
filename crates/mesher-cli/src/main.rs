@@ -2,18 +2,14 @@
 //! job, runs `mesher-worker` under a timeout, prints a summary, and turns worker
 //! crashes and timeouts into `MESH_WORKER_FAILED` reports.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use mesher_core::project::{Project, ProjectError};
-use mesher_core::protocol::{Job, REPORT_FILE};
-use mesher_core::{
-    Action, DefectCode, ExitStatus, JobConfig, KernelChoice, Outcome, OutputFormat, Record,
-    RecordLog, Report, Severity, Stage,
-};
+use mesher_client::JobRequest;
+use mesher_core::{ExitStatus, KernelChoice, Outcome, OutputFormat, Report, Severity, Stage};
 
 #[derive(Parser)]
 #[command(
@@ -145,94 +141,51 @@ fn main() -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX))
 }
 
+impl RunArgs {
+    /// The request these arguments make (everything but the run's limits).
+    fn request(&self) -> JobRequest {
+        JobRequest {
+            input: self.input.clone(),
+            out: self.out.clone(),
+            parts: self.parts.clone(),
+            no_repair: self.no_repair,
+            strict: self.strict,
+            uniform_size: self.uniform_size,
+            no_remesh: self.no_remesh,
+            kernel: self.kernel.map(|k| match k {
+                KernelArg::Conformal => KernelChoice::Conformal,
+                KernelArg::Exact => KernelChoice::Exact,
+            }),
+            max_deviation: self.max_deviation,
+            element_size: self.element_size,
+            wrap_alpha: self.wrap_alpha,
+            feature_angle: self.feature_angle,
+            formats: self.formats.iter().map(|f| f.format()).collect(),
+        }
+    }
+}
+
 fn run(args: RunArgs) -> i32 {
-    let is_project = args
-        .input
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
-    let mut job = if is_project {
-        match Project::read(&args.input) {
-            Ok(project) => project.job(),
-            Err(e) => return project_failure(&args, &e),
-        }
-    } else {
-        Job {
-            input: args.input.display().to_string(),
-            output_dir: default_out_dir(&args.input).display().to_string(),
-            config: JobConfig::default(),
-        }
-    };
-    // Options given on the command line override the project.
-    if let Some(out) = &args.out {
-        job.output_dir = out.display().to_string();
-    }
-    let c = &mut job.config;
-    if !args.parts.is_empty() {
-        c.parts.clone_from(&args.parts);
-    }
-    c.no_repair |= args.no_repair;
-    c.strict |= args.strict;
-    c.uniform_size |= args.uniform_size;
-    c.no_remesh |= args.no_remesh;
-    if let Some(k) = args.kernel {
-        c.kernel = match k {
-            KernelArg::Conformal => KernelChoice::Conformal,
-            KernelArg::Exact => KernelChoice::Exact,
-        };
-    }
-    if let Some(d) = args.max_deviation {
-        c.max_deviation = d;
-    }
-    if let Some(e) = args.element_size {
-        c.element_size = e;
-    }
-    if let Some(a) = args.wrap_alpha {
-        c.wrap_alpha = a;
-    }
-    if let Some(a) = args.feature_angle {
-        c.feature_angle = Some(a);
-    }
-    if !args.formats.is_empty() {
-        let mut formats: Vec<OutputFormat> = args.formats.iter().map(|f| f.format()).collect();
-        formats.sort_unstable();
-        formats.dedup();
-        c.formats = formats;
-    }
     let worker = args
         .worker
+        .clone()
         .unwrap_or_else(mesher_client::default_worker_path);
     let limits = mesher_client::Limits {
         timeout: Duration::try_from_secs_f64(args.timeout).unwrap_or(Duration::from_secs(3600)),
         memory: usize::try_from(args.memory_limit.saturating_mul(1 << 20)).ok(),
     };
-
     let never = AtomicBool::new(false);
-    let (report, report_path) = mesher_client::run_job(&worker, &job, limits, &mut |_| {}, &never);
-    print_summary(&report, report_path.as_deref());
-    report.summary.exit_code
-}
-
-/// A project file that cannot be used: a report with `PARSE_PROJECT_INVALID`.
-fn project_failure(args: &RunArgs, error: &ProjectError) -> i32 {
-    let mut log = RecordLog::new();
-    log.push(
-        Record::new(DefectCode::ParseProjectInvalid, Stage::Parse)
-            .hint(error.to_string())
-            .action(Action::Abort, Outcome::Applied),
-    );
-    let mut report = Report::new(&args.input.display().to_string(), JobConfig::default());
-    report.finish(log);
-    let out = args
-        .out
-        .clone()
-        .unwrap_or_else(|| default_out_dir(&args.input));
-    let path = out.join(REPORT_FILE);
-    let written = std::fs::create_dir_all(&out)
-        .and_then(|()| std::fs::write(&path, report.to_json()))
-        .is_ok();
-    let shown = path.display().to_string();
-    print_summary(&report, written.then_some(shown.as_str()));
-    report.summary.exit_code
+    match mesher_client::run_request(&worker, &args.request(), limits, &mut |_| {}, &never) {
+        Ok((report, report_path)) => {
+            print_summary(&report, report_path.as_deref());
+            report.summary.exit_code
+        }
+        // The argument parser already checks the ranges; this is a backstop.
+        Err(e) => {
+            eprintln!("mesher: {e}");
+            2
+        }
+    }
 }
 
 fn positive(text: &str) -> Result<f64, String> {
@@ -247,13 +200,6 @@ fn angle(text: &str) -> Result<f64, String> {
         Ok(a) if a > 0.0 && a < 180.0 => Ok(a),
         _ => Err("expected an angle between 0 and 180 degrees".to_owned()),
     }
-}
-
-fn default_out_dir(input: &Path) -> PathBuf {
-    let stem = input
-        .file_stem()
-        .map_or_else(|| "mesh".to_owned(), |s| s.to_string_lossy().into_owned());
-    PathBuf::from(format!("{stem}_out"))
 }
 
 fn print_summary(report: &Report, report_path: Option<&str>) {
@@ -387,5 +333,62 @@ fn exit_label(code: i32) -> &'static str {
         Some(ExitStatus::Failed) => "failed; see report",
         Some(ExitStatus::InternalBug) => "internal error; please file a bug with the report",
         None => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    /// The command line and the Python API (which sends a request as JSON)
+    /// given the same options build the same request, and so the same job.
+    #[test]
+    fn arguments_and_json_build_the_same_request() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["m.obj"], r#"{"input": "m.obj"}"#),
+            (
+                &["m.obj", "-o", "out", "--parts", "lid,2", "--strict"],
+                r#"{"input": "m.obj", "out": "out", "parts": ["lid", "2"], "strict": true}"#,
+            ),
+            (
+                &[
+                    "m.obj",
+                    "--element-size",
+                    "0.05",
+                    "--max-deviation",
+                    "0.01",
+                    "--kernel",
+                    "exact",
+                    "--feature-angle",
+                    "30",
+                    "--wrap-alpha",
+                    "2",
+                ],
+                r#"{"input": "m.obj", "element_size": 0.05, "max_deviation": 0.01, "kernel": "exact", "feature_angle": 30.0, "wrap_alpha": 2.0}"#,
+            ),
+            (
+                &["m.obj", "--no-repair", "--uniform-size", "--no-remesh"],
+                r#"{"input": "m.obj", "no_repair": true, "uniform_size": true, "no_remesh": true}"#,
+            ),
+            (
+                &["m.obj", "--formats", "vtu,openfoam,vtu,meshb"],
+                r#"{"input": "m.obj", "formats": ["vtu", "openfoam", "vtu", "meshb"]}"#,
+            ),
+        ];
+        for (args, json) in cases {
+            let cli = Cli::try_parse_from(["mesher", "run"].iter().chain(args.iter())).unwrap();
+            let Command::Run(run) = cli.command else {
+                panic!("not a run");
+            };
+            let from_args = run.request();
+            let from_json: JobRequest = serde_json::from_str(json).unwrap();
+            assert_eq!(from_args, from_json, "{args:?}");
+            assert_eq!(
+                from_args.job().unwrap(),
+                from_json.job().unwrap(),
+                "{args:?}"
+            );
+        }
     }
 }

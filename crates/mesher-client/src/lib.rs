@@ -6,6 +6,8 @@
 //! does not deliver one. A worker that timed out or ran out of memory gets
 //! one retry with the stuffing fallback only (unless the job is strict), so
 //! a slow conformal kernel still ends in a mesh. No meshing logic lives here.
+//! [`JobRequest`] is how a front end's options become a job, the same for
+//! the CLI and the Python API.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +17,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use process_control::{ChildExt, Control};
+
+mod request;
+pub use request::{JobRequest, RequestError, default_out_dir, project_failure, run_request};
 
 use mesher_core::protocol::{Job, REPORT_FILE, WorkerMessage};
 use mesher_core::{

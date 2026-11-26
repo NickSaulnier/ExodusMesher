@@ -14,9 +14,9 @@ import pathlib
 import sys
 from typing import Any, Callable, NamedTuple, Optional
 
-from ._mesher import __version__, _run
+from ._mesher import __version__, _build_job, _run, _run_request
 
-__all__ = ["RawRun", "run_job", "worker_path", "__version__"]
+__all__ = ["RawRun", "build_job", "run_job", "run_request", "worker_path", "__version__"]
 
 
 class RawRun(NamedTuple):
@@ -56,3 +56,38 @@ def run_job(
     memory = None if memory_limit is None else int(memory_limit) * (1 << 20)
     text, path = _run(json.dumps(job), worker or worker_path(), float(timeout), memory, progress)
     return RawRun(text, path)
+
+
+def build_job(request: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The job a request builds, exactly as ``mesher run`` builds it: the
+    request names an ``input`` (an OBJ or ``.meshb`` file, or a project file)
+    and the command line's options (``out``, ``parts``, ``element_size``,
+    ``kernel``, ``formats``, ...). ``None`` for a project file that cannot be
+    used. Raises ``ValueError`` for an unknown option or one out of range."""
+    text = _build_job(json.dumps(_paths(request)))
+    return None if text is None else json.loads(text)
+
+
+def run_request(
+    request: dict[str, Any],
+    *,
+    timeout: float = 3600.0,
+    memory_limit: Optional[int] = 8192,
+    worker: Optional[str] = None,
+    progress: Optional[Callable[[str, float], None]] = None,
+) -> RawRun:
+    """Run a request as ``mesher run`` does (see ``build_job``): the same job,
+    so the same report, as the command line given the same options; a
+    project file that cannot be used gives a ``PARSE_PROJECT_INVALID``
+    report. Raises ``ValueError`` before anything runs for an unknown option
+    or one out of range. Limits and cancelling as for ``run_job``."""
+    memory = None if memory_limit is None else int(memory_limit) * (1 << 20)
+    text, path = _run_request(
+        json.dumps(_paths(request)), worker or worker_path(), float(timeout), memory, progress
+    )
+    return RawRun(text, path)
+
+
+def _paths(request: dict[str, Any]) -> dict[str, Any]:
+    """Path-like values as strings, so ``pathlib.Path`` arguments work."""
+    return {k: os.fspath(v) if isinstance(v, os.PathLike) else v for k, v in request.items()}

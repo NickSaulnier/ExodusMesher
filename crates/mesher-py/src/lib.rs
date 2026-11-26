@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use mesher_client::Limits;
+use mesher_client::{JobRequest, Limits, RequestError};
 use mesher_core::protocol::{Job, WorkerMessage};
 
 #[cfg(feature = "python")]
@@ -49,6 +49,48 @@ pub fn run(
     })
 }
 
+/// Run a request (a [`JobRequest`] as JSON: an input or project file and
+/// the CLI's options), exactly as `mesher run` does: its job in the worker,
+/// or, for a project file that cannot be used, the report that says so.
+///
+/// # Errors
+/// The JSON is not a valid request, or an option is out of range (nothing
+/// runs, no report is written).
+pub fn run_request(
+    request_json: &str,
+    worker: &Path,
+    limits: Limits,
+    on_message: &mut dyn FnMut(&WorkerMessage),
+    cancel: &AtomicBool,
+) -> Result<Run, String> {
+    let request = parse_request(request_json)?;
+    let (report, report_path) =
+        mesher_client::run_request(worker, &request, limits, on_message, cancel)?;
+    Ok(Run {
+        report_json: report.to_json(),
+        report_path,
+    })
+}
+
+/// The job a request builds, as JSON, or `None` for a project file that
+/// cannot be used (running it gives a `PARSE_PROJECT_INVALID` report).
+///
+/// # Errors
+/// The JSON is not a valid request, or an option is out of range.
+pub fn build_job(request_json: &str) -> Result<Option<String>, String> {
+    match parse_request(request_json)?.job() {
+        Ok(job) => serde_json::to_string(&job)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        Err(RequestError::Project(_)) => Ok(None),
+        Err(RequestError::Invalid(e)) => Err(e),
+    }
+}
+
+fn parse_request(request_json: &str) -> Result<JobRequest, String> {
+    serde_json::from_str(request_json).map_err(|e| format!("not a valid request: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -72,5 +114,18 @@ mod tests {
             );
             assert!(r.unwrap_err().starts_with("not a valid job"), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_request_builds_the_clis_job() {
+        let job = build_job(r#"{"input": "m.obj", "element_size": 0.05}"#)
+            .unwrap()
+            .unwrap();
+        let job: Job = serde_json::from_str(&job).unwrap();
+        assert_eq!(job.output_dir, "m_out");
+        assert_eq!(job.config.element_size, 0.05);
+        assert!(build_job(r#"{"input": "m.obj", "element_size": -1}"#).is_err());
+        assert!(build_job(r#"{"input": "m.obj", "colour": 1}"#).is_err());
+        assert_eq!(build_job(r#"{"input": "missing.toml"}"#), Ok(None));
     }
 }

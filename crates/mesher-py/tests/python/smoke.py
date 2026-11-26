@@ -55,6 +55,28 @@ def main():
     reasons = [r["measured"].get("reason") for r in after["records"] if r["code"] == "MESH_WORKER_FAILED"]
     assert reasons == ["cancelled"], reasons
 
+    # Requests, as `mesher run` takes them.
+    job = mesher.build_job({"input": cube, "element_size": 0.05, "formats": ["vtu", "exodus"]})
+    assert job["output_dir"] == "cube_out", job
+    assert job["config"]["element_size"] == 0.05
+    assert job["config"]["formats"] == ["exodus", "vtu"]
+    for bad in [{"input": cube, "element_size": 0}, {"input": cube, "colour": 1}, {"out": "x"}]:
+        try:
+            mesher.build_job(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{bad} built a job")
+    broken = out / "broken.toml"
+    broken.write_text("not a project")
+    assert mesher.build_job({"input": broken}) is None
+    failed = mesher.run_request({"input": broken, "out": out / "broken_out"})
+    codes = [r["code"] for r in json.loads(failed.report_json)["records"]]
+    assert codes == ["PARSE_PROJECT_INVALID"], codes
+    assert pathlib.Path(failed.report_path).read_text() == failed.report_json
+    by_request = mesher.run_request({"input": cube, "out": out / "by_request"}, timeout=600)
+    assert by_request.report_json == run.report_json, "a request and its job differ"
+
     for bad in [{"input": 3}, {"output_dir": "x"}]:
         try:
             mesher.run_job(bad)
