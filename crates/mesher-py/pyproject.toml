@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "exodusmesher"
+description = "Automatic tetrahedral meshing of OBJ surfaces with structured defect reports"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+# The extension module `mesher._mesher` beside the Python package in
+# `python/mesher`, which also carries the worker binary (`bin/`, put there
+# by `build_wheel.py`).
+python-source = "python"
+module-name = "mesher._mesher"
+features = ["python"]

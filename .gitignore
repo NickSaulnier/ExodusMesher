@@ -2,3 +2,7 @@
 **/*.rs.bk
 /out
 *_out/
+
+# The worker binary copied into the Python package by build_wheel.py.
+/crates/mesher-py/python/mesher/bin/
+__pycache__/
