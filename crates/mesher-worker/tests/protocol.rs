@@ -385,6 +385,35 @@ fn only_the_chosen_formats_are_written() {
 }
 
 #[test]
+fn an_openfoam_case_is_written_when_chosen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cube.obj"), dir.path());
+    job.config.formats = vec![mesher_core::OutputFormat::Openfoam];
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 0);
+    let case = dir.path().join("openfoam");
+    for file in [
+        "constant/polyMesh/points",
+        "constant/polyMesh/faces",
+        "constant/polyMesh/owner",
+        "constant/polyMesh/neighbour",
+        "constant/polyMesh/boundary",
+        "constant/polyMesh/cellZones",
+        "system/controlDict",
+    ] {
+        assert!(case.join(file).exists(), "{file} missing");
+    }
+    for file in ["mesh.exo", "mesh.msh", "mesh.vtu"] {
+        assert!(!dir.path().join(file).exists(), "{file} written");
+    }
+    // The owner file's note counts the cells the report does.
+    let report = run.report_file.unwrap();
+    let tets = report.parts[0].mesh.as_ref().unwrap().tets;
+    let owner = std::fs::read_to_string(case.join("constant/polyMesh/owner")).unwrap();
+    assert!(owner.contains(&format!("nCells:{tets} ")), "{owner:.400}");
+}
+
+#[test]
 fn cube_end_to_end_writes_a_valid_exodus_mesh() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube.obj"), dir.path());

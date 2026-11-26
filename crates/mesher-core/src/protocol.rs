@@ -24,6 +24,8 @@ pub const FEATURES_FILE: &str = "features.vtp";
 pub const MESH_EXODUS_FILE: &str = "mesh.exo";
 pub const MESH_MSH_FILE: &str = "mesh.msh";
 pub const MESH_VTU_FILE: &str = "mesh.vtu";
+/// The OpenFOAM case directory (`constant/polyMesh/`, `system/controlDict`).
+pub const MESH_FOAM_DIR: &str = "openfoam";
 
 /// Environment variable that makes the worker fail on purpose (`panic`,
 /// `hang`, or `alloc`: allocate up to 1 GiB), so tests can exercise the

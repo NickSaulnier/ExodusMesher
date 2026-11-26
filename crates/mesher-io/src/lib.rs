@@ -1,7 +1,9 @@
 //! Readers and writers: the OBJ reader and writer, the defect overlay (.vtp),
-//! and the volume-mesh writers: Exodus II, Gmsh .msh 4.1 and VTK .vtu.
+//! and the volume-mesh writers: Exodus II, Gmsh .msh 4.1, VTK .vtu and an
+//! OpenFOAM polyMesh case.
 
 pub mod exodus;
+pub mod foam;
 pub mod msh;
 pub mod obj;
 pub mod vtp;

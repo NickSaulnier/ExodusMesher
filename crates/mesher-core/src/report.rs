@@ -118,6 +118,7 @@ defect_codes! {
     VolGradation = "VOL_GRADATION", Warning, "Neighbouring cells' sizes differ beyond the gradation limit";
     ExoNameTruncated = "EXO_NAME_TRUNCATED", Warning, "Part or set name over the Exodus limit";
     ExoCapacityExceeded = "EXO_CAPACITY_EXCEEDED", Error, "Mesh too large for the 64-bit-offset format";
+    OutNameChanged = "OUT_NAME_CHANGED", Warning, "A part or patch name was changed to one the output format accepts";
     OutWriteFailed = "OUT_WRITE_FAILED", Fatal, "An output file could not be written";
 }
 
@@ -156,6 +157,8 @@ pub enum Action {
     Reorient,
     Flip,
     Truncate,
+    /// A name an output format cannot hold, written as one it can.
+    Rename,
     Fallback,
     Abort,
     /// A tet rounding turned over, fixed by moving a constructed vertex
@@ -619,17 +622,24 @@ pub enum OutputFormat {
     Gmsh,
     /// VTK unstructured grid (`mesh.vtu`).
     Vtu,
+    /// An OpenFOAM case (`openfoam/`): an ASCII polyMesh with a patch per
+    /// boundary patch and a cell zone per part. Not written by default.
+    Openfoam,
 }
 
 impl OutputFormat {
     /// Every format, in the order written.
-    pub const ALL: [OutputFormat; 3] =
-        [OutputFormat::Exodus, OutputFormat::Gmsh, OutputFormat::Vtu];
+    pub const ALL: [OutputFormat; 4] = [
+        OutputFormat::Exodus,
+        OutputFormat::Gmsh,
+        OutputFormat::Vtu,
+        OutputFormat::Openfoam,
+    ];
 
     /// The formats written by default.
     #[must_use]
     pub fn defaults() -> Vec<OutputFormat> {
-        OutputFormat::ALL.to_vec()
+        vec![OutputFormat::Exodus, OutputFormat::Gmsh, OutputFormat::Vtu]
     }
 
     /// Whether `formats` is the default set, in any order.
@@ -648,6 +658,7 @@ impl OutputFormat {
             OutputFormat::Exodus => "exodus",
             OutputFormat::Gmsh => "gmsh",
             OutputFormat::Vtu => "vtu",
+            OutputFormat::Openfoam => "openfoam",
         }
     }
 }

@@ -88,7 +88,8 @@ struct RunArgs {
     #[arg(long, value_parser = angle)]
     feature_angle: Option<f64>,
     /// The mesh files to write, comma-separated: `exodus` (mesh.exo),
-    /// `gmsh` (mesh.msh), `vtu` (mesh.vtu) [default: all three].
+    /// `gmsh` (mesh.msh), `vtu` (mesh.vtu), `openfoam` (an OpenFOAM case in
+    /// openfoam/) [default: exodus, gmsh and vtu].
     #[arg(long, value_enum, value_delimiter = ',', num_args = 1..)]
     formats: Vec<FormatArg>,
     /// Kill the worker after this many seconds.
@@ -107,6 +108,7 @@ enum FormatArg {
     Exodus,
     Gmsh,
     Vtu,
+    Openfoam,
 }
 
 impl FormatArg {
@@ -115,6 +117,7 @@ impl FormatArg {
             FormatArg::Exodus => OutputFormat::Exodus,
             FormatArg::Gmsh => OutputFormat::Gmsh,
             FormatArg::Vtu => OutputFormat::Vtu,
+            FormatArg::Openfoam => OutputFormat::Openfoam,
         }
     }
 }

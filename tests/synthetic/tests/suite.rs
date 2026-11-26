@@ -716,6 +716,52 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
             Err(e) => failures.push(format!("{label}: part {} faces: {e:?}", m.name)),
         }
     }
+    // With `SUITE_FOAM_DIR`, each case's mesh as an OpenFOAM case there, for
+    // `checkMesh` (`tests/foam/check.sh`).
+    if let Some(root) = std::env::var_os("SUITE_FOAM_DIR").filter(|_| !run.meshes.meshed.is_empty())
+    {
+        let mesh = mesher_core::volume::assemble(&run.meshes.meshed);
+        let name: String = label
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let case = std::path::Path::new(&root).join(name);
+        let mut log = RecordLog::new();
+        match mesher_io::foam::foam_files(&mesh, &mut log) {
+            Ok(files) => {
+                for (file, text) in files {
+                    let path = case.join(file);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(&path, text).unwrap();
+                }
+                // Our worst interior non-orthogonality and skewness, to set
+                // against checkMesh's.
+                let worst = |f: fn(&mesher_core::MeshSummary) -> f64| {
+                    run.meshes
+                        .summaries
+                        .iter()
+                        .map(|(_, s)| f(s))
+                        .fold(0.0, f64::max)
+                };
+                std::fs::write(
+                    case.join("ours.txt"),
+                    format!(
+                        "non-orthogonality {}\tskewness {}\n",
+                        worst(|s| s.max_non_orthogonality_degrees),
+                        worst(|s| s.max_skewness)
+                    ),
+                )
+                .unwrap();
+            }
+            Err(e) => failures.push(format!("{label}: OpenFOAM case: {e:?}")),
+        }
+    }
     for code in [
         DefectCode::VolInvertedTet,
         DefectCode::VolLowQuality,

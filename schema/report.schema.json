@@ -82,6 +82,11 @@
           ]
         },
         {
+          "description": "A name an output format cannot hold, written as one it can.",
+          "type": "string",
+          "const": "rename"
+        },
+        {
           "description": "A tet rounding turned over, fixed by moving a constructed vertex\nwithin its rounding or by a flip.",
           "type": "string",
           "const": "untangle"
@@ -361,6 +366,11 @@
           "description": "Mesh too large for the 64-bit-offset format",
           "type": "string",
           "const": "EXO_CAPACITY_EXCEEDED"
+        },
+        {
+          "description": "A part or patch name was changed to one the output format accepts",
+          "type": "string",
+          "const": "OUT_NAME_CHANGED"
         },
         {
           "description": "An output file could not be written",
@@ -865,6 +875,11 @@
           "description": "VTK unstructured grid (`mesh.vtu`).",
           "type": "string",
           "const": "vtu"
+        },
+        {
+          "description": "An OpenFOAM case (`openfoam/`): an ASCII polyMesh with a patch per\nboundary patch and a cell zone per part. Not written by default.",
+          "type": "string",
+          "const": "openfoam"
         }
       ]
     },

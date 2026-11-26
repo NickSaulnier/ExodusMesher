@@ -13,8 +13,8 @@ use std::path::Path;
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
 use mesher_core::model::SurfaceModel;
 use mesher_core::protocol::{
-    FEATURES_FILE, Job, MESH_EXODUS_FILE, MESH_MSH_FILE, MESH_VTU_FILE, OVERLAY_FILE,
-    REPAIRED_FILE, REPORT_FILE, WorkerMessage,
+    FEATURES_FILE, Job, MESH_EXODUS_FILE, MESH_FOAM_DIR, MESH_MSH_FILE, MESH_VTU_FILE,
+    OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE, WorkerMessage,
 };
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::volume::{assemble, mesh_parts};
@@ -42,7 +42,7 @@ pub fn run(job: &Job, emit: &mut dyn FnMut(&WorkerMessage)) -> i32 {
     report.stages_run.push(Stage::Parse);
     report.input.stats = model.as_ref().map(SurfaceModel::stats);
 
-    let mut files: Vec<(&str, String)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
     let mut internal_error = None;
     if let Some(model) = model.as_ref().filter(|_| !log.has_fatal()) {
         match process(job, model, &mut log, &mut report, emit) {
@@ -90,7 +90,7 @@ fn process(
     log: &mut RecordLog,
     report: &mut Report,
     emit: &mut dyn FnMut(&WorkerMessage),
-) -> Result<Vec<(&'static str, String)>, String> {
+) -> Result<Vec<(String, String)>, String> {
     let tol = Tolerances::for_job(&job.config);
     emit(&WorkerMessage::Progress {
         stage: Stage::Diagnose,
@@ -120,7 +120,7 @@ fn process(
         }
     }
     let mut files = vec![(
-        OVERLAY_FILE,
+        OVERLAY_FILE.to_owned(),
         mesher_io::vtp::overlay_vtp(model, &part_of, &overlay),
     )];
 
@@ -180,14 +180,17 @@ fn process(
                 curves: &f.curves,
             })
             .collect();
-        files.push((FEATURES_FILE, mesher_io::vtp::features_vtp(&lines)));
+        files.push((
+            FEATURES_FILE.to_owned(),
+            mesher_io::vtp::features_vtp(&lines),
+        ));
     }
     if !repaired.is_empty() {
         let surfaces: Vec<mesher_io::NamedSurface<'_>> = repaired
             .iter()
             .map(|r| (r.name.as_str(), &r.points[..], &r.faces[..]))
             .collect();
-        files.push((REPAIRED_FILE, mesher_io::write_obj(&surfaces)));
+        files.push((REPAIRED_FILE.to_owned(), mesher_io::write_obj(&surfaces)));
     }
     report.stages_run.push(Stage::VolumeMesh);
     report.stages_run.push(Stage::VolumeGate);
@@ -204,10 +207,20 @@ fn process(
     report.stages_run.push(Stage::Emit);
     let config = &job.config;
     if config.writes(OutputFormat::Gmsh) {
-        files.push((MESH_MSH_FILE, mesher_io::msh::msh_text(&mesh)));
+        files.push((MESH_MSH_FILE.to_owned(), mesher_io::msh::msh_text(&mesh)));
     }
     if config.writes(OutputFormat::Vtu) {
-        files.push((MESH_VTU_FILE, mesher_io::vtu::vtu_text(&mesh)));
+        files.push((MESH_VTU_FILE.to_owned(), mesher_io::vtu::vtu_text(&mesh)));
+    }
+    if config.writes(OutputFormat::Openfoam) {
+        // A face on more than two cells is a bug: the volume gate rejects
+        // such meshes.
+        let case = mesher_io::foam::foam_files(&mesh, log)
+            .map_err(|p| format!("the mesh has no face view: {p:?}"))?;
+        files.extend(
+            case.into_iter()
+                .map(|(name, text)| (format!("{MESH_FOAM_DIR}/{name}"), text)),
+        );
     }
     if config.writes(OutputFormat::Exodus) {
         write_mesh_exodus(job, &mesh, &meshes.meshed, log);
@@ -284,7 +297,7 @@ fn write_outputs(
     job: &Job,
     report: &mut Report,
     mut log: RecordLog,
-    files: &[(&str, String)],
+    files: &[(String, String)],
     internal_error: bool,
     emit: &mut dyn FnMut(&WorkerMessage),
 ) -> Option<String> {
@@ -315,7 +328,12 @@ fn write_outputs(
     }
     for (name, text) in files {
         let path = dir.join(name);
-        if let Err(err) = std::fs::write(&path, text) {
+        let written = match path.parent() {
+            Some(parent) if parent != dir => std::fs::create_dir_all(parent),
+            _ => Ok(()),
+        }
+        .and_then(|()| std::fs::write(&path, text));
+        if let Err(err) = written {
             fail(&mut log, &path, &err);
         }
     }

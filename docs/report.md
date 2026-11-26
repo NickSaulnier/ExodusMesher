@@ -36,7 +36,7 @@ The same input and settings give a byte-identical report.
 | `feature_angle` | Present when set (`--feature-angle`): the feature angle in degrees, between 0 and 180. Edges where the surface turns by more than it are feature lines, which remeshing keeps (their vertices move only along them, corners never) and `features` lists. Unset, remeshing and `features` use 40° and the size field's curvature term 45°; set, all use it |
 | `feature_edges` | Present when set (project file only): edges made feature lines whatever the angle, each `[a, b]`, 0-based indices into the parsed vertex list as in record locations; every repaired edge between vertices that came from `a` and `b` counts. One that matches no edge of a selected part is `FEAT_OVERRIDE_IGNORED` |
 | `sizes` | Present when set (project file only, `[[settings.sizes]]`): size controls, each with `element_size` (relative to the part's bounding-box diagonal, like `element_size`) and `part` (a name or 1-based index; absent: every part) and/or `group` (an OBJ group, the patch). A control with a part and no group sets that part's element size (the last listed wins); one with a group sets the size on that group's faces, graded away from them (it only refines: the floor of a quarter of the size moves down to it, and it cannot exceed the part's size). Under `uniform_size` only the patch sizes grade the field. One that takes no effect is `SIZE_CONTROL_IGNORED` |
-| `formats` | Present when not the default (`--formats`, or the project file): the mesh files written, of `exodus` (`mesh.exo`), `gmsh` (`mesh.msh`) and `vtu` (`mesh.vtu`). Default all three |
+| `formats` | Present when not the default (`--formats`, or the project file): the mesh files written, of `exodus` (`mesh.exo`), `gmsh` (`mesh.msh`), `vtu` (`mesh.vtu`) and `openfoam` (the case directory `openfoam/`). Default `exodus`, `gmsh` and `vtu` |
 | `smooth_edges` | Present when set (project file only): edges, as for `feature_edges`, that are not feature lines although they turn by more than the angle. A group boundary stays a feature line (`FEAT_OVERRIDE_IGNORED`) |
 
 ## Parts
@@ -87,7 +87,7 @@ A record is one finding:
 | `part` | The part, once parts exist |
 | `location` | Where it is: `vertices` (0-based indices into the parsed vertex list), `faces` (0-based indices into the triangulated face list; a polygon of n corners becomes n − 2 consecutive triangles), `obj_lines` (1-based lines of the input file), `point` (a position, when one stands for the finding). Each list holds at most 256 entries; a longer one keeps its full length in `measured` as `vertices_total`, `faces_total` or `obj_lines_total` |
 | `measured`, `threshold` | What was measured, and the limit it was held against, by name |
-| `action`, `outcome` | What was done (`skip_line`, `drop_face`, `fan_triangulate`, `remesh`, `merge`, `remove`, `fill_hole`, `split_edge`, `duplicate_vertex`, `reorient`, `flip`, `truncate`, `fallback`, `abort`, `untangle`, `resolve`, `wrap`) and whether it was `applied`, `failed` or `deferred` to a later stage |
+| `action`, `outcome` | What was done (`skip_line`, `drop_face`, `fan_triangulate`, `remesh`, `merge`, `remove`, `fill_hole`, `split_edge`, `duplicate_vertex`, `reorient`, `flip`, `truncate`, `rename`, `fallback`, `abort`, `untangle`, `resolve`, `wrap`) and whether it was `applied`, `failed` or `deferred` to a later stage |
 | `hint` | A sentence on what it means or what to try |
 
 At most 100 records are kept per code and stage (a repair's and the surface gate's records stay when diagnosis has used its share); `summary.by_code` still counts every occurrence. A finding is never repaired without a record.
@@ -164,6 +164,7 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `VOL_GRADATION` | warning | Neighbouring cells' sizes differ beyond the gradation limit | Warning, located at the face with the largest ratio of its cells' longest edges (`max_size_ratio` against 4; `element`, `neighbour`, `point`). Conformal meshes are graded to the limit before the gate, so it is rare: where a cell could not be split, or grading ran out of budget |
 | `EXO_NAME_TRUNCATED` | warning | Part or set name over the Exodus limit | Truncate, warning |
 | `EXO_CAPACITY_EXCEEDED` | error | Mesh too large for the 64-bit-offset format | Error |
+| `OUT_NAME_CHANGED` | warning | A part or patch name was changed to one the output format accepts | Rename, warning: `format` (`openfoam`), `entity` (`patch` or `cell_zone`), `name`, `written_as`. OpenFOAM names here are ASCII letters, digits, `_`, `.` and `-`, starting with a letter or `_`; other characters become `_`, and a repeated name takes `_2`, `_3`, ... |
 | `OUT_WRITE_FAILED` | fatal | An output file could not be written | Fatal |
 
 `VOL_LOW_QUALITY` is raised, a warning, for each of a mesh's dihedral angles outside its kernel's bounds, its worst non-orthogonality over 70° and its worst skewness over 2 (the targets the cell improvement aims at). The volume ratio is reported in the mesh summary but not gated.
@@ -213,6 +214,7 @@ Beside `report.json`, a run writes:
 
 - `mesh.exo`: Exodus II (netCDF-3 64-bit offset). One `TETRA4` element block per meshed part, named after it; a side set `<part>_boundary` per block, and one per OBJ group (on every kernel: a stuffed mesh's boundary faces take the group of a nearby input triangle facing their way, so near a group boundary they may go to either side; fill faces are in `<part>_boundary` only; a group in several parts is one side set spanning their blocks), using Exodus's tetrahedron face numbering; QA records with the tool and version. Names longer than 32 characters are truncated (`EXO_NAME_TRUNCATED`).
 - `mesh.msh` (Gmsh 4) and `mesh.vtu` (VTK), the same mesh.
+- `openfoam/`, with `--formats openfoam`: an OpenFOAM case, ready for `checkMesh`. `constant/polyMesh/` holds the mesh in ASCII (`points`, `faces`, `owner`, `neighbour`, `boundary`, `cellZones`): a cell zone per part, and a patch (type `patch`) per OBJ group, each boundary face in exactly one (a face in a group's side set goes to that group's patch, the rest of a part's boundary to `<part>_boundary`; empty patches are left out). `system/` holds a minimal `controlDict`, `fvSchemes` and `fvSolution` for a solver's case to replace. Names that are not OpenFOAM words are changed (`OUT_NAME_CHANGED`).
 - `repaired.obj`: the repaired surface.
 - `defects.vtp`: the findings' faces, edges and vertices, for ParaView.
 - `features.vtp`: the feature lines of every repaired part (as `features` counts them), one line cell per feature edge, with cell arrays `part` (1-based), `cause` (0 the angle, 1 a group boundary, 2 forced) and `curve` (within the part); written whenever a part was repaired.
