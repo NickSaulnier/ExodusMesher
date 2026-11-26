@@ -78,12 +78,13 @@ macro_rules! defect_codes {
 }
 
 defect_codes! {
-    ParseBadLine = "PARSE_BAD_LINE", Warning, "Malformed or non-numeric OBJ line";
+    ParseBadLine = "PARSE_BAD_LINE", Warning, "Malformed or non-numeric OBJ line, or a .meshb vertex that is not finite";
     ParseBadIndex = "PARSE_BAD_INDEX", Warning, "Face references a missing vertex";
     ParseReadFailed = "PARSE_READ_FAILED", Fatal, "Input file cannot be opened or read";
     ParseProjectInvalid = "PARSE_PROJECT_INVALID", Fatal, "Project file cannot be read or is not a valid project";
     ParseNoGeometry = "PARSE_NO_GEOMETRY", Fatal, "No faces survive parsing";
-    ParseUnsupportedElement = "PARSE_UNSUPPORTED_ELEMENT", Info, "Lines, points, curves or surfaces in the OBJ file";
+    ParseFormatInvalid = "PARSE_FORMAT_INVALID", Error, "A binary input file (.meshb) is malformed or truncated";
+    ParseUnsupportedElement = "PARSE_UNSUPPORTED_ELEMENT", Info, "Lines, points, curves or surfaces in the OBJ file, or elements other than triangles in a .meshb file";
     ParsePolygonFallback = "PARSE_POLYGON_FALLBACK", Warning, "Polygon could not be ear-clipped and was fan-triangulated";
     PartEmptySelection = "PART_EMPTY_SELECTION", Fatal, "No parts selected, or a named part does not exist";
     PartOverlap = "PART_OVERLAP", Error, "Two selected parts intersect";
@@ -629,16 +630,21 @@ pub enum OutputFormat {
     /// an interior face zone, a wall face zone per boundary patch. Not
     /// written by default.
     Fluent,
+    /// A libMeshb binary file (`mesh.meshb`): tetrahedra referenced by part,
+    /// boundary triangles by patch, with `mesh_refs.txt` naming each
+    /// reference. Not written by default.
+    Meshb,
 }
 
 impl OutputFormat {
     /// Every format, in the order written.
-    pub const ALL: [OutputFormat; 5] = [
+    pub const ALL: [OutputFormat; 6] = [
         OutputFormat::Exodus,
         OutputFormat::Gmsh,
         OutputFormat::Vtu,
         OutputFormat::Openfoam,
         OutputFormat::Fluent,
+        OutputFormat::Meshb,
     ];
 
     /// The formats written by default.
@@ -665,6 +671,7 @@ impl OutputFormat {
             OutputFormat::Vtu => "vtu",
             OutputFormat::Openfoam => "openfoam",
             OutputFormat::Fluent => "fluent",
+            OutputFormat::Meshb => "meshb",
         }
     }
 }

@@ -13,8 +13,9 @@ use std::path::Path;
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
 use mesher_core::model::SurfaceModel;
 use mesher_core::protocol::{
-    FEATURES_FILE, Job, MESH_EXODUS_FILE, MESH_FLUENT_FILE, MESH_FOAM_DIR, MESH_MSH_FILE,
-    MESH_VTU_FILE, OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE, WorkerMessage,
+    FEATURES_FILE, Job, MESH_EXODUS_FILE, MESH_FLUENT_FILE, MESH_FOAM_DIR, MESH_MESHB_FILE,
+    MESH_MESHB_REFS_FILE, MESH_MSH_FILE, MESH_VTU_FILE, OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE,
+    WorkerMessage,
 };
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::volume::{assemble, mesh_parts};
@@ -33,7 +34,7 @@ pub fn run(job: &Job, emit: &mut dyn FnMut(&WorkerMessage)) -> i32 {
         stage: Stage::Parse,
         fraction: 0.0,
     });
-    let model = mesher_io::read_obj(Path::new(&job.input), &mut log, &mut |fraction| {
+    let model = mesher_io::read_surface(Path::new(&job.input), &mut log, &mut |fraction| {
         emit(&WorkerMessage::Progress {
             stage: Stage::Parse,
             fraction,
@@ -42,7 +43,7 @@ pub fn run(job: &Job, emit: &mut dyn FnMut(&WorkerMessage)) -> i32 {
     report.stages_run.push(Stage::Parse);
     report.input.stats = model.as_ref().map(SurfaceModel::stats);
 
-    let mut files: Vec<(String, String)> = Vec::new();
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     let mut internal_error = None;
     if let Some(model) = model.as_ref().filter(|_| !log.has_fatal()) {
         match process(job, model, &mut log, &mut report, emit) {
@@ -90,7 +91,7 @@ fn process(
     log: &mut RecordLog,
     report: &mut Report,
     emit: &mut dyn FnMut(&WorkerMessage),
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let tol = Tolerances::for_job(&job.config);
     emit(&WorkerMessage::Progress {
         stage: Stage::Diagnose,
@@ -121,7 +122,7 @@ fn process(
     }
     let mut files = vec![(
         OVERLAY_FILE.to_owned(),
-        mesher_io::vtp::overlay_vtp(model, &part_of, &overlay),
+        mesher_io::vtp::overlay_vtp(model, &part_of, &overlay).into_bytes(),
     )];
 
     let Some(selected) = selected.filter(|_| !job.config.no_repair) else {
@@ -182,7 +183,7 @@ fn process(
             .collect();
         files.push((
             FEATURES_FILE.to_owned(),
-            mesher_io::vtp::features_vtp(&lines),
+            mesher_io::vtp::features_vtp(&lines).into_bytes(),
         ));
     }
     if !repaired.is_empty() {
@@ -190,7 +191,10 @@ fn process(
             .iter()
             .map(|r| (r.name.as_str(), &r.points[..], &r.faces[..]))
             .collect();
-        files.push((REPAIRED_FILE.to_owned(), mesher_io::write_obj(&surfaces)));
+        files.push((
+            REPAIRED_FILE.to_owned(),
+            mesher_io::write_obj(&surfaces).into_bytes(),
+        ));
     }
     report.stages_run.push(Stage::VolumeMesh);
     report.stages_run.push(Stage::VolumeGate);
@@ -207,10 +211,16 @@ fn process(
     report.stages_run.push(Stage::Emit);
     let config = &job.config;
     if config.writes(OutputFormat::Gmsh) {
-        files.push((MESH_MSH_FILE.to_owned(), mesher_io::msh::msh_text(&mesh)));
+        files.push((
+            MESH_MSH_FILE.to_owned(),
+            mesher_io::msh::msh_text(&mesh).into_bytes(),
+        ));
     }
     if config.writes(OutputFormat::Vtu) {
-        files.push((MESH_VTU_FILE.to_owned(), mesher_io::vtu::vtu_text(&mesh)));
+        files.push((
+            MESH_VTU_FILE.to_owned(),
+            mesher_io::vtu::vtu_text(&mesh).into_bytes(),
+        ));
     }
     if config.writes(OutputFormat::Openfoam) {
         // A face on more than two cells is a bug: the volume gate rejects
@@ -219,13 +229,19 @@ fn process(
             .map_err(|p| format!("the mesh has no face view: {p:?}"))?;
         files.extend(
             case.into_iter()
-                .map(|(name, text)| (format!("{MESH_FOAM_DIR}/{name}"), text)),
+                .map(|(name, text)| (format!("{MESH_FOAM_DIR}/{name}"), text.into_bytes())),
         );
     }
     if config.writes(OutputFormat::Fluent) {
         let text = mesher_io::fluent::fluent_text(&mesh, log)
             .map_err(|p| format!("the mesh has no face view: {p:?}"))?;
-        files.push((MESH_FLUENT_FILE.to_owned(), text));
+        files.push((MESH_FLUENT_FILE.to_owned(), text.into_bytes()));
+    }
+    if config.writes(OutputFormat::Meshb) {
+        let m = mesher_io::meshb::meshb(&mesh)
+            .map_err(|p| format!("the mesh has no face view: {p:?}"))?;
+        files.push((MESH_MESHB_FILE.to_owned(), m.bytes));
+        files.push((MESH_MESHB_REFS_FILE.to_owned(), m.refs.into_bytes()));
     }
     if config.writes(OutputFormat::Exodus) {
         write_mesh_exodus(job, &mesh, &meshes.meshed, log);
@@ -302,7 +318,7 @@ fn write_outputs(
     job: &Job,
     report: &mut Report,
     mut log: RecordLog,
-    files: &[(String, String)],
+    files: &[(String, Vec<u8>)],
     internal_error: bool,
     emit: &mut dyn FnMut(&WorkerMessage),
 ) -> Option<String> {

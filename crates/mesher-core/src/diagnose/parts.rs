@@ -2,7 +2,8 @@
 //!
 //! - Any `o` statement: one part per object; faces before the first `o` form
 //!   the part `default`.
-//! - Otherwise any `g` statement: one part per group, likewise.
+//! - Otherwise any `g` statement: one part per group, likewise (unless the
+//!   groups are patches only, as a `.meshb` file's references are).
 //! - Otherwise connected components (through shared merged vertices). A
 //!   component that is inward-facing and enclosed by another component is a
 //!   cavity, not a part of its own: it joins the innermost component around it.
@@ -50,7 +51,7 @@ pub(crate) fn split(model: &SurfaceModel, rep: &[u32]) -> Result<Vec<Group>, Int
         let pick = |t: u32| model.polygon_of(t).and_then(|p| p.object);
         return Ok(by_name(&pick, &model.objects, PartSource::Object));
     }
-    if !model.groups.is_empty() {
+    if !model.groups.is_empty() && !model.groups_are_patches {
         let pick = |t: u32| model.polygon_of(t).and_then(|p| p.group);
         return Ok(by_name(&pick, &model.groups, PartSource::Group));
     }

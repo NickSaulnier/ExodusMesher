@@ -28,6 +28,9 @@ pub const MESH_VTU_FILE: &str = "mesh.vtu";
 pub const MESH_FOAM_DIR: &str = "openfoam";
 /// The Fluent mesh file (beside Gmsh's `mesh.msh`).
 pub const MESH_FLUENT_FILE: &str = "mesh_fluent.msh";
+/// The libMeshb binary mesh, and what its references are.
+pub const MESH_MESHB_FILE: &str = "mesh.meshb";
+pub const MESH_MESHB_REFS_FILE: &str = "mesh_refs.txt";
 
 /// Environment variable that makes the worker fail on purpose (`panic`,
 /// `hang`, or `alloc`: allocate up to 1 GiB), so tests can exercise the
@@ -38,7 +41,7 @@ pub const TEST_FAULT_ENV: &str = "MESHER_TEST_FAULT";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Job {
-    /// Path of the input .obj file, as the user gave it.
+    /// Path of the input surface (.obj, or .meshb by its extension), as the user gave it.
     pub input: String,
     /// Directory the worker writes `report.json` and meshes into; created if missing.
     pub output_dir: String,

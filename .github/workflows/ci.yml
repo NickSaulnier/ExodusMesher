@@ -1,6 +1,8 @@
 # The regression gate: formatting, lints and the full test suite (including
 # the synthetic defect suite and the TetGen oracle tests) on Linux and
-# Windows, and on Linux OpenFOAM's checkMesh on every synthetic case's mesh. The Thingi10k benchmarks stay local (ignored tests): the meshes
+# Windows, and on Linux OpenFOAM's checkMesh on every synthetic case's mesh,
+# with its Fluent file round-tripped through OpenFOAM and its .meshb file
+# through meshio. The Thingi10k benchmarks stay local (ignored tests): the meshes
 # carry Thingiverse licences and are never committed.
 name: CI
 
@@ -50,7 +52,7 @@ jobs:
       # Each synthetic mesh as an OpenFOAM case and a Fluent file; checkMesh
       # checks the case, and the Fluent file goes round through OpenFOAM's
       # fluent3DMeshToFoam to the same counts.
-      - name: Synthetic meshes as OpenFOAM cases and Fluent files
+      - name: Synthetic meshes as OpenFOAM cases, Fluent and .meshb files
         if: runner.os == 'Linux'
         run: SUITE_FOAM_DIR="$PWD/target/foam" cargo test --release -p mesher-synthetic --test suite --test side_sets
       - name: checkMesh
@@ -60,6 +62,18 @@ jobs:
           -v "$PWD/target/foam:/cases" -v "$PWD/tests/foam:/check:ro"
           opencfd/openfoam-run@sha256:707421ab7d1e5201d86723945a6649490e292a0c46ed03d36982449e6b3b7243
           bash /check/check.sh /cases
+      # Each .meshb file through meshio (MIT; pinned), then meshio's copy
+      # back through our reader.
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
+        with:
+          python-version: "3.12"
+      - name: .meshb round trip through meshio
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip install meshio==5.3.5
+          python -I tests/meshb/meshio_roundtrip.py target/foam
+          MESHB_MESHIO_DIR="$PWD/target/foam" cargo test --release -p mesher-synthetic --test meshb_meshio -- --nocapture
       - name: checkMesh logs
         if: failure() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4

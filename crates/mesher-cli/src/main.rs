@@ -36,7 +36,7 @@ enum Command {
 
 #[derive(clap::Args)]
 struct RunArgs {
-    /// Input .obj file, or a project file (.toml). A project supplies the
+    /// Input .obj or .meshb file, or a project file (.toml). A project supplies the
     /// input, output directory and settings; options given here override it.
     input: PathBuf,
     /// Output directory [default: <input stem>_out in the current directory].
@@ -89,8 +89,8 @@ struct RunArgs {
     feature_angle: Option<f64>,
     /// The mesh files to write, comma-separated: `exodus` (mesh.exo),
     /// `gmsh` (mesh.msh), `vtu` (mesh.vtu), `openfoam` (an OpenFOAM case in
-    /// openfoam/), `fluent` (mesh_fluent.msh) [default: exodus, gmsh and
-    /// vtu].
+    /// openfoam/), `fluent` (mesh_fluent.msh), `meshb` (mesh.meshb and
+    /// mesh_refs.txt) [default: exodus, gmsh and vtu].
     #[arg(long, value_enum, value_delimiter = ',', num_args = 1..)]
     formats: Vec<FormatArg>,
     /// Kill the worker after this many seconds.
@@ -111,6 +111,7 @@ enum FormatArg {
     Vtu,
     Openfoam,
     Fluent,
+    Meshb,
 }
 
 impl FormatArg {
@@ -121,6 +122,7 @@ impl FormatArg {
             FormatArg::Vtu => OutputFormat::Vtu,
             FormatArg::Openfoam => OutputFormat::Openfoam,
             FormatArg::Fluent => OutputFormat::Fluent,
+            FormatArg::Meshb => OutputFormat::Meshb,
         }
     }
 }

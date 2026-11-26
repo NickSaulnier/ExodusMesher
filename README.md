@@ -1,6 +1,6 @@
 # ExodusMesher
 
-A pure-Rust automatic mesher that turns OBJ files, as they occur in the wild, into tetrahedral volume meshes for a finite-volume solver. Every run ends in a valid mesh or a report that says exactly why not: structured defect codes, locations back to OBJ lines, every repair and every meshing attempt.
+A pure-Rust automatic mesher that turns OBJ files (or `.meshb` surfaces), as they occur in the wild, into tetrahedral volume meshes for a finite-volume solver. Every run ends in a valid mesh or a report that says exactly why not: structured defect codes, locations back to OBJ lines, every repair and every meshing attempt.
 
 - **Inputs:** OBJ with triangles, quads and n-gons, several objects and groups, and the usual defects (duplicate vertices, degenerate faces, holes, non-manifold edges, flipped or inconsistent orientation, self-intersections, touching or nested shells, unknown units).
 - **Outputs:** Exodus II (`mesh.exo`, one `TETRA4` block per part, side sets per part boundary and OBJ group), Gmsh `.msh` v4, VTK `.vtu`, the repaired surface (`repaired.obj`), a defect overlay for ParaView (`defects.vtp`) and `report.json`.
@@ -48,7 +48,7 @@ mesher: model.obj
 | `--no-remesh` | Keep each part's own surface triangulation: never remesh it (by default a part's surface is remeshed to the element size when its conformal mesh fails or its cells are beyond the quality limits) |
 | `--kernel exact` | Try the exact constrained Delaunay kernel first: the surface tetrahedralized exactly and rounded to f64, without refinement (so few, often thin, tets); the conformal kernel and stuffing follow if it fails. Default `conformal` |
 | `--wrap-alpha F` | The wrap's α for repair rung 3, relative to the element size (default 1): a part still not a valid solid after local repairs and resolving its intersections, whose stuffing fallback is rejected, is wrapped as the last resort, closing openings narrower than about 2α |
-| `--formats exodus,gmsh,vtu,openfoam,fluent` | The mesh files written: `mesh.exo`, `mesh.msh`, `mesh.vtu`, an OpenFOAM case in `openfoam/`, and a Fluent mesh `mesh_fluent.msh` (default the first three) |
+| `--formats exodus,gmsh,vtu,openfoam,fluent,meshb` | The mesh files written: `mesh.exo`, `mesh.msh`, `mesh.vtu`, an OpenFOAM case in `openfoam/`, a Fluent mesh `mesh_fluent.msh`, and a libMeshb `mesh.meshb` with `mesh_refs.txt` (default the first three) |
 | `--no-repair` | Diagnose and report only (a linter) |
 | `--timeout S`, `--memory-limit MiB` | Limits for the worker (defaults 3600 s, 8192 MiB) |
 

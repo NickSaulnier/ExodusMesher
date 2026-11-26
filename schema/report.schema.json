@@ -168,7 +168,7 @@
       "description": "Stable defect codes. Serialized as `SCREAMING_SNAKE_CASE` strings.",
       "oneOf": [
         {
-          "description": "Malformed or non-numeric OBJ line",
+          "description": "Malformed or non-numeric OBJ line, or a .meshb vertex that is not finite",
           "type": "string",
           "const": "PARSE_BAD_LINE"
         },
@@ -193,7 +193,12 @@
           "const": "PARSE_NO_GEOMETRY"
         },
         {
-          "description": "Lines, points, curves or surfaces in the OBJ file",
+          "description": "A binary input file (.meshb) is malformed or truncated",
+          "type": "string",
+          "const": "PARSE_FORMAT_INVALID"
+        },
+        {
+          "description": "Lines, points, curves or surfaces in the OBJ file, or elements other than triangles in a .meshb file",
           "type": "string",
           "const": "PARSE_UNSUPPORTED_ELEMENT"
         },
@@ -885,6 +890,11 @@
           "description": "A Fluent mesh file (`mesh_fluent.msh`, ASCII): a cell zone per part,\nan interior face zone, a wall face zone per boundary patch. Not\nwritten by default.",
           "type": "string",
           "const": "fluent"
+        },
+        {
+          "description": "A libMeshb binary file (`mesh.meshb`): tetrahedra referenced by part,\nboundary triangles by patch, with `mesh_refs.txt` naming each\nreference. Not written by default.",
+          "type": "string",
+          "const": "meshb"
         }
       ]
     },

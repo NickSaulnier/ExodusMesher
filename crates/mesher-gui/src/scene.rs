@@ -47,12 +47,12 @@ pub fn severity_slot(s: Severity) -> usize {
 }
 
 impl Scene {
-    /// Read and diagnose an OBJ file. Never fails: problems are records (a
+    /// Read and diagnose an input surface (OBJ or `.meshb`). Never fails: problems are records (a
     /// file that cannot be read has no parts and a fatal record).
     #[must_use]
     pub fn load(path: &Path) -> Scene {
         let mut log = RecordLog::new();
-        let model = mesher_io::read_obj(path, &mut log, &mut |_| {});
+        let model = mesher_io::read_surface(path, &mut log, &mut |_| {});
         let mut scene = Scene {
             path: path.to_path_buf(),
             model: model.clone().unwrap_or_default(),

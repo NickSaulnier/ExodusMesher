@@ -151,8 +151,9 @@ fn configs() -> Vec<(&'static str, JobConfig, f64)> {
     ]
 }
 
-/// With `SUITE_FOAM_DIR`, the mesh as an OpenFOAM case and a Fluent file
-/// there, as the suite writes them (for `tests/foam/check.sh`).
+/// With `SUITE_FOAM_DIR`, the mesh as an OpenFOAM case, a Fluent file and a
+/// `.meshb` file there, as the suite writes them (for `tests/foam/check.sh`
+/// and `tests/meshb/meshio_roundtrip.py`).
 fn write_cases(name: &str, mesh: &VolumeMesh) {
     let Some(root) = std::env::var_os("SUITE_FOAM_DIR").filter(|d| !d.is_empty()) else {
         return;
@@ -170,6 +171,9 @@ fn write_cases(name: &str, mesh: &VolumeMesh) {
     }
     let fluent = mesher_io::fluent::fluent_text(mesh, &mut log).expect("faces");
     std::fs::write(case.join("mesh_fluent.msh"), fluent).unwrap();
+    let m = mesher_io::meshb::meshb(mesh).expect("faces");
+    std::fs::write(case.join("mesh.meshb"), m.bytes).unwrap();
+    std::fs::write(case.join("mesh_refs.txt"), m.refs).unwrap();
 }
 
 /// Every group is one side set of its name, of the group's area.

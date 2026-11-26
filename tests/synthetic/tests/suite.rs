@@ -717,7 +717,7 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
         }
     }
     // With `SUITE_FOAM_DIR`, each case's mesh as an OpenFOAM case there, for
-    // `checkMesh` (`tests/foam/check.sh`).
+    // `checkMesh` (`tests/foam/check.sh`), with its Fluent and `.meshb` files.
     if let Some(root) = std::env::var_os("SUITE_FOAM_DIR")
         .filter(|d| !d.is_empty())
         .filter(|_| !run.meshes.meshed.is_empty())
@@ -768,6 +768,15 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
         match mesher_io::fluent::fluent_text(&mesh, &mut log) {
             Ok(text) => std::fs::write(case.join("mesh_fluent.msh"), text).unwrap(),
             Err(e) => failures.push(format!("{label}: Fluent file: {e:?}")),
+        }
+        // And the .meshb file, for the round trip through meshio
+        // (`tests/meshb/meshio_roundtrip.py`).
+        match mesher_io::meshb::meshb(&mesh) {
+            Ok(m) => {
+                std::fs::write(case.join("mesh.meshb"), m.bytes).unwrap();
+                std::fs::write(case.join("mesh_refs.txt"), m.refs).unwrap();
+            }
+            Err(e) => failures.push(format!("{label}: .meshb file: {e:?}")),
         }
     }
     for code in [

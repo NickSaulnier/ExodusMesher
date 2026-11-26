@@ -413,6 +413,41 @@ fn an_openfoam_case_is_written_when_chosen() {
     assert!(owner.contains(&format!("nCells:{tets} ")), "{owner:.400}");
 }
 
+/// The cube meshed to `.meshb`, then that file meshed again as an input: its
+/// boundary triangles are the surface (its tetrahedra are read past), its
+/// one reference a group.
+#[test]
+fn a_meshb_file_is_written_and_read_back_as_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cube.obj"), dir.path());
+    job.config.formats = vec![mesher_core::OutputFormat::Meshb];
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 0);
+    let meshb = dir.path().join("mesh.meshb");
+    let bytes = std::fs::read(&meshb).unwrap();
+    assert_eq!(&bytes[..8], &[1, 0, 0, 0, 2, 0, 0, 0]);
+    let refs = std::fs::read_to_string(dir.path().join("mesh_refs.txt")).unwrap();
+    assert!(refs.starts_with("tetrahedra 1 "), "{refs}");
+    assert!(refs.contains("triangles 1 "), "{refs}");
+
+    let again = tempfile::tempdir().unwrap();
+    let run = run_worker(&meshb.display().to_string(), again.path());
+    assert_eq!(run.exit_code, 0);
+    let report = run.report_file.unwrap();
+    assert_eq!(
+        report.input.stats.as_ref().unwrap().groups,
+        vec!["ref1".to_owned()]
+    );
+    assert_eq!(report.parts.len(), 1, "the groups are patches, not parts");
+    assert!(report.parts[0].mesh.is_some());
+    assert!(
+        report
+            .records
+            .iter()
+            .any(|r| r.code == mesher_core::DefectCode::ParseUnsupportedElement)
+    );
+}
+
 #[test]
 fn a_fluent_file_is_written_when_chosen() {
     let dir = tempfile::tempdir().unwrap();

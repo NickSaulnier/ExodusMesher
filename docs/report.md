@@ -10,7 +10,7 @@ The same input and settings give a byte-identical report.
 | --- | --- |
 | `schema_version` | Layout version; bumped on any breaking change |
 | `tool` | `name` and `version` of the mesher |
-| `input` | `path` as given, and `stats` (absent if the file could not be read): `bytes`, `lines`, `vertices`, `polygons` (faces as written), `triangles` (after triangulating polygons), `objects` and `groups` (names in order of appearance) |
+| `input` | `path` as given, and `stats` (absent if the file could not be read): `bytes`, `lines`, `vertices`, `polygons` (faces as written), `triangles` (after triangulating polygons), `objects` and `groups` (names in order of appearance; a `.meshb` input has no objects or lines, and its groups are its triangles' references, `ref<k>`, which name patches, not parts) |
 | `config` | The job's settings; see [Settings](#settings) |
 | `stages_run` | Stages that ran, in order: `parse`, `diagnose`, `select`, `repair`, `surface_gate`, `volume_mesh`, `volume_gate`, `emit`; empty when the worker failed before reporting (its record has stage `worker`) |
 | `parts` | One entry per part found, in index order; see [Parts](#parts) |
@@ -36,7 +36,7 @@ The same input and settings give a byte-identical report.
 | `feature_angle` | Present when set (`--feature-angle`): the feature angle in degrees, between 0 and 180. Edges where the surface turns by more than it are feature lines, which remeshing keeps (their vertices move only along them, corners never) and `features` lists. Unset, remeshing and `features` use 40° and the size field's curvature term 45°; set, all use it |
 | `feature_edges` | Present when set (project file only): edges made feature lines whatever the angle, each `[a, b]`, 0-based indices into the parsed vertex list as in record locations; every repaired edge between vertices that came from `a` and `b` counts. One that matches no edge of a selected part is `FEAT_OVERRIDE_IGNORED` |
 | `sizes` | Present when set (project file only, `[[settings.sizes]]`): size controls, each with `element_size` (relative to the part's bounding-box diagonal, like `element_size`) and `part` (a name or 1-based index; absent: every part) and/or `group` (an OBJ group, the patch). A control with a part and no group sets that part's element size (the last listed wins); one with a group sets the size on that group's faces, graded away from them (it only refines: the floor of a quarter of the size moves down to it, and it cannot exceed the part's size). Under `uniform_size` only the patch sizes grade the field. One that takes no effect is `SIZE_CONTROL_IGNORED` |
-| `formats` | Present when not the default (`--formats`, or the project file): the mesh files written, of `exodus` (`mesh.exo`), `gmsh` (`mesh.msh`), `vtu` (`mesh.vtu`), `openfoam` (the case directory `openfoam/`) and `fluent` (`mesh_fluent.msh`). Default `exodus`, `gmsh` and `vtu` |
+| `formats` | Present when not the default (`--formats`, or the project file): the mesh files written, of `exodus` (`mesh.exo`), `gmsh` (`mesh.msh`), `vtu` (`mesh.vtu`), `openfoam` (the case directory `openfoam/`), `fluent` (`mesh_fluent.msh`) and `meshb` (`mesh.meshb`, `mesh_refs.txt`). Default `exodus`, `gmsh` and `vtu` |
 | `smooth_edges` | Present when set (project file only): edges, as for `feature_edges`, that are not feature lines although they turn by more than the angle. A group boundary stays a feature line (`FEAT_OVERRIDE_IGNORED`) |
 
 ## Parts
@@ -124,12 +124,13 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 
 | Code | Default severity | Meaning | Default action |
 | --- | --- | --- | --- |
-| `PARSE_BAD_LINE` | warning | Malformed or non-numeric OBJ line | Skip line, warning |
+| `PARSE_BAD_LINE` | warning | Malformed or non-numeric OBJ line, or a .meshb vertex that is not finite | Skip line, warning (`.meshb`: `vertex`, 1-based) |
 | `PARSE_BAD_INDEX` | warning | Face references a missing vertex | Drop face, warning |
 | `PARSE_READ_FAILED` | fatal | Input file cannot be opened or read | Fatal |
 | `PARSE_PROJECT_INVALID` | fatal | Project file cannot be read or is not a valid project | Fatal |
 | `PARSE_NO_GEOMETRY` | fatal | No faces survive parsing | Fatal |
-| `PARSE_UNSUPPORTED_ELEMENT` | info | Lines, points, curves or surfaces in the OBJ file | Skip line, info |
+| `PARSE_FORMAT_INVALID` | error | A binary input file (.meshb) is malformed or truncated | Abort reading at `offset` (bytes) with a `reason` (byte-order code, version, truncation, a bad next position); what was read before is kept |
+| `PARSE_UNSUPPORTED_ELEMENT` | info | Lines, points, curves or surfaces in the OBJ file, or elements other than triangles in a .meshb file | Skip line, info (`.meshb`: one per keyword, `statement` its name and `count`) |
 | `PARSE_POLYGON_FALLBACK` | warning | Polygon could not be ear-clipped and was fan-triangulated | Fan-triangulate, warning |
 | `PART_EMPTY_SELECTION` | fatal | No parts selected, or a named part does not exist | Fatal |
 | `PART_OVERLAP` | error | Two selected parts intersect | Error |
@@ -216,6 +217,7 @@ Beside `report.json`, a run writes:
 - `mesh.msh` (Gmsh 4) and `mesh.vtu` (VTK), the same mesh.
 - `openfoam/`, with `--formats openfoam`: an OpenFOAM case, ready for `checkMesh`. `constant/polyMesh/` holds the mesh in ASCII (`points`, `faces`, `owner`, `neighbour`, `boundary`, `cellZones`): a cell zone per part, and a patch (type `patch`) per OBJ group, each boundary face in exactly one (a face in a group's side set goes to that group's patch, the rest of a part's boundary to `<part>_boundary`; empty patches are left out). `system/` holds a minimal `controlDict`, `fvSchemes` and `fvSolution` for a solver's case to replace. Names that are not OpenFOAM words are changed (`OUT_NAME_CHANGED`).
 - `mesh_fluent.msh`, with `--formats fluent`: a Fluent mesh file (ASCII): a cell zone of tetrahedra per part (type `fluid`), the internal faces as the zone `interior`, and a `wall` face zone per patch, the same patches as the OpenFOAM case. Names that are not lowercase Fluent symbols are changed (`OUT_NAME_CHANGED`).
+- `mesh.meshb`, with `--formats meshb`: a libMeshb binary file (version 2, or 3 beyond 2 GiB): the points, the boundary triangles out of the mesh with each patch's 1-based number as reference, and the tetrahedra with each part's. `mesh_refs.txt` names each reference (`tetrahedra <ref> <part>`, `triangles <ref> <patch>`), as the format holds no names.
 - `repaired.obj`: the repaired surface.
 - `defects.vtp`: the findings' faces, edges and vertices, for ParaView.
 - `features.vtp`: the feature lines of every repaired part (as `features` counts them), one line cell per feature edge, with cell arrays `part` (1-based), `cause` (0 the angle, 1 a group boundary, 2 forced) and `curve` (within the part); written whenever a part was repaired.

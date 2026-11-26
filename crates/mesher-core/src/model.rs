@@ -38,6 +38,10 @@ pub struct SurfaceModel {
     pub objects: Vec<String>,
     /// `g` names in order of first appearance.
     pub groups: Vec<String>,
+    /// Whether the groups are patches only, never parts (a `.meshb` file's
+    /// references): with no objects, parts are then the connected
+    /// components, as for a file with no groups.
+    pub groups_are_patches: bool,
     pub bytes: u64,
     pub lines: u64,
 }
