@@ -42,14 +42,16 @@ fn three_tets() -> String {
 fn binary(name: &str) -> PathBuf {
     // Binaries sit in target/<profile>, an ancestor of the test executable
     // (target/<profile>/deps before Cargo 1.100, target/<profile>/build/
-    // <package>/<hash>/out since).
+    // <package>/<hash>/out since). A file, not just a path that exists:
+    // target/<profile>/build/mesher-worker is that package's build directory,
+    // and on Linux, where executables have no suffix, it has the binary's name.
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe().unwrap();
     let path = exe
         .ancestors()
         .skip(1)
         .map(|d| d.join(&file))
-        .find(|p| p.exists());
+        .find(|p| p.is_file());
     path.unwrap_or_else(|| {
         panic!(
             "{file} not built (looked above {}); run `cargo test --workspace`",

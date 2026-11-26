@@ -39,13 +39,15 @@ fn data_dir() -> PathBuf {
 fn binaries() -> (PathBuf, PathBuf) {
     // target/<profile> is an ancestor of the test executable
     // (target/<profile>/deps before Cargo 1.100, target/<profile>/build/
-    // <package>/<hash>/out since).
+    // <package>/<hash>/out since). Files, not just paths that exist:
+    // target/<profile>/build/mesher-worker is that package's build directory,
+    // and on Linux, where executables have no suffix, it has the binary's name.
     let exe = std::env::current_exe().unwrap();
     let name = |n: &str| format!("{n}{}", std::env::consts::EXE_SUFFIX);
     let dir = exe
         .ancestors()
         .skip(1)
-        .find(|d| d.join(name("mesher")).exists() && d.join(name("mesher-worker")).exists())
+        .find(|d| d.join(name("mesher")).is_file() && d.join(name("mesher-worker")).is_file())
         .unwrap_or_else(|| {
             panic!(
                 "build them first: cargo build [--release] -p mesher-cli -p mesher-worker (looked above {})",
