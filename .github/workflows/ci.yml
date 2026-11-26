@@ -1,6 +1,6 @@
 # The regression gate: formatting, lints and the full test suite (including
 # the synthetic defect suite and the TetGen oracle tests) on Linux and
-# Windows. The Thingi10k benchmarks stay local (ignored tests): the meshes
+# Windows, and on Linux OpenFOAM's checkMesh on every synthetic case's mesh. The Thingi10k benchmarks stay local (ignored tests): the meshes
 # carry Thingiverse licences and are never committed.
 name: CI
 
@@ -45,3 +45,22 @@ jobs:
       - run: cargo test --workspace --release
       - name: Synthetic suite precision and recall
         run: cargo test --release -p mesher-synthetic -- --nocapture
+      # OpenFOAM is GPL: it runs as a separate process, from OpenCFD's
+      # runtime image (v2512, pinned by digest), and is never a dependency.
+      - name: Synthetic meshes as OpenFOAM cases
+        if: runner.os == 'Linux'
+        run: SUITE_FOAM_DIR="$PWD/target/foam" cargo test --release -p mesher-synthetic --test suite
+      - name: checkMesh
+        if: runner.os == 'Linux'
+        run: >
+          docker run --rm --user "$(id -u):$(id -g)"
+          -v "$PWD/target/foam:/cases" -v "$PWD/tests/foam:/check:ro"
+          opencfd/openfoam-run@sha256:707421ab7d1e5201d86723945a6649490e292a0c46ed03d36982449e6b3b7243
+          bash /check/check.sh /cases
+      - name: checkMesh logs
+        if: failure() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkmesh-logs
+          path: target/foam/*/log.checkMesh
+          if-no-files-found: ignore

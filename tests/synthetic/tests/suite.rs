@@ -718,7 +718,9 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
     }
     // With `SUITE_FOAM_DIR`, each case's mesh as an OpenFOAM case there, for
     // `checkMesh` (`tests/foam/check.sh`).
-    if let Some(root) = std::env::var_os("SUITE_FOAM_DIR").filter(|_| !run.meshes.meshed.is_empty())
+    if let Some(root) = std::env::var_os("SUITE_FOAM_DIR")
+        .filter(|d| !d.is_empty())
+        .filter(|_| !run.meshes.meshed.is_empty())
     {
         let mesh = mesher_core::volume::assemble(&run.meshes.meshed);
         let name: String = label
