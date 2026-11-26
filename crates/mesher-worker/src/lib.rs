@@ -13,8 +13,8 @@ use std::path::Path;
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
 use mesher_core::model::SurfaceModel;
 use mesher_core::protocol::{
-    FEATURES_FILE, Job, MESH_EXODUS_FILE, MESH_FOAM_DIR, MESH_MSH_FILE, MESH_VTU_FILE,
-    OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE, WorkerMessage,
+    FEATURES_FILE, Job, MESH_EXODUS_FILE, MESH_FLUENT_FILE, MESH_FOAM_DIR, MESH_MSH_FILE,
+    MESH_VTU_FILE, OVERLAY_FILE, REPAIRED_FILE, REPORT_FILE, WorkerMessage,
 };
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::volume::{assemble, mesh_parts};
@@ -221,6 +221,11 @@ fn process(
             case.into_iter()
                 .map(|(name, text)| (format!("{MESH_FOAM_DIR}/{name}"), text)),
         );
+    }
+    if config.writes(OutputFormat::Fluent) {
+        let text = mesher_io::fluent::fluent_text(&mesh, log)
+            .map_err(|p| format!("the mesh has no face view: {p:?}"))?;
+        files.push((MESH_FLUENT_FILE.to_owned(), text));
     }
     if config.writes(OutputFormat::Exodus) {
         write_mesh_exodus(job, &mesh, &meshes.meshed, log);

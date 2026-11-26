@@ -151,6 +151,27 @@ fn configs() -> Vec<(&'static str, JobConfig, f64)> {
     ]
 }
 
+/// With `SUITE_FOAM_DIR`, the mesh as an OpenFOAM case and a Fluent file
+/// there, as the suite writes them (for `tests/foam/check.sh`).
+fn write_cases(name: &str, mesh: &VolumeMesh) {
+    let Some(root) = std::env::var_os("SUITE_FOAM_DIR").filter(|d| !d.is_empty()) else {
+        return;
+    };
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let case = std::path::Path::new(&root).join(name);
+    let mut log = RecordLog::new();
+    for (file, text) in mesher_io::foam::foam_files(mesh, &mut log).expect("faces") {
+        let path = case.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+    }
+    let fluent = mesher_io::fluent::fluent_text(mesh, &mut log).expect("faces");
+    std::fs::write(case.join("mesh_fluent.msh"), fluent).unwrap();
+}
+
 /// Every group is one side set of its name, of the group's area.
 fn check(label: &str, scene: &Scene) {
     let want = group_areas(scene);
@@ -162,6 +183,7 @@ fn check(label: &str, scene: &Scene) {
             "{label}, {kernel}: every part meshed"
         );
         let assembled = assemble(&outcome.meshed);
+        write_cases(&format!("side_sets_{label}_{kernel}"), &assembled);
         let got = side_set_areas(&assembled);
         // As patches (the face-based formats), each group has its faces
         // exactly, and `<part>_boundary` keeps only what no group has.

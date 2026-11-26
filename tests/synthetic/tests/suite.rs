@@ -763,6 +763,12 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
             }
             Err(e) => failures.push(format!("{label}: OpenFOAM case: {e:?}")),
         }
+        // The Fluent file too, for the round trip through OpenFOAM's
+        // `fluent3DMeshToFoam`.
+        match mesher_io::fluent::fluent_text(&mesh, &mut log) {
+            Ok(text) => std::fs::write(case.join("mesh_fluent.msh"), text).unwrap(),
+            Err(e) => failures.push(format!("{label}: Fluent file: {e:?}")),
+        }
     }
     for code in [
         DefectCode::VolInvertedTet,

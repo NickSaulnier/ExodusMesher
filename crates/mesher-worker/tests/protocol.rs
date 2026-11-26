@@ -414,6 +414,27 @@ fn an_openfoam_case_is_written_when_chosen() {
 }
 
 #[test]
+fn a_fluent_file_is_written_when_chosen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cube.obj"), dir.path());
+    job.config.formats = vec![
+        mesher_core::OutputFormat::Fluent,
+        mesher_core::OutputFormat::Gmsh,
+    ];
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 0);
+    // Beside Gmsh's mesh.msh, not over it.
+    assert!(dir.path().join("mesh.msh").exists());
+    let text = std::fs::read_to_string(dir.path().join("mesh_fluent.msh")).unwrap();
+    let report = run.report_file.unwrap();
+    let tets = report.parts[0].mesh.as_ref().unwrap().tets;
+    assert!(
+        text.contains(&format!("(12 (0 1 {tets:x} 0))")),
+        "{text:.400}"
+    );
+}
+
+#[test]
 fn cube_end_to_end_writes_a_valid_exodus_mesh() {
     let dir = tempfile::tempdir().unwrap();
     let run = run_worker(&fixture("cube.obj"), dir.path());

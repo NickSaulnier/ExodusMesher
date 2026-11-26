@@ -625,15 +625,20 @@ pub enum OutputFormat {
     /// An OpenFOAM case (`openfoam/`): an ASCII polyMesh with a patch per
     /// boundary patch and a cell zone per part. Not written by default.
     Openfoam,
+    /// A Fluent mesh file (`mesh_fluent.msh`, ASCII): a cell zone per part,
+    /// an interior face zone, a wall face zone per boundary patch. Not
+    /// written by default.
+    Fluent,
 }
 
 impl OutputFormat {
     /// Every format, in the order written.
-    pub const ALL: [OutputFormat; 4] = [
+    pub const ALL: [OutputFormat; 5] = [
         OutputFormat::Exodus,
         OutputFormat::Gmsh,
         OutputFormat::Vtu,
         OutputFormat::Openfoam,
+        OutputFormat::Fluent,
     ];
 
     /// The formats written by default.
@@ -659,6 +664,7 @@ impl OutputFormat {
             OutputFormat::Gmsh => "gmsh",
             OutputFormat::Vtu => "vtu",
             OutputFormat::Openfoam => "openfoam",
+            OutputFormat::Fluent => "fluent",
         }
     }
 }

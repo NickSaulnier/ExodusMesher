@@ -880,6 +880,11 @@
           "description": "An OpenFOAM case (`openfoam/`): an ASCII polyMesh with a patch per\nboundary patch and a cell zone per part. Not written by default.",
           "type": "string",
           "const": "openfoam"
+        },
+        {
+          "description": "A Fluent mesh file (`mesh_fluent.msh`, ASCII): a cell zone per part,\nan interior face zone, a wall face zone per boundary patch. Not\nwritten by default.",
+          "type": "string",
+          "const": "fluent"
         }
       ]
     },

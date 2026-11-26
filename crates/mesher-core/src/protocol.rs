@@ -26,6 +26,8 @@ pub const MESH_MSH_FILE: &str = "mesh.msh";
 pub const MESH_VTU_FILE: &str = "mesh.vtu";
 /// The OpenFOAM case directory (`constant/polyMesh/`, `system/controlDict`).
 pub const MESH_FOAM_DIR: &str = "openfoam";
+/// The Fluent mesh file (beside Gmsh's `mesh.msh`).
+pub const MESH_FLUENT_FILE: &str = "mesh_fluent.msh";
 
 /// Environment variable that makes the worker fail on purpose (`panic`,
 /// `hang`, or `alloc`: allocate up to 1 GiB), so tests can exercise the

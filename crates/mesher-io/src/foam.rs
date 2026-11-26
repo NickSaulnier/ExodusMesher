@@ -17,14 +17,12 @@
 //! or sign) or that would repeat another is changed, and recorded as
 //! `OUT_NAME_CHANGED`.
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+use mesher_core::RecordLog;
 use mesher_core::mesh::{FaceMesh, MeshProblem, VolumeMesh};
-use mesher_core::{Action, DefectCode, Outcome, Record, RecordLog, Stage};
 
-/// The format's name in `OUT_NAME_CHANGED` records.
-pub const FORMAT: &str = "openfoam";
+use crate::shared::{NameRule, used_points};
 
 /// The files of a case, relative to its directory, in the order written.
 pub const POINTS: &str = "constant/polyMesh/points";
@@ -37,60 +35,10 @@ pub const CONTROL_DICT: &str = "system/controlDict";
 pub const FV_SCHEMES: &str = "system/fvSchemes";
 pub const FV_SOLUTION: &str = "system/fvSolution";
 
-/// Whether `c` may appear in a word as written here: ASCII letters, digits
-/// and `_`, `.`, `-` (a subset of what OpenFOAM accepts, free of its
-/// punctuation and of characters a shell or file system treats specially).
-fn word_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
-}
-
-/// `name` as a word: other characters become `_`, and a name that is empty
-/// or does not start with a letter or `_` gets a leading `_`.
-fn word(name: &str) -> String {
-    let mut w: String = name
-        .chars()
-        .map(|c| if word_char(c) { c } else { '_' })
-        .collect();
-    if !w.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
-        w.insert(0, '_');
-    }
-    w
-}
-
-/// Words for `names`, distinct, each recorded where it differs from its
-/// name. A name that is already a word and not repeated keeps it; the
-/// others take the first of `w`, `w_2`, `w_3`, ... that is free.
+/// Words for `names`, distinct, each recorded where it changed.
 fn words(entity: &str, names: &[&str], log: &mut RecordLog) -> Vec<String> {
-    let mut used: BTreeSet<String> = BTreeSet::new();
-    let mut out: Vec<Option<String>> = vec![None; names.len()];
-    for (i, &name) in names.iter().enumerate() {
-        if word(name) == name && used.insert(name.to_owned()) {
-            out[i] = Some(name.to_owned());
-        }
-    }
-    for (i, &name) in names.iter().enumerate() {
-        if out[i].is_some() {
-            continue;
-        }
-        let base = word(name);
-        let mut w = base.clone();
-        let mut k = 2u32;
-        while used.contains(&w) {
-            w = format!("{base}_{k}");
-            k += 1;
-        }
-        used.insert(w.clone());
-        log.push(
-            Record::new(DefectCode::OutNameChanged, Stage::Emit)
-                .measured("format", FORMAT)
-                .measured("entity", entity)
-                .measured("name", name)
-                .measured("written_as", w.clone())
-                .action(Action::Rename, Outcome::Applied),
-        );
-        out[i] = Some(w);
-    }
-    out.into_iter().map(Option::unwrap_or_default).collect()
+    let items: Vec<(&str, &str)> = names.iter().map(|&n| (entity, n)).collect();
+    crate::shared::names(NameRule::Foam, &items, log)
 }
 
 fn header(s: &mut String, class: &str, location: &str, object: &str, note: Option<&str>) {
@@ -135,19 +83,7 @@ pub fn foam_files(
 
 fn render(mesh: &VolumeMesh, f: &FaceMesh, log: &mut RecordLog) -> Vec<(&'static str, String)> {
     // Points in use, renumbered in order.
-    let mut new = vec![u32::MAX; mesh.points.len()];
-    for v in f.faces.iter().flatten() {
-        if let Some(n) = new.get_mut(*v as usize) {
-            *n = 0;
-        }
-    }
-    let mut kept = Vec::new();
-    for (v, n) in new.iter_mut().enumerate() {
-        if *n == 0 {
-            *n = kept.len() as u32;
-            kept.push(v);
-        }
-    }
+    let (new, kept) = used_points(mesh.points.len(), f);
     let note = format!(
         "nPoints:{} nCells:{} nFaces:{} nInternalFaces:{}",
         kept.len(),
@@ -383,7 +319,7 @@ mod tests {
             .records()
             .iter()
             .map(|r| {
-                assert_eq!(r.code, DefectCode::OutNameChanged);
+                assert_eq!(r.code, mesher_core::DefectCode::OutNameChanged);
                 let get = |k: &str| r.measured[k].as_str().unwrap().to_owned();
                 assert_eq!(get("format"), "openfoam");
                 (get("name"), get("written_as"))
