@@ -1306,7 +1306,7 @@ CGNS stays later (it needs HDF5).
   - *Docs*: the report reference (formats, outputs, `OUT_NAME_CHANGED`, `PARSE_FORMAT_INVALID`, the input stats of a `.meshb` file), the README's inputs, outputs and `--formats`, and the defect tables are current.
 - [x] Exit criterion: `checkMesh` passes on every synthetic output; a Fluent `.msh` and a `.meshb` file round-trip through independent readers. Met Nov 26, 2026, locally and in CI.
 
-**Milestone 20: Python API.** Started Nov 26, 2026.
+**Milestone 20: Python API.** Started Nov 26, 2026; done (exit criterion met Nov 27, 2026, locally and in CI).
 
 Where it starts (Nov 26, 2026):
 
@@ -1360,8 +1360,8 @@ Staged plan (proposed at the start; decided stage by stage):
 - [x] Stage 7, checks (Nov 27, 2026)
   - *Docs*: `docs/python.md`, the reference (install and the wheel, `run` and its options against the command line's, `run_project`, cancelling, the lower levels, `Report`, reading meshes, remedies and the next job, the types, the checks); the README's Python section (and the Python API among the front ends, the module's lint and smoke test under Development); the report reference says the Python types follow it and links the reference. Every Python example in `docs/python.md` and the README runs against a fresh Windows wheel on the cube fixture (the mesh's volume 1, every tet positive).
   - *Found*: the report's enums are `str` enums, so `<` and `>=` compare their text (`Severity.INFO >= Severity.ERROR` is true); the reference says so and tests membership instead. Left as it is: changing it would make the enums differ from the JSON's strings.
-  - *Exit criterion*: met locally (stage 6: all 116 synthetic runs give the same files from `mesher.run` and the CLI, byte for byte, on Windows); CI's first run with the wheel steps (Linux and Windows, at fb0f953) is for the user to confirm.
-- [ ] Exit criterion: a Python script meshes the synthetic suite and reproduces the CLI's reports byte for byte; wheels build in CI on Linux and Windows
+  - *Exit criterion*: met locally (stage 6: all 116 synthetic runs give the same files from `mesher.run` and the CLI, byte for byte, on Windows) and in CI (the wheel steps pass on Linux and Windows, confirmed by the user Nov 27, 2026).
+- [x] Exit criterion (met Nov 27, 2026): a Python script meshes the synthetic suite and reproduces the CLI's reports byte for byte; wheels build in CI on Linux and Windows
 
 **Milestone 21: Experimental polyhedral dual.** Outline in `ROADMAP.md`; tasks when it starts (after decision 3).
 
