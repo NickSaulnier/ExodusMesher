@@ -1,0 +1,22 @@
+"""Type stubs for the extension module (``src/python.rs``)."""
+
+from os import PathLike
+from typing import Callable, Optional, Tuple, Union
+
+__version__: str
+
+def _run(
+    job_json: str,
+    worker: Union[str, PathLike[str]],
+    timeout: float,
+    memory: Optional[int] = None,
+    progress: Optional[Callable[[str, float], None]] = None,
+) -> Tuple[str, Optional[str]]: ...
+def _run_request(
+    request_json: str,
+    worker: Union[str, PathLike[str]],
+    timeout: float,
+    memory: Optional[int] = None,
+    progress: Optional[Callable[[str, float], None]] = None,
+) -> Tuple[str, Optional[str]]: ...
+def _build_job(request_json: str) -> Optional[str]: ...

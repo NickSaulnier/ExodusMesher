@@ -1,10 +1,12 @@
-"""Stage 1's check, run against an installed wheel (no test framework needed):
+"""The package's check, run against an installed wheel (no test framework
+needed):
 
     python -I crates/mesher-py/tests/python/smoke.py <output dir>
 
 Meshes the cube fixture through the packaged worker, checks the report and
 `report.json` agree, that progress arrives, and that a bad job raises before
-anything runs.
+anything runs (stage 1); that requests build the CLI's jobs (stage 2); and
+`mesher.run`, `run_project` and the typed report (stage 3).
 """
 
 import json
@@ -85,7 +87,79 @@ def main():
         else:
             raise AssertionError(f"{bad} ran")
 
+    typed(out, cube, run)
+
     print(f"mesher {mesher.__version__}: cube meshed, {tets} tets, {len(stages)} progress messages")
+
+
+def typed(out, cube, run):
+    """Stage 3: `mesher.run` and `run_project`, and the typed report."""
+    report = mesher.run(cube, out / "typed", timeout=600)
+    assert isinstance(report, mesher.Report)
+    assert report.to_json() == run.report_json, "run and run_job differ"
+    assert report.path == out / "typed" / "report.json", report.path
+    assert report.path.read_text() == report.to_json()
+    assert report.exit_code == 0 and report.summary.exit_code == 0
+    assert report.schema_version >= 1
+    part = report.parts[0]
+    assert report.part(part.name) is part
+    mesh = part.mesh
+    assert isinstance(mesh, mesher.MeshSummary) and mesh.accepted
+    assert mesh.kernel is mesher.Kernel.DELAUNAY, mesh.kernel
+    assert mesh.tets == json.loads(run.report_json)["parts"][0]["mesh"]["tets"]
+    assert isinstance(part.bounds, tuple) and len(part.bounds) == 2 and len(part.bounds[0]) == 3
+    assert all(isinstance(s, mesher.Stage) for s in report.stages_run)
+    assert report.stages_run[0] is mesher.Stage.PARSE
+    assert report.records_by_code == {}, report.records_by_code
+    assert mesher.read_report(report.path) == report
+    try:
+        report.schema_version = 0
+    except Exception as e:
+        assert type(e).__name__ == "FrozenInstanceError", e
+    else:
+        raise AssertionError("a report could be changed")
+
+    # Options as keywords, enums or their values.
+    opts = mesher.run(
+        cube,
+        out / "opts",
+        element_size=0.2,
+        formats=[mesher.OutputFormat.VTU, "exodus"],
+        kernel="conformal",
+        timeout=600,
+    )
+    assert opts.config.formats == (mesher.OutputFormat.EXODUS, mesher.OutputFormat.VTU)
+    assert opts.config.element_size == 0.2
+    assert (out / "opts" / "mesh.vtu").is_file() and not (out / "opts" / "mesh.msh").exists()
+    assert opts.parts[0].mesh.tets < report.parts[0].mesh.tets
+    for bad in [dict(element_size=0), dict(kernel="fastest"), dict(formats=["stl"])]:
+        try:
+            mesher.run(cube, out / "bad", **bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{bad} ran")
+
+    # A project, and one that cannot be used.
+    project = out / "cube.toml"
+    project.write_text(f"input = '{cube}'\noutput = 'project_out'\n\n[settings]\nelement_size = 0.2\n")
+    from_project = mesher.run_project(project, timeout=600)
+    assert from_project.config.element_size == 0.2
+    assert from_project.path == out / "project_out" / "report.json", from_project.path
+    assert from_project.parts[0].mesh.tets == opts.parts[0].mesh.tets
+    broken = mesher.run_project(out / "broken.toml")
+    assert list(broken.records_by_code) == [mesher.DefectCode.PARSE_PROJECT_INVALID]
+    record = broken.records_by_code[mesher.DefectCode.PARSE_PROJECT_INVALID][0]
+    assert record.severity is mesher.Severity.FATAL, record.severity
+    assert broken.exit_code == 30
+    try:
+        mesher.run_project(cube)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an OBJ ran as a project")
+    # The raw runners' reports, typed.
+    assert run.report() == report
 
 
 if __name__ == "__main__":

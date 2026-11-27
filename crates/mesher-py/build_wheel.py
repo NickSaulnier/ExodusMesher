@@ -32,6 +32,9 @@ def main():
     bin_dir = HERE / "python" / "mesher" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "target" / "release" / exe, bin_dir / exe)
+    # Bytecode from importing the sources in place would go into the wheel.
+    for cache in (HERE / "python").rglob("__pycache__"):
+        shutil.rmtree(cache)
 
     maturin = shutil.which("maturin")
     command = [maturin] if maturin else [sys.executable, "-m", "maturin"]
