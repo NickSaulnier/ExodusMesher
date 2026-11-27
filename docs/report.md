@@ -2,7 +2,7 @@
 
 Every run writes `report.json` to its output directory, whatever happens: a clean mesh, a repaired one, a fallback, or a failure with no mesh at all. It records every finding, every repair, every meshing attempt and the quality of every mesh written, so a script can decide what to do without reading the logs. The layout is versioned (`schema_version`, currently 1), and its JSON schema is [`schema/report.schema.json`](../schema/report.schema.json), also printed by `mesher schema`.
 
-The same input and settings give a byte-identical report.
+The same input and settings give a byte-identical report, from the command line, the GUI or Python. In Python (`mesher`, [docs/python.md](python.md)) the report is typed: each object below a frozen dataclass with the same field names, and each set of string values an enum whose members are the values in upper case (`Severity.FATAL`, `DefectCode.TOP_NONMANIFOLD_EDGE`).
 
 ## Top level
 
@@ -110,7 +110,7 @@ A record that left a part without a mesh (an error or fatal record), or a failur
 | `VOL_BOUNDARY_DEVIATION` | | `element_size` × 0.5, while at least 1/512; `max_deviation` = 1.25 × `hausdorff_relative` |
 | Any, with `wrap` / `failed` and `deviation` (a wrap too far from the surface; `threshold.max_deviation` the limit) | | `wrap_alpha` × 0.5; `max_deviation` = 1.25 × `deviation` |
 
-`Report.next_job()` in the Python package applies the first remedy that changes the settings of the worst such record (fatal records first, then errors, in report order).
+`Report.next_job()` in the Python package ([docs/python.md](python.md#remedies-and-the-next-job)) applies the first remedy that changes the settings of the worst such record (fatal records first, then errors, in report order).
 
 ### Records from repair rung 2
 

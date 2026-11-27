@@ -6,7 +6,7 @@ A pure-Rust automatic mesher that turns OBJ files (or `.meshb` surfaces), as the
 - **Outputs:** Exodus II (`mesh.exo`, one `TETRA4` block per part, side sets per part boundary and OBJ group), Gmsh `.msh` v4, VTK `.vtu`, and on request (`--formats`) an OpenFOAM case, a Fluent `.msh` and a libMeshb `.meshb` (a patch per OBJ group, each boundary face in one), the repaired surface (`repaired.obj`), a defect overlay for ParaView (`defects.vtp`) and `report.json`.
 - **Repair:** local fixes first (merging, removing, reorienting, splitting, filling small holes); then a closed part that intersects itself or whose shells overlap is cut along its intersections in exact arithmetic and replaced by the boundary of the solid it encloses (nested shells dropped, shells touching face to face joined), rounded to f64 and checked; a part still not a valid solid (a hole too large to fill, an open part that intersects itself) goes to the stuffing fallback, and as the last resort, when that is rejected, it is wrapped: replaced by a closed, manifold surface at a small offset around it, closing openings narrower than about twice the element size (`--wrap-alpha`), kept if it stays within `--max-deviation`, and meshed again. Every repair is a record.
 - **Meshing:** a constrained Delaunay kernel that conforms exactly to the surface, with a size field graded for curvature and thin walls. When it cannot mesh a part, the part's surface is remeshed and the kernel retried; isosurface stuffing is the last, recorded fallback, also taken when every conformal mesh has cells far beyond the quality limits and stuffing's are better. Both are written here; TetGen is used only as a test oracle.
-- **Front ends:** a CLI and a desktop GUI (egui with a wgpu viewport). Both run the meshing in a separate `mesher-worker` process under a timeout and memory cap, so a crash or a runaway refinement becomes a report, not a hang.
+- **Front ends:** a CLI, a desktop GUI (egui with a wgpu viewport) and a Python API. All three run the meshing in a separate `mesher-worker` process under a timeout and memory cap, so a crash or a runaway refinement becomes a report, not a hang.
 
 The design, decisions and benchmark results are in [PLAN.md](PLAN.md); the phases after it are in [ROADMAP.md](ROADMAP.md).
 
@@ -93,6 +93,19 @@ mesher-gui model.obj
 
 Open an OBJ or a project (or drop one on the window); pick parts in the list or by clicking them in the viewport; inspect diagnosis records, which highlight their faces and point to their OBJ lines; set the element size, policy and kernel (an "Exact kernel" switch tries the exact kernel first); Run and export. The viewport orbits (drag), pans (right-drag), zooms (scroll) and fits (double-click); wireframe, defect overlay and a clipping plane are toggles in the toolbar.
 
+## Python
+
+```python
+import mesher
+
+report = mesher.run("model.obj", element_size=0.02, formats=["exodus", "meshb"])
+print(report.exit_code, [(p.name, p.mesh.tets) for p in report.parts if p.mesh])
+mesh = report.mesh()               # numpy arrays: points, tets, boundary triangles, parts, patches
+following = report.next_job()      # a failed run's suggested remedy, as a job to run
+```
+
+`mesher.run` takes the command line's options as keywords and returns `report.json` typed (frozen dataclasses and enums generated from the schema); the same options give the same files as `mesher run`, byte for byte. Build the wheel, with the worker inside it, with `python -I crates/mesher-py/build_wheel.py` (maturin 1.16 on `PATH`); CI builds it on Linux and Windows. **[docs/python.md](docs/python.md)** is the reference.
+
 ## The report
 
 `report.json` holds the run's config and tool versions, every record, each meshing attempt and the final mesh quality per part. A record looks like this:
@@ -125,7 +138,8 @@ cargo test --workspace
 
 - `tests/synthetic/`: the defect-injection suite. Every injected defect must be found at its exact location and none reported on clean shapes; `cargo test -p mesher-synthetic -- --nocapture` prints precision and recall per code. Each run is compared with `tests/synthetic/golden.txt`; regenerate it with `UPDATE_GOLDEN=1 cargo test -p mesher-synthetic` after an intended change.
 - `tests/oracle/`: comparisons against TetGen (needs a C++ compiler; MSVC on Windows). Quality samples go to `target/tmp/oracle/`.
-- After changing report types, regenerate the schema: `UPDATE_SCHEMA=1 cargo test -p mesher-core --test schema`.
+- After changing report types, regenerate the schema: `UPDATE_SCHEMA=1 cargo test -p mesher-core --test schema`, then the Python types: `UPDATE_REPORT_MODULE=1 cargo test -p mesher-py --test report_module`.
+- The Python module is behind `mesher-py`'s `python` feature: `cargo clippy -p mesher-py --features python --all-targets -- -D warnings`; check an installed wheel with `python -I crates/mesher-py/tests/python/smoke.py <dir>` (see [docs/python.md](docs/python.md) > Checks).
 - Thingi10k benchmarks (local only; the meshes carry their authors' licences and are not in the repository):
 
   ```bash
