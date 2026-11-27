@@ -180,6 +180,15 @@ fn ty(v: &Value, defs: &Map<String, Value>) -> Ty {
     let types: Vec<&str> = match &v["type"] {
         Value::String(t) => vec![t.as_str()],
         Value::Array(ts) => ts.iter().map(|t| t.as_str().unwrap()).collect(),
+        // Any JSON value (no type, reference or alternatives), kept as
+        // parsed.
+        Value::Null if !v.as_object().is_some_and(|o| o.contains_key("oneOf")) => {
+            return Ty {
+                annotation: "Any".to_owned(),
+                convert: Box::new(|x, _| x.to_owned()),
+                missing: "None",
+            };
+        }
         other => panic!("unsupported type {other}: {v}"),
     };
     let nullable_type = types.contains(&"null");

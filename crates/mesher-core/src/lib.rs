@@ -9,6 +9,7 @@ pub mod model;
 pub mod overlay;
 pub mod project;
 pub mod protocol;
+pub mod remedy;
 pub mod repair;
 pub mod report;
 pub mod sizes;

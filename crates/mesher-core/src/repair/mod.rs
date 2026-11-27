@@ -659,19 +659,26 @@ pub(crate) fn wrap_part(
                 }));
             }
             outcome => {
-                let reason = match outcome {
-                    Ok((_, deviation)) => format!(
-                        "the wrap is {deviation:.4} of the diagonal from the surface, beyond the limit of {}",
-                        tol.max_wrap_deviation
+                let (reason, deviation) = match outcome {
+                    Ok((_, deviation)) => (
+                        format!(
+                            "the wrap is {deviation:.4} of the diagonal from the surface, beyond the limit of {}",
+                            tol.max_wrap_deviation
+                        ),
+                        Some(deviation),
                     ),
-                    Err(e) => e,
+                    Err(e) => (e, None),
                 };
                 for &code in &failing {
-                    log.push(
-                        measured(failed(code, Action::Wrap))
-                            .measured("reason", reason.clone())
-                            .hint("the surface could not be wrapped"),
-                    );
+                    let mut rec = measured(failed(code, Action::Wrap))
+                        .measured("reason", reason.clone())
+                        .hint("the surface could not be wrapped");
+                    if let Some(d) = deviation {
+                        rec = rec
+                            .measured("deviation", d)
+                            .threshold("max_deviation", tol.max_wrap_deviation);
+                    }
+                    log.push(rec);
                 }
             }
         }

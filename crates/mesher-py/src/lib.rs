@@ -90,6 +90,36 @@ pub fn build_job(request_json: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// The job to run next after a report (its JSON): the report's input and
+/// the settings of its first applicable remedy
+/// ([`mesher_core::remedy::next_config`]) of a record at `min` severity
+/// (`"warning"`, `"error"`, `"fatal"`) or above, writing to `output_dir`;
+/// with the record's and the remedy's indices. `None` when no remedy
+/// applies.
+///
+/// # Errors
+/// The report or the severity is not valid JSON of its type.
+pub fn next_job(
+    report_json: &str,
+    output_dir: &str,
+    min: &str,
+) -> Result<Option<(String, usize, usize)>, String> {
+    let report: mesher_core::Report =
+        serde_json::from_str(report_json).map_err(|e| format!("not a valid report: {e}"))?;
+    let min: mesher_core::Severity = serde_json::from_value(serde_json::Value::from(min))
+        .map_err(|_| format!("not a severity: {min}"))?;
+    let Some(next) = report.next_config(min) else {
+        return Ok(None);
+    };
+    let job = Job {
+        input: report.input.path.clone(),
+        output_dir: output_dir.to_owned(),
+        config: next.config,
+    };
+    let json = serde_json::to_string(&job).map_err(|e| e.to_string())?;
+    Ok(Some((json, next.record, next.remedy)))
+}
+
 fn parse_request(request_json: &str) -> Result<JobRequest, String> {
     serde_json::from_str(request_json).map_err(|e| format!("not a valid request: {e}"))
 }
@@ -117,6 +147,34 @@ mod tests {
             );
             assert!(r.unwrap_err().starts_with("not a valid job"), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_next_job_applies_a_remedy_of_the_report() {
+        use mesher_core::{DefectCode, JobConfig, Record, RecordLog, Report, Severity, Stage};
+        let config = JobConfig {
+            parts: vec!["nope".into()],
+            ..JobConfig::default()
+        };
+        let mut log = RecordLog::new();
+        log.push(Record::new(DefectCode::PartEmptySelection, Stage::Select));
+        let mut report = Report::new("m.obj", config);
+        report.finish(log);
+        let (job, record, remedy) = next_job(&report.to_json(), "next", "error")
+            .unwrap()
+            .unwrap();
+        assert_eq!((record, remedy), (0, 0));
+        let job: Job = serde_json::from_str(&job).unwrap();
+        assert_eq!(
+            (job.input.as_str(), job.output_dir.as_str()),
+            ("m.obj", "next")
+        );
+        assert!(job.config.parts.is_empty());
+        assert_eq!(report.records[0].severity, Severity::Fatal);
+        assert!(next_job(&report.to_json(), "next", "worst").is_err());
+        assert!(next_job("{}", "next", "error").is_err());
+        let clean = Report::new("m.obj", JobConfig::default());
+        assert_eq!(next_job(&clean.to_json(), "next", "warning"), Ok(None));
     }
 
     #[test]

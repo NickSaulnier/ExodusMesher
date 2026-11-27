@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
+use mesher_core::remedy;
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::report::MAX_LOCATION_ITEMS;
 use mesher_core::volume::{MeshOutcome, mesh_parts};
@@ -555,16 +556,29 @@ fn cases() -> Vec<Case> {
 }
 
 struct Run {
+    /// With their remedies, as the report gives them.
     records: Vec<Record>,
     parts: usize,
     repaired: Vec<RepairedPart>,
     meshes: MeshOutcome,
+    config: JobConfig,
 }
 
 /// Coarser than the default, to keep the suite fast.
 const SUITE_ELEMENT_SIZE: f64 = 0.06;
 
 fn run(scene: &Scene, parts: &[&str]) -> Run {
+    run_with(
+        scene,
+        JobConfig {
+            parts: parts.iter().map(|s| (*s).to_owned()).collect(),
+            element_size: SUITE_ELEMENT_SIZE,
+            ..JobConfig::default()
+        },
+    )
+}
+
+fn run_with(scene: &Scene, config: JobConfig) -> Run {
     let obj = scene.to_obj();
     let mut log = RecordLog::new();
     let model = parse_obj(obj.as_bytes(), &mut log, &mut |_| {});
@@ -574,10 +588,6 @@ fn run(scene: &Scene, parts: &[&str]) -> Run {
         log.records()
     );
     let diagnosis = diagnose(&model, &Tolerances::default(), &mut log).unwrap();
-    let config = JobConfig {
-        parts: parts.iter().map(|s| (*s).to_owned()).collect(),
-        ..JobConfig::default()
-    };
     let mut repaired = Vec::new();
     let mut meshes = MeshOutcome::default();
     if let Some(selected) = select_parts(&diagnosis, &config, &mut log) {
@@ -591,17 +601,66 @@ fn run(scene: &Scene, parts: &[&str]) -> Run {
             &mut log,
         )
         .unwrap();
-        let mesh_config = JobConfig {
-            element_size: SUITE_ELEMENT_SIZE,
-            ..config.clone()
-        };
-        meshes = mesh_parts(&model, &repaired, &mesh_config, &mut log).unwrap();
+        meshes = mesh_parts(&model, &repaired, &config, &mut log).unwrap();
     }
+    let mut records = log.records().to_vec();
+    remedy::fill(&mut records, &config);
     Run {
-        records: log.records().to_vec(),
+        records,
         parts: diagnosis.parts.len(),
         repaired,
         meshes,
+        config,
+    }
+}
+
+/// Milestone 20 stage 5: every remedy applies; where a record left the
+/// case unresolved and a remedy applies, the next job (the first remedy
+/// of the worst record) resolves that record's code.
+fn check_remedies(scene: &Scene, run: &Run, label: &str, failures: &mut Vec<String>) {
+    for r in &run.records {
+        for m in &r.remedies {
+            if let Err(e) = m.apply(&run.config) {
+                failures.push(format!("{label}: {} remedy {m:?}: {e}", r.code.as_str()));
+            }
+        }
+    }
+    let Some(next) = remedy::next_config(&run.records, &run.config, Severity::Error) else {
+        // A conformal failure a fallback covered: the next job meshes more
+        // parts conformally.
+        if let Some(next) = remedy::next_config(&run.records, &run.config, Severity::Warning) {
+            let conformal = |run: &Run| {
+                run.meshes
+                    .summaries
+                    .iter()
+                    .filter(|(_, m)| m.accepted && m.kernel != Kernel::Stuffing)
+                    .count()
+            };
+            let again = run_with(scene, next.config);
+            if conformal(&again) <= conformal(run) {
+                failures.push(format!(
+                    "{label}: the next job for {} ({:?}) meshed no more parts conformally",
+                    run.records[next.record].code.as_str(),
+                    run.records[next.record].remedies[next.remedy].setting
+                ));
+            }
+        }
+        return;
+    };
+    let code = run.records[next.record].code;
+    let unresolved = |records: &[Record]| {
+        records
+            .iter()
+            .filter(|r| r.code == code && r.severity >= Severity::Error)
+            .count()
+    };
+    let again = run_with(scene, next.config);
+    let (before, after) = (unresolved(&run.records), unresolved(&again.records));
+    if after >= before {
+        failures.push(format!(
+            "{label}: the next job did not resolve {}: {before} unresolved, then {after}",
+            code.as_str()
+        ));
     }
 }
 
@@ -1098,7 +1157,17 @@ fn golden_of(run: &Run) -> Golden {
             (Some(a), Some(o)) => format!(" {}/{}", serde_name(a), serde_name(o)),
             _ => String::new(),
         };
-        let key = format!("{} {}{action}", r.code.as_str(), serde_name(&r.severity));
+        let remedies = if r.remedies.is_empty() {
+            String::new()
+        } else {
+            let settings: Vec<&str> = r.remedies.iter().map(|m| m.setting.as_str()).collect();
+            format!(" try:{}", settings.join(","))
+        };
+        let key = format!(
+            "{} {}{action}{remedies}",
+            r.code.as_str(),
+            serde_name(&r.severity)
+        );
         *g.records.entry(key).or_default() += 1;
     }
     for (part, m) in &run.meshes.summaries {
@@ -1220,7 +1289,7 @@ fn check_golden(runs: &[(String, Golden)], failures: &mut Vec<String>) {
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         let mut text = String::from(
             "# Golden reports for the synthetic suite (tests/synthetic/tests/suite.rs).\n\
-             # label <TAB> code severity [action/outcome] xcount; ... <TAB> part kernel accepted tets min_dihedral mean_non_orthogonality; ...\n\
+             # label <TAB> code severity [action/outcome] [try:remedy settings] xcount; ... <TAB> part kernel accepted tets min_dihedral mean_non_orthogonality; ...\n\
              # Regenerate with UPDATE_GOLDEN=1 cargo test -p mesher-synthetic\n",
         );
         for (label, g) in runs {
@@ -1269,7 +1338,8 @@ fn synthetic_suite() {
         for &(scale, offset) in runs {
             let label = format!("{} [x{scale} +{offset}]", c.name);
             let started = std::time::Instant::now();
-            let outcome = run(&c.scene.transformed(scale, offset), &c.parts);
+            let scene = c.scene.transformed(scale, offset);
+            let outcome = run(&scene, &c.parts);
             if std::env::var("SUITE_TIMING").is_ok() {
                 eprintln!("{:>8.2?} {label}", started.elapsed());
             }
@@ -1285,6 +1355,7 @@ fn synthetic_suite() {
             accepted_parts += t.accepted;
             delaunay_parts += t.delaunay;
             check_exact(&c, &outcome, &label, &mut failures, &mut exact);
+            check_remedies(&scene, &outcome, &label, &mut failures);
             let mut detected: BTreeMap<DefectCode, Vec<&Record>> = BTreeMap::new();
             for r in outcome
                 .records

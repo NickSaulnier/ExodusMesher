@@ -12,7 +12,8 @@ runaway job never takes down the interpreter. Every run ends in a report,
 the same ``report.json`` the command line writes: ``run`` and
 ``run_project`` return it typed (``Report``), ``run_job`` and
 ``run_request`` as text. ``Report.mesh()`` and ``read_mesh`` read the
-mesh back from a run's ``.meshb``.
+mesh back from a run's ``.meshb``. Records carry ``remedies``, settings
+changes to try next; ``Report.next_job()`` applies the first that fits.
 """
 
 from __future__ import annotations

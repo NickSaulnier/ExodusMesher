@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::exit::ExitStatus;
+use crate::remedy::{self, Remedy};
 
 /// Version of the `report.json` layout. Bump on any breaking change.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -236,6 +237,10 @@ pub struct Record {
     pub outcome: Option<Outcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Settings changes to try next, best first (see the report reference);
+    /// filled in when the report is finished.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remedies: Vec<Remedy>,
 }
 
 impl Record {
@@ -253,6 +258,7 @@ impl Record {
             action: None,
             outcome: None,
             hint: None,
+            remedies: Vec::new(),
         }
     }
 
@@ -1066,12 +1072,18 @@ impl Report {
             by_code: log.by_code,
         };
         self.records = log.records;
+        remedy::fill(&mut self.records, &self.config);
     }
 
     /// Put a record that does not come from this report's own run (the
     /// client's account of an earlier, failed worker run) at the front, and
     /// update the summary and exit code to match.
-    pub fn prepend(&mut self, record: Record) {
+    pub fn prepend(&mut self, mut record: Record) {
+        let coincident = record
+            .part
+            .as_ref()
+            .is_some_and(|p| remedy::coincident_parts(&self.records).contains(p));
+        record.remedies = remedy::suggest(&record, &self.config, coincident);
         let s = &mut self.summary;
         match record.severity {
             Severity::Info => s.info += 1,
@@ -1090,6 +1102,13 @@ impl Report {
         let s = &self.summary;
         self.summary.exit_code =
             ExitStatus::from_counts(s.warnings, s.errors, s.fatal, used_fallback).code();
+    }
+
+    /// The settings of the job to run next: the first remedy that applies of
+    /// the worst record at `min` severity or above ([`remedy::next_config`]).
+    #[must_use]
+    pub fn next_config(&self, min: Severity) -> Option<remedy::Next> {
+        remedy::next_config(&self.records, &self.config, min)
     }
 
     /// Serialize as pretty JSON with a trailing newline. Deterministic: same

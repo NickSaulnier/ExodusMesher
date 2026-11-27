@@ -1086,6 +1086,13 @@
             "null"
           ]
         },
+        "remedies": {
+          "description": "Settings changes to try next, best first (see the report reference);\nfilled in when the report is finished.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Remedy"
+          }
+        },
         "severity": {
           "$ref": "#/$defs/Severity"
         },
@@ -1101,6 +1108,36 @@
         "code",
         "severity",
         "stage"
+      ]
+    },
+    "Remedy": {
+      "description": "One suggested next step: set `setting` to `value`, or multiply it by\n`scale` (exactly one of the two).",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "description": "Why it should help, in one line.",
+          "type": "string"
+        },
+        "scale": {
+          "description": "A factor to multiply its value by (a numeric setting).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "setting": {
+          "description": "The setting to change.",
+          "$ref": "#/$defs/Setting"
+        },
+        "value": {
+          "description": "Its new value, as in `config`."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "setting",
+        "reason"
       ]
     },
     "RepairSummary": {
@@ -1170,6 +1207,46 @@
         "vertices_before",
         "vertices_after",
         "gate_passed"
+      ]
+    },
+    "Setting": {
+      "description": "The setting a remedy changes: a `config` field, by name.",
+      "oneOf": [
+        {
+          "description": "`parts`.",
+          "type": "string",
+          "const": "parts"
+        },
+        {
+          "description": "`strict`.",
+          "type": "string",
+          "const": "strict"
+        },
+        {
+          "description": "`no_remesh`.",
+          "type": "string",
+          "const": "no_remesh"
+        },
+        {
+          "description": "`kernel`.",
+          "type": "string",
+          "const": "kernel"
+        },
+        {
+          "description": "`element_size`.",
+          "type": "string",
+          "const": "element_size"
+        },
+        {
+          "description": "`max_deviation`.",
+          "type": "string",
+          "const": "max_deviation"
+        },
+        {
+          "description": "`wrap_alpha`.",
+          "type": "string",
+          "const": "wrap_alpha"
+        }
       ]
     },
     "Severity": {

@@ -2,7 +2,7 @@
 
 The dataclasses and enums are generated from the report schema
 (``_schema``); ``Report`` adds what the schema cannot say: the worker's own
-text, views over the records, and the run's mesh.
+text, views over the records, the run's mesh, and the job to run next.
 """
 
 from __future__ import annotations
@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
+from ._mesher import _next_job
 from .mesh import Mesh, read_mesh
 
 from . import _schema
@@ -35,7 +36,9 @@ from ._schema import (
     PartSummary,
     QualityMeasure,
     Record,
+    Remedy,
     RepairSummary,
+    Setting,
     Severity,
     SizeControl,
     Stage,
@@ -44,7 +47,16 @@ from ._schema import (
     WorstCell,
 )
 
-__all__ = list(_schema.__all__) + ["read_report"]
+__all__ = list(_schema.__all__) + ["NextJob", "read_report"]
+
+
+class NextJob(NamedTuple):
+    """The job to run next after a report (``Report.next_job``): ``job`` for
+    ``mesher.run_job``, made by applying ``remedy`` of ``record``."""
+
+    job: Dict[str, Any]
+    record: Record
+    remedy: Remedy
 
 
 class Report(_schema.Report):
@@ -118,6 +130,36 @@ class Report(_schema.Report):
                 "the run wrote no .meshb: run it with \"meshb\" among its formats"
             )
         return read_mesh(self.path.parent, numpy=numpy)
+
+    def next_job(
+        self,
+        out: Optional[Union[str, os.PathLike]] = None,
+        *,
+        severity: Union[Severity, str] = Severity.ERROR,
+    ) -> Optional[NextJob]:
+        """The job to run next: this report's input with the settings of the
+        first remedy that applies and changes them, of the worst record at
+        ``severity`` or above (fatal records first, then errors, in report
+        order). ``None`` when there is none: the run needs nothing, or
+        nothing known would help.
+
+        The job writes to ``out`` (default: this run's output directory, so
+        its files are replaced). Pass ``severity=Severity.WARNING`` to also
+        act on failures a fallback covered (a part meshed by stuffing rather
+        than conformally). Run it with ``mesher.run_job(next.job)``.
+        Raises ``ValueError`` for a report not read from the worker's JSON,
+        or without a path when ``out`` is not given."""
+        if out is None:
+            if self.path is None:
+                raise ValueError("this report has no output directory: pass `out`")
+            out = self.path.parent
+        level = severity.value if isinstance(severity, Severity) else Severity(severity).value
+        found = _next_job(self.to_json(), os.fspath(out), level)
+        if found is None:
+            return None
+        text, record, remedy = found
+        chosen = self.records[record]
+        return NextJob(json.loads(text), chosen, chosen.remedies[remedy])
 
 
 def read_report(path: Union[str, os.PathLike]) -> Report:

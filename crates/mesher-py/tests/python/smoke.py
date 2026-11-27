@@ -7,7 +7,8 @@ Meshes the cube fixture through the packaged worker, checks the report and
 `report.json` agree, that progress arrives, and that a bad job raises before
 anything runs (stage 1); that requests build the CLI's jobs (stage 2); and
 `mesher.run`, `run_project` and the typed report (stage 3); and reading
-the mesh back, with numpy when it is installed and without (stage 4).
+the mesh back, with numpy when it is installed and without (stage 4); and
+remedies and the next job (stage 5).
 """
 
 import json
@@ -90,6 +91,7 @@ def main():
 
     typed(out, cube, run)
     meshes(out, cube)
+    remedies(out, cube)
 
     print(f"mesher {mesher.__version__}: cube meshed, {tets} tets, {len(stages)} progress messages")
 
@@ -263,6 +265,37 @@ def meshes(out, cube):
         pass
     else:
         raise AssertionError("a broken file gave a mesh")
+
+
+def remedies(out, cube):
+    """Stage 5: remedies on records, and the job they make."""
+    report = mesher.run(cube, out / "missing", parts=["nope"], timeout=600)
+    assert report.exit_code == 30
+    (record,) = report.records_by_code[mesher.DefectCode.PART_EMPTY_SELECTION]
+    assert record.severity is mesher.Severity.FATAL
+    (remedy,) = record.remedies
+    assert isinstance(remedy, mesher.Remedy) and remedy.setting is mesher.Setting.PARTS
+    assert remedy.value == [] and remedy.scale is None and remedy.reason
+    following = report.next_job(out / "found")
+    assert isinstance(following, mesher.NextJob)
+    assert following.record == record and following.remedy == remedy
+    assert following.job["config"]["parts"] == [], following.job
+    assert following.job["output_dir"] == str(out / "found")
+    assert following.job["input"] == report.input.path
+    fixed = mesher.run_job(following.job, timeout=600).report()
+    assert fixed.exit_code == 0 and fixed.parts[0].mesh.accepted
+    assert fixed.next_job() is None
+    assert fixed.next_job(severity=mesher.Severity.WARNING) is None
+    # By default the next job writes to the run's own directory.
+    assert report.next_job().job["output_dir"] == str(out / "missing")
+    assert report.next_job(severity="fatal") == report.next_job(severity=mesher.Severity.FATAL)
+    try:
+        report.next_job(severity="worst")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown severity was taken")
+    print("remedies: the next job meshes the missing part's input")
 
 
 if __name__ == "__main__":

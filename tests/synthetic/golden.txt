@@ -1,5 +1,5 @@
 # Golden reports for the synthetic suite (tests/synthetic/tests/suite.rs).
-# label <TAB> code severity [action/outcome] xcount; ... <TAB> part kernel accepted tets min_dihedral mean_non_orthogonality; ...
+# label <TAB> code severity [action/outcome] [try:remedy settings] xcount; ... <TAB> part kernel accepted tets min_dihedral mean_non_orthogonality; ...
 # Regenerate with UPDATE_GOLDEN=1 cargo test -p mesher-synthetic
 clean cube [x1 +0]		0 delaunay accepted 4268 15.0 20.5
 clean cube [x0.001 +1000]		0 delaunay accepted 4374 15.0 20.6
@@ -109,9 +109,9 @@ overlapping parts [x10000 +-50000]	PART_OVERLAP error x1	0 delaunay accepted 439
 part inside another part [x1 +0]	PART_OVERLAP error x1	0 delaunay accepted 4362 15.1 20.2; 1 delaunay accepted 4363 15.0 20.3
 part inside another part [x0.001 +1000]	PART_OVERLAP error x1	0 delaunay accepted 4320 15.1 20.4; 1 delaunay accepted 4374 15.0 20.6
 part inside another part [x10000 +-50000]	PART_OVERLAP error x1	0 delaunay accepted 4353 15.2 20.7; 1 delaunay accepted 4330 15.0 20.7
-selecting a missing part [x1 +0]	PART_EMPTY_SELECTION fatal abort/applied x1	
-selecting a missing part [x0.001 +1000]	PART_EMPTY_SELECTION fatal abort/applied x1	
-selecting a missing part [x10000 +-50000]	PART_EMPTY_SELECTION fatal abort/applied x1	
+selecting a missing part [x1 +0]	PART_EMPTY_SELECTION fatal abort/applied try:parts x1	
+selecting a missing part [x0.001 +1000]	PART_EMPTY_SELECTION fatal abort/applied try:parts x1	
+selecting a missing part [x10000 +-50000]	PART_EMPTY_SELECTION fatal abort/applied try:parts x1	
 sliver face [x1 +0]	QUAL_SLIVER_FACE warning remesh/applied x1; VOL_LOW_QUALITY info remesh/applied x1	0 delaunay accepted 5795 15.0 22.4
 sliver face [x0.001 +1000]	QUAL_SLIVER_FACE warning remesh/applied x1; VOL_LOW_QUALITY info remesh/applied x1	0 delaunay accepted 5170 15.1 21.0
 sliver face [x10000 +-50000]	QUAL_SLIVER_FACE warning remesh/applied x1; VOL_LOW_QUALITY info remesh/applied x1	0 delaunay accepted 5795 15.0 22.4

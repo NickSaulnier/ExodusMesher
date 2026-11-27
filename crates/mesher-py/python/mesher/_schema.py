@@ -34,8 +34,10 @@ __all__ = [
     "PartSummary",
     "QualityMeasure",
     "Record",
+    "Remedy",
     "RepairSummary",
     "Report",
+    "Setting",
     "Severity",
     "SizeControl",
     "Stage",
@@ -706,6 +708,11 @@ class Record:
     part: Optional[str] = None
     """Part the finding belongs to, once parts exist."""
 
+    remedies: Tuple[Remedy, ...] = ()
+    """Settings changes to try next, best first (see the report reference);
+    filled in when the report is finished.
+    """
+
     threshold: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -720,7 +727,36 @@ class Record:
             measured=(dict(v["measured"])) if "measured" in v else {},
             outcome=(None if v["outcome"] is None else Outcome(v["outcome"])) if "outcome" in v else None,
             part=v.get("part", None),
+            remedies=(tuple(Remedy._parse(e0) for e0 in v["remedies"])) if "remedies" in v else (),
             threshold=(dict(v["threshold"])) if "threshold" in v else {},
+        )
+
+
+@dataclass(frozen=True)
+class Remedy:
+    """One suggested next step: set `setting` to `value`, or multiply it by
+    `scale` (exactly one of the two).
+    """
+
+    reason: str
+    """Why it should help, in one line."""
+
+    setting: Setting
+    """The setting to change."""
+
+    scale: Optional[float] = None
+    """A factor to multiply its value by (a numeric setting)."""
+
+    value: Optional[Any] = None
+    """Its new value, as in `config`."""
+
+    @classmethod
+    def _parse(cls, v: Mapping[str, Any]) -> Remedy:
+        return cls(
+            reason=v["reason"],
+            setting=Setting(v["setting"]),
+            scale=(None if v["scale"] is None else float(v["scale"])) if "scale" in v else None,
+            value=v.get("value", None),
         )
 
 
@@ -771,6 +807,25 @@ class RepairSummary:
             euler_before=v.get("euler_before", 0),
             rung=v.get("rung", 1),
         )
+
+
+class Setting(str, Enum):
+    """The setting a remedy changes: a `config` field, by name."""
+
+    #: `parts`.
+    PARTS = "parts"
+    #: `strict`.
+    STRICT = "strict"
+    #: `no_remesh`.
+    NO_REMESH = "no_remesh"
+    #: `kernel`.
+    KERNEL = "kernel"
+    #: `element_size`.
+    ELEMENT_SIZE = "element_size"
+    #: `max_deviation`.
+    MAX_DEVIATION = "max_deviation"
+    #: `wrap_alpha`.
+    WRAP_ALPHA = "wrap_alpha"
 
 
 class Severity(str, Enum):

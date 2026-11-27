@@ -1,6 +1,7 @@
 //! The Python module `mesher._mesher`: [`_run`] (a job), [`_run_request`]
-//! (a request, as `mesher run` takes it), [`_build_job`] and
-//! [`_read_mesh`] (a run's mesh, as bytes for numpy or `array`).
+//! (a request, as `mesher run` takes it), [`_build_job`],
+//! [`_read_mesh`] (a run's mesh, as bytes for numpy or `array`) and
+//! [`_next_job`] (a report's first applicable remedy, as a job).
 //!
 //! The job runs on a thread of its own while this thread, holding the
 //! interpreter only between waits, passes progress to the Python callback
@@ -143,6 +144,19 @@ fn _build_job(request_json: &str) -> PyResult<Option<String>> {
     crate::build_job(request_json).map_err(PyValueError::new_err)
 }
 
+/// The job to run next after a report (its JSON), writing to
+/// `output_dir`: the job's JSON with the record's and the remedy's
+/// indices, or `None` when no record at `min` severity or above has a
+/// remedy that applies.
+#[pyfunction]
+fn _next_job(
+    report_json: &str,
+    output_dir: &str,
+    min: &str,
+) -> PyResult<Option<(String, usize, usize)>> {
+    crate::next_job(report_json, output_dir, min).map_err(PyValueError::new_err)
+}
+
 /// Native-endian bytes of 64-bit values.
 fn ints<'py, const N: usize>(py: Python<'py>, rows: &[[u32; N]]) -> Bound<'py, PyBytes> {
     let mut out = Vec::with_capacity(rows.len() * N * 8);
@@ -195,6 +209,7 @@ fn _mesher(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_run_request, m)?)?;
     m.add_function(wrap_pyfunction!(_build_job, m)?)?;
     m.add_function(wrap_pyfunction!(_read_mesh, m)?)?;
+    m.add_function(wrap_pyfunction!(_next_job, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
