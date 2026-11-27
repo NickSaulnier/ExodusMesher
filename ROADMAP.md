@@ -41,7 +41,7 @@ Phase 2 is partly done already: the sizing field (curvature, thickness, gradatio
 
 1. **Milestone 10's exit criterion.** The 1,000-model benchmark ran on Nov 8, 2026 (943 meshed, 568 conformal; TetGen meshed 543; table in `PLAN.md`). It is the baseline the new kernel must beat. Only CI green on GitHub remains.
 2. **New kernel beside the old one.** Decided (Nov 9, 2026), as recommended: build the exact kernel as `mesher_tet::cdt` next to `mesher_tet::conforming`, choose it per job by a setting, and make it the default only when it beats the current kernel on the benchmark. Results stay comparable, and the golden reports keep guarding the old path until it retires.
-3. **Your solver's Exodus reader.** Whether it reads polyhedral blocks (`NFACED`), and the classic and 64-bit-offset netCDF formats, decides Milestone 21 and Phase 4's output format. Check before Phase 2.
+3. **Your solver's Exodus reader.** Decided (Nov 27, 2026): the solver reads polyhedral blocks (`NFACED`), so Milestone 21 and Phase 4 write polyhedra to Exodus. The netCDF format, left to us, stays 64-bit offset (CDF-2), as the writer already writes it: every Exodus and netCDF reader since netCDF 3.6 reads it, it needs no HDF5 (pure-Rust HDF5 writing is immature), and its limit of 4 GiB a variable (about 268 million tets in one block, 536 million nodes) is reported as `EXO_CAPACITY_EXCEEDED` rather than written wrong. netCDF-4 or CDF-5 only if a mesh ever needs more.
 4. **Going public.** Check the employment agreement's terms on outside projects before publishing benchmarks or the dataset (yours to do).
 
 ## Ground rules the roadmap adds

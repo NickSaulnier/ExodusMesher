@@ -75,6 +75,96 @@ pub enum MeshProblem {
         element: u32,
         side: u8,
     },
+    /// A face view that breaks [`FaceMesh`]'s conventions: the face (or, for
+    /// a patch or zone, the first face or cell it covers wrongly) and what
+    /// is wrong.
+    BadFaceView {
+        face: u32,
+        problem: &'static str,
+    },
+}
+
+/// Faces as polygons, in one flat list: face `k` is the nodes
+/// `nodes[starts[k]..starts[k + 1]]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Polygons {
+    nodes: Vec<u32>,
+    starts: Vec<u32>,
+}
+
+impl Default for Polygons {
+    fn default() -> Polygons {
+        Polygons {
+            nodes: Vec::new(),
+            starts: vec![0],
+        }
+    }
+}
+
+impl Polygons {
+    /// Room for `faces` faces of `nodes` nodes in all.
+    #[must_use]
+    pub fn with_capacity(faces: usize, nodes: usize) -> Polygons {
+        let mut starts = Vec::with_capacity(faces + 1);
+        starts.push(0);
+        Polygons {
+            nodes: Vec::with_capacity(nodes),
+            starts,
+        }
+    }
+
+    /// Append a face.
+    pub fn push(&mut self, face: &[u32]) {
+        self.nodes.extend_from_slice(face);
+        self.starts.push(self.nodes.len() as u32);
+    }
+
+    /// The number of faces.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Face `k`'s nodes; empty for `k` out of range.
+    #[must_use]
+    pub fn get(&self, k: usize) -> &[u32] {
+        match (self.starts.get(k), self.starts.get(k + 1)) {
+            (Some(&a), Some(&b)) => self.nodes.get(a as usize..b as usize).unwrap_or(&[]),
+            _ => &[],
+        }
+    }
+
+    /// Every face in order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &[u32]> + '_ {
+        (0..self.len()).map(|k| self.get(k))
+    }
+
+    /// Every node of every face, in face order.
+    #[must_use]
+    pub fn nodes(&self) -> &[u32] {
+        &self.nodes
+    }
+
+    /// Whether every face is a triangle.
+    #[must_use]
+    pub fn all_triangles(&self) -> bool {
+        self.starts.windows(2).all(|w| w[1] - w[0] == 3)
+    }
+}
+
+/// The cells of a [`FaceMesh`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CellShape {
+    /// Every cell a tetrahedron (four triangles).
+    #[default]
+    Tetrahedron,
+    /// General polyhedra.
+    Polyhedron,
 }
 
 /// A boundary patch of a [`FaceMesh`]: faces `start..start + count`.
@@ -106,9 +196,13 @@ pub struct Zone {
 /// `<block>_boundary` set, which so holds the boundary faces in no group;
 /// faces in no side set go to a patch `boundary`. Patches left empty are
 /// omitted. Zones are the blocks.
+///
+/// Faces are polygons of three or more nodes; [`VolumeMesh::faces`] gives
+/// triangles and [`CellShape::Tetrahedron`], other face views (the
+/// polyhedral dual) any polygons and [`CellShape::Polyhedron`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FaceMesh {
-    pub faces: Vec<[u32; 3]>,
+    pub faces: Polygons,
     /// Per face.
     pub owner: Vec<u32>,
     /// Per internal face (the first `neighbour.len()` faces).
@@ -116,6 +210,7 @@ pub struct FaceMesh {
     pub patches: Vec<Patch>,
     pub zones: Vec<Zone>,
     pub cells: usize,
+    pub shape: CellShape,
 }
 
 impl FaceMesh {
@@ -123,6 +218,85 @@ impl FaceMesh {
     #[must_use]
     pub fn internal(&self) -> usize {
         self.neighbour.len()
+    }
+
+    /// Check the layout above against `points` points: every face of three
+    /// or more nodes, each in range and none repeated in the face; owners
+    /// and neighbours in range, each internal face's owner below its
+    /// neighbour, internal faces in owner and then neighbour order; the
+    /// patches covering the boundary faces in order, once each; the zones
+    /// covering the cells in order, once each; and, for
+    /// [`CellShape::Tetrahedron`], every face a triangle. The first problem
+    /// found, if any. It does not check that cells are closed or faces
+    /// oriented (geometry, for the gate).
+    ///
+    /// # Errors
+    /// A [`MeshProblem::BadFaceView`].
+    pub fn check(&self, points: usize) -> Result<(), MeshProblem> {
+        let bad = |face: usize, problem: &'static str| {
+            Err(MeshProblem::BadFaceView {
+                face: face as u32,
+                problem,
+            })
+        };
+        let n = self.faces.len();
+        if self.owner.len() != n {
+            return bad(0, "one owner per face");
+        }
+        if self.neighbour.len() > n {
+            return bad(0, "more neighbours than faces");
+        }
+        for (k, face) in self.faces.iter().enumerate() {
+            if face.len() < 3 {
+                return bad(k, "fewer than three nodes");
+            }
+            if self.shape == CellShape::Tetrahedron && face.len() != 3 {
+                return bad(k, "not a triangle in a tetrahedral mesh");
+            }
+            if face.iter().any(|&v| v as usize >= points) {
+                return bad(k, "node out of range");
+            }
+            if (1..face.len()).any(|i| face[..i].contains(&face[i])) {
+                return bad(k, "node repeated");
+            }
+            if self.owner[k] as usize >= self.cells {
+                return bad(k, "owner out of range");
+            }
+        }
+        let mut last = (0, 0);
+        for (k, (&o, &nb)) in self.owner.iter().zip(&self.neighbour).enumerate() {
+            if nb as usize >= self.cells || nb <= o {
+                return bad(k, "neighbour out of range or not above the owner");
+            }
+            if k > 0 && (o, nb) <= last {
+                return bad(k, "internal faces out of owner and neighbour order");
+            }
+            last = (o, nb);
+        }
+        let mut next = self.internal();
+        for p in &self.patches {
+            if p.start != next || p.count == 0 {
+                return bad(
+                    p.start,
+                    "patches not consecutive, nonempty, after the internal faces",
+                );
+            }
+            next += p.count;
+        }
+        if next != n {
+            return bad(next, "boundary faces in no patch");
+        }
+        let mut next = 0;
+        for z in &self.zones {
+            if z.start != next {
+                return bad(z.start, "zones not consecutive from the first cell");
+            }
+            next += z.count;
+        }
+        if next != self.cells {
+            return bad(next, "cells in no zone");
+        }
+        Ok(())
     }
 }
 
@@ -303,16 +477,18 @@ impl VolumeMesh {
         }
         internal.sort_unstable_by_key(|&(o, nb, _)| (o, nb));
 
+        let faces = internal.len() + by_set.iter().map(Vec::len).sum::<usize>();
         let mut fm = FaceMesh {
-            faces: Vec::with_capacity(internal.len()),
-            owner: Vec::with_capacity(internal.len()),
+            faces: Polygons::with_capacity(faces, 3 * faces),
+            owner: Vec::with_capacity(faces),
             neighbour: Vec::with_capacity(internal.len()),
             patches: Vec::new(),
             zones: Vec::new(),
             cells: elements.len(),
+            shape: CellShape::Tetrahedron,
         };
         for (o, nb, nodes) in internal {
-            fm.faces.push(nodes);
+            fm.faces.push(&nodes);
             fm.owner.push(o);
             fm.neighbour.push(nb);
         }
@@ -331,7 +507,7 @@ impl VolumeMesh {
                 count: faces.len(),
             });
             for (e, nodes) in faces {
-                fm.faces.push(nodes);
+                fm.faces.push(&nodes);
                 fm.owner.push(e);
             }
         }
@@ -480,6 +656,7 @@ mod tests {
         };
         mesh.add_boundary_side_sets();
         let f = mesh.faces().unwrap();
+        f.check(mesh.points.len()).unwrap();
         assert_eq!((f.internal(), f.faces.len(), f.cells), (0, 4, 1));
         assert_eq!(
             f.patches,
@@ -490,8 +667,8 @@ mod tests {
             }]
         );
         let c = centroid(&mesh.points, [0, 1, 2, 3]);
-        for face in &f.faces {
-            assert!(points_away(&mesh.points, *face, c), "{face:?}");
+        for face in f.faces.iter() {
+            assert!(points_away(&mesh.points, tri(face), c), "{face:?}");
         }
         assert_eq!(f.owner, vec![0; 4]);
     }
@@ -520,19 +697,20 @@ mod tests {
             sides: group,
         });
         let f = mesh.faces().unwrap();
+        f.check(mesh.points.len()).unwrap();
         assert_eq!(f.internal(), 1);
         assert_eq!((f.owner[0], f.neighbour[0]), (0, 1));
-        let mut shared = f.faces[0];
+        let mut shared = tri(f.faces.get(0));
         shared.sort_unstable();
         assert_eq!(shared, [1, 2, 3]);
         assert!(points_away(
             &mesh.points,
-            f.faces[0],
+            tri(f.faces.get(0)),
             centroid(&mesh.points, tets[0])
         ));
         assert!(!points_away(
             &mesh.points,
-            f.faces[0],
+            tri(f.faces.get(0)),
             centroid(&mesh.points, tets[1])
         ));
         // Patches in side set order, together covering the 6 boundary faces once.
@@ -550,7 +728,7 @@ mod tests {
                 assert_eq!(o, usize::from(p.name == "top"));
                 assert!(points_away(
                     &mesh.points,
-                    f.faces[k],
+                    tri(f.faces.get(k)),
                     centroid(&mesh.points, tets[o])
                 ));
             }
@@ -559,7 +737,7 @@ mod tests {
             .faces
             .iter()
             .map(|x| {
-                let mut x = *x;
+                let mut x = tri(x);
                 x.sort_unstable();
                 x
             })
@@ -575,6 +753,88 @@ mod tests {
                 count: 2
             }]
         );
+    }
+
+    fn tri(face: &[u32]) -> [u32; 3] {
+        face.try_into().unwrap()
+    }
+
+    /// Polygons keep each face's nodes; the check finds each broken
+    /// convention.
+    #[test]
+    fn polygon_faces_and_their_check() {
+        let mut p = Polygons::default();
+        assert!(p.is_empty() && p.get(0).is_empty());
+        p.push(&[0, 1, 2]);
+        p.push(&[3, 4, 5, 6]);
+        assert_eq!(
+            (p.len(), p.get(1), p.get(2)),
+            (2, &[3, 4, 5, 6][..], &[][..])
+        );
+        assert_eq!(p.nodes(), &[0, 1, 2, 3, 4, 5, 6]);
+        assert!(!p.all_triangles());
+        // Two cells sharing the quad: a valid polyhedral view.
+        let mut faces = Polygons::default();
+        for face in [
+            &[0, 1, 2, 3][..],
+            &[0, 1, 4],
+            &[1, 2, 4],
+            &[2, 3, 4],
+            &[3, 0, 4],
+        ] {
+            faces.push(face);
+        }
+        let good = FaceMesh {
+            faces,
+            owner: vec![0, 1, 1, 1, 1],
+            neighbour: vec![1],
+            patches: vec![Patch {
+                name: "w".into(),
+                start: 1,
+                count: 4,
+            }],
+            zones: vec![Zone {
+                name: "z".into(),
+                start: 0,
+                count: 2,
+            }],
+            cells: 2,
+            shape: CellShape::Polyhedron,
+        };
+        good.check(5).unwrap();
+        let problem = |f: &FaceMesh, points: usize| match f.check(points) {
+            Err(MeshProblem::BadFaceView { problem, .. }) => problem,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(problem(&good, 4), "node out of range");
+        let tets = FaceMesh {
+            shape: CellShape::Tetrahedron,
+            ..good.clone()
+        };
+        assert_eq!(problem(&tets, 5), "not a triangle in a tetrahedral mesh");
+        let flipped = FaceMesh {
+            owner: vec![1, 1, 1, 1, 1],
+            neighbour: vec![0],
+            ..good.clone()
+        };
+        assert_eq!(
+            problem(&flipped, 5),
+            "neighbour out of range or not above the owner"
+        );
+        let unpatched = FaceMesh {
+            patches: vec![Patch {
+                name: "w".into(),
+                start: 1,
+                count: 3,
+            }],
+            ..good.clone()
+        };
+        assert_eq!(problem(&unpatched, 5), "boundary faces in no patch");
+        let unzoned = FaceMesh {
+            zones: Vec::new(),
+            ..good
+        };
+        assert_eq!(problem(&unzoned, 5), "cells in no zone");
     }
 
     #[test]

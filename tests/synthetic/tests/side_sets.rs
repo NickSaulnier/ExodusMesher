@@ -199,7 +199,9 @@ fn check(label: &str, scene: &Scene) {
                 .filter(|p| p.name == name)
                 .flat_map(|p| p.start..p.start + p.count)
                 .map(|k| {
-                    let [a, b, c] = faces.faces[k].map(|v| assembled.points[v as usize]);
+                    let [a, b, c] = <[u32; 3]>::try_from(faces.faces.get(k))
+                        .unwrap()
+                        .map(|v| assembled.points[v as usize]);
                     0.5 * norm(cross(sub(b, a), sub(c, a)))
                 })
                 .sum()

@@ -1,16 +1,17 @@
 //! OpenFOAM polyMesh writer (ASCII), from the format's public description.
 //!
 //! A case directory: `constant/polyMesh/` holds `points`, `faces` (each a
-//! triangle, listed out of its owner cell), `owner` (per face), `neighbour`
+//! polygon, listed out of its owner cell), `owner` (per face), `neighbour`
 //! (per internal face), `boundary` (a patch of type `patch` per
 //! [`FaceMesh`] patch: its face count and first face) and `cellZones` (a zone
 //! per element block), and `system/` holds the least a utility such as
 //! `checkMesh` needs to run on the case as written: `controlDict`, and
 //! `fvSchemes` and `fvSolution` with generic defaults (a solver's case
-//! replaces them). The face order is
-//! [`VolumeMesh::faces`]': internal faces first, by owner and then
-//! neighbour (upper-triangular order), then each patch's faces together.
-//! Points no cell uses are left out, the rest keep their order.
+//! replaces them). The face order is [`FaceMesh`]'s (as
+//! [`VolumeMesh::faces`] gives it for tets): internal faces first, by owner
+//! and then neighbour (upper-triangular order), then each patch's faces
+//! together. Tets and polyhedra are written alike ([`case_files`] takes any
+//! face view). Points no cell uses are left out, the rest keep their order.
 //!
 //! Patch and zone names must be OpenFOAM words; a name that is not one (a
 //! space, a quote, `/`, `;`, braces, brackets or parentheses, a leading digit
@@ -21,6 +22,7 @@ use std::fmt::Write as _;
 
 use mesher_core::RecordLog;
 use mesher_core::mesh::{FaceMesh, MeshProblem, VolumeMesh};
+use mesher_geom::Point3;
 
 use crate::shared::{NameRule, used_points};
 
@@ -78,12 +80,27 @@ pub fn foam_files(
     log: &mut RecordLog,
 ) -> Result<Vec<(&'static str, String)>, MeshProblem> {
     let f = mesh.faces()?;
-    Ok(render(mesh, &f, log))
+    case_files(&mesh.points, &f, log)
 }
 
-fn render(mesh: &VolumeMesh, f: &FaceMesh, log: &mut RecordLog) -> Vec<(&'static str, String)> {
+/// Render the face view `f` of a mesh on `points` (tets or polyhedra) as
+/// the files of an OpenFOAM case, as [`foam_files`]. Deterministic.
+///
+/// # Errors
+/// The [`MeshProblem`] when `f` breaks [`FaceMesh`]'s layout
+/// ([`FaceMesh::check`]).
+pub fn case_files(
+    points: &[Point3],
+    f: &FaceMesh,
+    log: &mut RecordLog,
+) -> Result<Vec<(&'static str, String)>, MeshProblem> {
+    f.check(points.len())?;
+    Ok(render(points, f, log))
+}
+
+fn render(points_in: &[Point3], f: &FaceMesh, log: &mut RecordLog) -> Vec<(&'static str, String)> {
     // Points in use, renumbered in order.
-    let (new, kept) = used_points(mesh.points.len(), f);
+    let (new, kept) = used_points(points_in.len(), f);
     let note = format!(
         "nPoints:{} nCells:{} nFaces:{} nInternalFaces:{}",
         kept.len(),
@@ -98,7 +115,7 @@ fn render(mesh: &VolumeMesh, f: &FaceMesh, log: &mut RecordLog) -> Vec<(&'static
     let _ = writeln!(points, "{}", kept.len());
     let _ = writeln!(points, "(");
     for &v in &kept {
-        let [x, y, z] = mesh.points[v];
+        let [x, y, z] = points_in[v];
         let _ = writeln!(points, "({x:?} {y:?} {z:?})");
     }
     let _ = writeln!(points, ")");
@@ -107,9 +124,13 @@ fn render(mesh: &VolumeMesh, f: &FaceMesh, log: &mut RecordLog) -> Vec<(&'static
     header(&mut faces, "faceList", location, "faces", None);
     let _ = writeln!(faces, "{}", f.faces.len());
     let _ = writeln!(faces, "(");
-    for face in &f.faces {
-        let [a, b, c] = face.map(|v| new.get(v as usize).copied().unwrap_or(0));
-        let _ = writeln!(faces, "3({a} {b} {c})");
+    for face in f.faces.iter() {
+        let _ = write!(faces, "{}(", face.len());
+        for (i, &v) in face.iter().enumerate() {
+            let sep = if i == 0 { "" } else { " " };
+            let _ = write!(faces, "{sep}{}", new.get(v as usize).copied().unwrap_or(0));
+        }
+        let _ = writeln!(faces, ")");
     }
     let _ = writeln!(faces, ")");
 
@@ -277,7 +298,8 @@ mod tests {
         );
         let f = two_tets().faces().unwrap();
         let mut faces = format!("{}\n(\n", f.faces.len());
-        for [a, b, c] in &f.faces {
+        for face in f.faces.iter() {
+            let [a, b, c] = <[u32; 3]>::try_from(face).unwrap();
             faces += &format!("3({a} {b} {c})\n");
         }
         faces += ")\n";

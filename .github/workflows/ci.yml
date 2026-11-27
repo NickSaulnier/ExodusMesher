@@ -60,7 +60,7 @@ jobs:
       # fluent3DMeshToFoam to the same counts.
       - name: Synthetic meshes as OpenFOAM cases, Fluent and .meshb files
         if: runner.os == 'Linux'
-        run: SUITE_FOAM_DIR="$PWD/target/foam" cargo test --release -p mesher-synthetic --test suite --test side_sets
+        run: SUITE_FOAM_DIR="$PWD/target/foam" cargo test --release -p mesher-synthetic --test suite --test side_sets --test polyhedra
       - name: checkMesh
         if: runner.os == 'Linux'
         run: >

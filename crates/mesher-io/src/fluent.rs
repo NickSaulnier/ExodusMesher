@@ -4,17 +4,20 @@
 //!
 //! Sections, in order: a comment (0), the dimensions (2: 3), the node, cell
 //! and face declarations (10, 12 and 13 with zone 0: the totals), then one
-//! node zone (type 1, every point a cell uses, in order), one cell zone of
-//! tetrahedra (element type 2, type 1: fluid) per element block, one
-//! interior face zone (bc-type 2) with every internal face, a wall face zone
-//! (bc-type 3) per [`FaceMesh`] patch, and a zone section (45) naming each
-//! zone. Indices are 1-based. Counts, indices and the grid sections' zone
-//! ids are hexadecimal, the zone sections' ids decimal, coordinates decimal.
+//! node zone (type 1, every point a cell uses, in order), one cell zone
+//! (type 1: fluid) per element block, of tetrahedra (element type 2) or
+//! polyhedra (element type 7), one interior face zone (bc-type 2) with
+//! every internal face, a wall face zone (bc-type 3) per [`FaceMesh`] patch,
+//! and a zone section (45) naming each zone. Indices are 1-based. Counts,
+//! indices and the grid sections' zone ids are hexadecimal, the zone
+//! sections' ids decimal, coordinates decimal.
 //!
-//! Each face line is its three nodes and its cells `c0 c1`, the nodes
-//! ordered so that the right-hand rule points to `c0`: `c0` is the face's
-//! owner in [`VolumeMesh::faces`] (whose faces are listed out of the owner,
-//! so here reversed), `c1` the neighbour, or 0 on the boundary.
+//! A face zone of triangles (face type 3) has each face line as its three
+//! nodes and its cells `c0 c1`; any other (face type 5, polygonal) has each
+//! line as its node count, its nodes and its cells. The nodes are ordered so
+//! that the right-hand rule points to `c0`: `c0` is the face's owner in the
+//! [`FaceMesh`] (whose faces are listed out of the owner, so here
+//! reversed), `c1` the neighbour, or 0 on the boundary.
 //!
 //! Zone names must be Scheme symbols, here lowercase; a name that is not
 //! one, or that would repeat another zone's, is changed and recorded as
@@ -23,15 +26,18 @@
 use std::fmt::Write as _;
 
 use mesher_core::RecordLog;
-use mesher_core::mesh::{FaceMesh, MeshProblem, VolumeMesh};
+use mesher_core::mesh::{CellShape, FaceMesh, MeshProblem, VolumeMesh};
+use mesher_geom::Point3;
 
 use crate::shared::{NameRule, names, used_points};
 
 /// Fluent's codes, from its file format description.
 const ELEMENT_TETRAHEDRON: u32 = 2;
+const ELEMENT_POLYHEDRON: u32 = 7;
 const CELL_FLUID: u32 = 1;
 const NODE_ANY: u32 = 1;
 const FACE_TRIANGLE: u32 = 3;
+const FACE_POLYGON: u32 = 5;
 const BC_INTERIOR: u32 = 2;
 const BC_WALL: u32 = 3;
 
@@ -42,22 +48,55 @@ const BC_WALL: u32 = 3;
 /// two cells: a bug upstream, as the volume gate rejects such meshes).
 pub fn fluent_text(mesh: &VolumeMesh, log: &mut RecordLog) -> Result<String, MeshProblem> {
     let f = mesh.faces()?;
-    Ok(render(mesh, &f, log))
+    text(&mesh.points, &f, log)
 }
 
-fn faces(s: &mut String, f: &FaceMesh, new: &[u32], range: std::ops::Range<usize>) {
-    let node = |v: u32| new.get(v as usize).copied().unwrap_or(0) + 1;
-    for k in range {
-        let [a, b, c] = f.faces[k];
-        let c0 = f.owner[k] + 1;
-        let c1 = f.neighbour.get(k).map_or(0, |n| n + 1);
-        // Reversed, so the right-hand rule points into the owner, c0.
-        let _ = writeln!(s, "{:x} {:x} {:x} {c0:x} {c1:x}", node(a), node(c), node(b));
+/// Render the face view `f` of a mesh on `points` (tets or polyhedra) as a
+/// Fluent mesh file, as [`fluent_text`]. Deterministic.
+///
+/// # Errors
+/// The [`MeshProblem`] when `f` breaks [`FaceMesh`]'s layout
+/// ([`FaceMesh::check`]).
+pub fn text(points: &[Point3], f: &FaceMesh, log: &mut RecordLog) -> Result<String, MeshProblem> {
+    f.check(points.len())?;
+    Ok(render(points, f, log))
+}
+
+/// The face type of the faces in `range`: triangles, else polygons.
+fn face_type(f: &FaceMesh, range: std::ops::Range<usize>) -> u32 {
+    if range.into_iter().all(|k| f.faces.get(k).len() == 3) {
+        FACE_TRIANGLE
+    } else {
+        FACE_POLYGON
     }
 }
 
-fn render(mesh: &VolumeMesh, f: &FaceMesh, log: &mut RecordLog) -> String {
-    let (new, kept) = used_points(mesh.points.len(), f);
+fn faces(s: &mut String, f: &FaceMesh, new: &[u32], range: std::ops::Range<usize>, kind: u32) {
+    let node = |v: u32| new.get(v as usize).copied().unwrap_or(0) + 1;
+    for k in range {
+        let face = f.faces.get(k);
+        let c0 = f.owner[k] + 1;
+        let c1 = f.neighbour.get(k).map_or(0, |n| n + 1);
+        if kind == FACE_POLYGON {
+            let _ = write!(s, "{:x} ", face.len());
+        }
+        // Reversed (the first node kept first), so the right-hand rule
+        // points into the owner, c0.
+        let first = face.first().copied().unwrap_or(0);
+        let _ = write!(s, "{:x}", node(first));
+        for &v in face.iter().skip(1).rev() {
+            let _ = write!(s, " {:x}", node(v));
+        }
+        let _ = writeln!(s, " {c0:x} {c1:x}");
+    }
+}
+
+fn render(points: &[Point3], f: &FaceMesh, log: &mut RecordLog) -> String {
+    let element = match f.shape {
+        CellShape::Tetrahedron => ELEMENT_TETRAHEDRON,
+        CellShape::Polyhedron => ELEMENT_POLYHEDRON,
+    };
+    let (new, kept) = used_points(points.len(), f);
     let mut s = String::new();
     let _ = writeln!(s, "(0 \"Written by ExodusMesher\")");
     let _ = writeln!(s, "(2 3)");
@@ -74,7 +113,7 @@ fn render(mesh: &VolumeMesh, f: &FaceMesh, log: &mut RecordLog) -> String {
     let node_zone = 1u32;
     let _ = writeln!(s, "(10 ({node_zone:x} 1 {:x} {NODE_ANY} 3)(", kept.len());
     for &v in &kept {
-        let [x, y, z] = mesh.points[v];
+        let [x, y, z] = points[v];
         let _ = writeln!(s, "{x:?} {y:?} {z:?}");
     }
     let _ = writeln!(s, "))");
@@ -87,7 +126,7 @@ fn render(mesh: &VolumeMesh, f: &FaceMesh, log: &mut RecordLog) -> String {
         let zid = id();
         let _ = writeln!(
             s,
-            "(12 ({zid:x} {:x} {:x} {CELL_FLUID} {ELEMENT_TETRAHEDRON}))",
+            "(12 ({zid:x} {:x} {:x} {CELL_FLUID} {element}))",
             z.start + 1,
             z.start + z.count
         );
@@ -95,24 +134,27 @@ fn render(mesh: &VolumeMesh, f: &FaceMesh, log: &mut RecordLog) -> String {
     }
     if f.internal() > 0 {
         let zid = id();
+        let kind = face_type(f, 0..f.internal());
         let _ = writeln!(
             s,
-            "(13 ({zid:x} 1 {:x} {BC_INTERIOR} {FACE_TRIANGLE})(",
+            "(13 ({zid:x} 1 {:x} {BC_INTERIOR} {kind})(",
             f.internal()
         );
-        faces(&mut s, f, &new, 0..f.internal());
+        faces(&mut s, f, &new, 0..f.internal(), kind);
         let _ = writeln!(s, "))");
         zones.push((zid, "interior", "interior", "interior"));
     }
     for p in &f.patches {
         let zid = id();
+        let range = p.start..p.start + p.count;
+        let kind = face_type(f, range.clone());
         let _ = writeln!(
             s,
-            "(13 ({zid:x} {:x} {:x} {BC_WALL} {FACE_TRIANGLE})(",
+            "(13 ({zid:x} {:x} {:x} {BC_WALL} {kind})(",
             p.start + 1,
             p.start + p.count
         );
-        faces(&mut s, f, &new, p.start..p.start + p.count);
+        faces(&mut s, f, &new, range, kind);
         let _ = writeln!(s, "))");
         zones.push((zid, "wall", "patch", &p.name));
     }
@@ -171,7 +213,7 @@ mod tests {
         let text = fluent_text(&mesh, &mut log).unwrap();
         let f = mesh.faces().unwrap();
         let line = |k: usize| {
-            let [a, b, c] = f.faces[k];
+            let [a, b, c] = <[u32; 3]>::try_from(f.faces.get(k)).unwrap();
             let n = f.neighbour.get(k).map_or(0, |n| n + 1);
             format!(
                 "{:x} {:x} {:x} {:x} {n:x}\n",

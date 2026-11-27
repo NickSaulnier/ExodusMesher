@@ -104,7 +104,7 @@ pub(crate) fn names(rule: NameRule, items: &[(&str, &str)], log: &mut RecordLog)
 /// (`u32::MAX` where unused) and the mesh points kept.
 pub(crate) fn used_points(points: usize, f: &FaceMesh) -> (Vec<u32>, Vec<usize>) {
     let mut new = vec![u32::MAX; points];
-    for v in f.faces.iter().flatten() {
+    for v in f.faces.nodes() {
         if let Some(n) = new.get_mut(*v as usize) {
             *n = 0;
         }

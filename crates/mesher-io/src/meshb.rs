@@ -131,7 +131,8 @@ impl Writer {
 ///
 /// # Errors
 /// The mesh's [`MeshProblem`] when it has no face view (a face on more than
-/// two cells: a bug upstream, as the volume gate rejects such meshes).
+/// two cells: a bug upstream, as the volume gate rejects such meshes). A
+/// tet mesh's faces are triangles, which this format's boundary needs.
 pub fn meshb(mesh: &VolumeMesh) -> Result<Meshb, MeshProblem> {
     let f = mesh.faces()?;
     Ok(render(mesh, &f))
@@ -179,8 +180,8 @@ fn render(mesh: &VolumeMesh, f: &FaceMesh) -> Meshb {
     w.keyword(KW_TRIANGLES, s.int + boundary * 4 * s.int);
     w.int(boundary as u64);
     for (r, p) in f.patches.iter().enumerate() {
-        for face in &f.faces[p.start..p.start + p.count] {
-            for &v in face {
+        for k in p.start..p.start + p.count {
+            for &v in f.faces.get(k) {
                 w.int(node(v));
             }
             w.int(r as u64 + 1);
@@ -548,7 +549,8 @@ mod tests {
         let want: Vec<([u64; 3], i64)> = (f.internal()..f.faces.len())
             .map(|k| {
                 let r = if k < 4 { 1 } else { 2 };
-                (f.faces[k].map(|v| u64::from(v) + 1), r)
+                let face = <[u32; 3]>::try_from(f.faces.get(k)).unwrap();
+                (face.map(|v| u64::from(v) + 1), r)
             })
             .collect();
         assert_eq!(file.triangles, want);
