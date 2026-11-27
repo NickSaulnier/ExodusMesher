@@ -4,8 +4,9 @@
 //! [`Job`](mesher_core::protocol::Job), runs in a `mesher-worker` process
 //! through [`mesher_client::run_job`] (so a panic or a runaway job never
 //! reaches the caller's interpreter), and its report goes back as JSON text
-//! with the path of `report.json`. Everything else, the typed report
-//! included, is Python (`python/mesher/`).
+//! with the path of `report.json`. Reading a run's mesh back is [`mesh`]
+//! (its `.meshb`). Everything else, the typed report included, is Python
+//! (`python/mesher/`).
 //!
 //! The Python module itself (`mesher._mesher`) is behind the `python`
 //! feature, which maturin turns on; without it this crate is just
@@ -16,6 +17,8 @@ use std::sync::atomic::AtomicBool;
 
 use mesher_client::{JobRequest, Limits, RequestError};
 use mesher_core::protocol::{Job, WorkerMessage};
+
+pub mod mesh;
 
 #[cfg(feature = "python")]
 #[allow(unsafe_code)]

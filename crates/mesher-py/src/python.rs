@@ -1,5 +1,6 @@
 //! The Python module `mesher._mesher`: [`_run`] (a job), [`_run_request`]
-//! (a request, as `mesher run` takes it) and [`_build_job`].
+//! (a request, as `mesher run` takes it), [`_build_job`] and
+//! [`_read_mesh`] (a run's mesh, as bytes for numpy or `array`).
 //!
 //! The job runs on a thread of its own while this thread, holding the
 //! interpreter only between waits, passes progress to the Python callback
@@ -14,6 +15,7 @@ use std::time::Duration;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict};
 
 use mesher_client::Limits;
 use mesher_core::protocol::WorkerMessage;
@@ -141,11 +143,58 @@ fn _build_job(request_json: &str) -> PyResult<Option<String>> {
     crate::build_job(request_json).map_err(PyValueError::new_err)
 }
 
+/// Native-endian bytes of 64-bit values.
+fn ints<'py, const N: usize>(py: Python<'py>, rows: &[[u32; N]]) -> Bound<'py, PyBytes> {
+    let mut out = Vec::with_capacity(rows.len() * N * 8);
+    for row in rows {
+        for &v in row {
+            out.extend_from_slice(&i64::from(v).to_ne_bytes());
+        }
+    }
+    PyBytes::new(py, &out)
+}
+
+/// The mesh at `path` (a run's output directory or a `.meshb` file): a dict
+/// of `points` (3 doubles each), `tets` (4 int64 each, 0-based),
+/// `tet_parts`, `triangles` (3 each) and `triangle_patches` (one int64
+/// each) as native-endian bytes, and the names `parts` and `patches`.
+/// A missing or unreadable file raises `OSError`; one that is not a
+/// complete mesh, `ValueError`.
+#[pyfunction]
+fn _read_mesh(py: Python<'_>, path: PathBuf) -> PyResult<Bound<'_, PyDict>> {
+    let m = py
+        .detach(|| crate::mesh::read_mesh(&path))
+        .map_err(|e| match e {
+            crate::mesh::ReadError::Io(p, e) => {
+                let message = format!("{}: {e}", p.display());
+                PyErr::from(std::io::Error::new(e.kind(), message))
+            }
+            e @ crate::mesh::ReadError::Invalid(..) => PyValueError::new_err(e.to_string()),
+        })?;
+    let mut points = Vec::with_capacity(m.points.len() * 24);
+    for p in &m.points {
+        for c in p {
+            points.extend_from_slice(&c.to_ne_bytes());
+        }
+    }
+    let single = |v: &[u32]| v.iter().map(|&x| [x]).collect::<Vec<[u32; 1]>>();
+    let d = PyDict::new(py);
+    d.set_item("points", PyBytes::new(py, &points))?;
+    d.set_item("tets", ints(py, &m.tets))?;
+    d.set_item("tet_parts", ints(py, &single(&m.tet_parts)))?;
+    d.set_item("parts", m.parts)?;
+    d.set_item("triangles", ints(py, &m.triangles))?;
+    d.set_item("triangle_patches", ints(py, &single(&m.triangle_patches)))?;
+    d.set_item("patches", m.patches)?;
+    Ok(d)
+}
+
 #[pymodule]
 fn _mesher(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_run, m)?)?;
     m.add_function(wrap_pyfunction!(_run_request, m)?)?;
     m.add_function(wrap_pyfunction!(_build_job, m)?)?;
+    m.add_function(wrap_pyfunction!(_read_mesh, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

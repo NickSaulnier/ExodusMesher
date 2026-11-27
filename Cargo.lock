@@ -2019,6 +2019,7 @@ version = "0.1.0"
 dependencies = [
  "mesher-client",
  "mesher-core",
+ "mesher-io",
  "pyo3",
  "serde_json",
 ]

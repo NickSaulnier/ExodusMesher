@@ -3,13 +3,16 @@
     import mesher
     report = mesher.run("part.obj", element_size=0.02)
     print(report.exit_code, report.parts[0].mesh.tets)
+    mesh = mesher.run("part.obj", formats=["exodus", "meshb"]).mesh()
+    print(mesh.points.shape, mesh.parts, mesh.patches)
 
 Jobs run in a separate ``mesher-worker`` process (shipped in this package,
 or ``$MESHER_WORKER``), under a timeout and a memory cap, so a crash or a
 runaway job never takes down the interpreter. Every run ends in a report,
 the same ``report.json`` the command line writes: ``run`` and
 ``run_project`` return it typed (``Report``), ``run_job`` and
-``run_request`` as text.
+``run_request`` as text. ``Report.mesh()`` and ``read_mesh`` read the
+mesh back from a run's ``.meshb``.
 """
 
 from __future__ import annotations
@@ -21,8 +24,10 @@ import sys
 from enum import Enum
 from typing import Any, Callable, Iterable, NamedTuple, Optional, Union
 
+from . import mesh as _mesh
 from . import report as _report
 from ._mesher import __version__, _build_job, _run, _run_request
+from .mesh import Mesh, read_mesh
 from .report import *  # noqa: F401,F403 (the report's types)
 from .report import KernelChoice, OutputFormat, Report
 
@@ -35,7 +40,7 @@ __all__ = [
     "run_request",
     "worker_path",
     "__version__",
-] + _report.__all__
+] + _mesh.__all__ + _report.__all__
 
 PathLike = Union[str, "os.PathLike[str]"]
 Progress = Callable[[str, float], None]

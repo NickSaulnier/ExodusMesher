@@ -2,7 +2,7 @@
 
 The dataclasses and enums are generated from the report schema
 (``_schema``); ``Report`` adds what the schema cannot say: the worker's own
-text, and views over the records.
+text, views over the records, and the run's mesh.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ import json
 import os
 import pathlib
 from typing import Dict, Optional, Tuple, Union
+
+from .mesh import Mesh, read_mesh
 
 from . import _schema
 from ._schema import (
@@ -101,6 +103,21 @@ class Report(_schema.Report):
             if part.name == name:
                 return part
         raise KeyError(name)
+
+    def mesh(self, *, numpy: Optional[bool] = None) -> Mesh:
+        """The run's mesh, read from the ``mesh.meshb`` beside ``report.json``
+        (see ``read_mesh``). The run must have written it: ``"meshb"`` among
+        its formats (``mesher.run(..., formats=["exodus", "meshb"])``, or the
+        project's ``formats``). Raises ``ValueError`` when it did not, or the
+        report was not read from a run, and ``FileNotFoundError`` when no
+        mesh was written (no part meshed)."""
+        if self.path is None:
+            raise ValueError("this report was not read from a run's report.json")
+        if OutputFormat.MESHB not in self.config.formats:
+            raise ValueError(
+                "the run wrote no .meshb: run it with \"meshb\" among its formats"
+            )
+        return read_mesh(self.path.parent, numpy=numpy)
 
 
 def read_report(path: Union[str, os.PathLike]) -> Report:

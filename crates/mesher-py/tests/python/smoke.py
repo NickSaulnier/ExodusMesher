@@ -6,7 +6,8 @@ needed):
 Meshes the cube fixture through the packaged worker, checks the report and
 `report.json` agree, that progress arrives, and that a bad job raises before
 anything runs (stage 1); that requests build the CLI's jobs (stage 2); and
-`mesher.run`, `run_project` and the typed report (stage 3).
+`mesher.run`, `run_project` and the typed report (stage 3); and reading
+the mesh back, with numpy when it is installed and without (stage 4).
 """
 
 import json
@@ -88,6 +89,7 @@ def main():
             raise AssertionError(f"{bad} ran")
 
     typed(out, cube, run)
+    meshes(out, cube)
 
     print(f"mesher {mesher.__version__}: cube meshed, {tets} tets, {len(stages)} progress messages")
 
@@ -160,6 +162,107 @@ def typed(out, cube, run):
         raise AssertionError("an OBJ ran as a project")
     # The raw runners' reports, typed.
     assert run.report() == report
+
+
+def meshes(out, cube):
+    """Stage 4: the run's mesh, read back from its `.meshb`."""
+    report = mesher.run(cube, out / "mesh", formats=["exodus", "meshb"], timeout=600)
+    assert (out / "mesh" / "mesh.meshb").is_file()
+    plain = report.mesh(numpy=False)
+    assert isinstance(plain, mesher.Mesh) and plain.path == out / "mesh" / "mesh.meshb"
+    assert plain.parts == tuple(p.name for p in report.parts), plain.parts
+    assert len(plain.tets) == report.parts[0].mesh.tets
+    assert len(plain.points) == report.parts[0].mesh.nodes
+    assert len(plain.tet_parts) == len(plain.tets) and set(plain.tet_parts) == {0}
+    n = len(plain.points)
+    assert all(0 <= v < n for t in plain.tets for v in t)
+    assert all(0 <= v < n for t in plain.triangles for v in t)
+    assert plain.patches and set(plain.triangle_patches) == set(range(len(plain.patches)))
+    # The unit cube: the tets fill its volume, the boundary is its six
+    # faces, each triangle's normal out of the mesh (so the boundary
+    # encloses a volume of +1).
+    p = plain.points
+
+    def sub(a, b):
+        return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+    def cross(a, b):
+        return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+    def dot(a, b):
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    vols = [dot(sub(p[b], p[a]), cross(sub(p[c], p[a]), sub(p[d], p[a]))) / 6 for a, b, c, d in plain.tets]
+    assert abs(abs(sum(vols)) - 1) < 1e-9, sum(vols)
+    assert all((v > 0) == (vols[0] > 0) and v != 0 for v in vols), "tets of both orientations"
+    area = 0.0
+    enclosed = 0.0
+    for a, b, c in plain.triangles:
+        nrm = cross(sub(p[b], p[a]), sub(p[c], p[a]))
+        area += dot(nrm, nrm) ** 0.5 / 2
+        enclosed += dot(p[a], nrm) / 6
+    assert abs(area - 6) < 1e-9, area
+    assert abs(enclosed - 1) < 1e-9, enclosed
+    name = plain.patches[0]
+    assert len(plain.patch_triangles(name)) == plain.triangle_patches.count(0)
+    assert plain.part_tets(plain.parts[0]) == plain.tets
+    for bad in [lambda: plain.part_tets("nope"), lambda: plain.patch_triangles("nope")]:
+        try:
+            bad()
+        except KeyError:
+            pass
+        else:
+            raise AssertionError("an unknown name was found")
+    assert mesher.read_mesh(out / "mesh", numpy=False).tets == plain.tets
+    assert mesher.read_mesh(out / "mesh" / "mesh.meshb", numpy=False).patches == plain.patches
+
+    try:
+        import numpy
+    except ImportError:
+        numpy = None
+    if numpy is not None:
+        arrays = report.mesh()
+        assert arrays.points.shape == (len(p), 3) and arrays.points.dtype == numpy.float64
+        assert arrays.tets.shape == (len(plain.tets), 4) and arrays.tets.dtype == numpy.int64
+        assert arrays.points.tolist() == [list(x) for x in p]
+        assert arrays.tets.tolist() == [list(t) for t in plain.tets]
+        assert arrays.triangles.tolist() == [list(t) for t in plain.triangles]
+        assert arrays.tet_parts.tolist() == list(plain.tet_parts)
+        assert arrays.triangle_patches.tolist() == list(plain.triangle_patches)
+        assert not arrays.points.flags.writeable
+        assert len(arrays.patch_triangles(name)) == len(plain.patch_triangles(name))
+        assert len(arrays.part_tets(plain.parts[0])) == len(plain.tets)
+    else:
+        try:
+            report.mesh(numpy=True)
+        except ImportError:
+            pass
+        else:
+            raise AssertionError("numpy=True without numpy")
+    print(f"mesh read back {'with' if numpy is not None else 'without'} numpy")
+
+    # A run that wrote no .meshb, and a directory with none.
+    no_meshb = mesher.read_report(out / "typed" / "report.json")
+    try:
+        no_meshb.mesh()
+    except ValueError as e:
+        assert "meshb" in str(e), e
+    else:
+        raise AssertionError("a run without a .meshb gave a mesh")
+    try:
+        mesher.read_mesh(out / "typed")
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("a directory without a mesh gave one")
+    broken = out / "broken.meshb"
+    broken.write_bytes(b"not a mesh")
+    try:
+        mesher.read_mesh(broken)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a broken file gave a mesh")
 
 
 if __name__ == "__main__":
