@@ -2,8 +2,10 @@
 # the synthetic defect suite and the TetGen oracle tests) on Linux and
 # Windows, and on Linux OpenFOAM's checkMesh on every synthetic case's mesh,
 # with its Fluent file round-tripped through OpenFOAM and its .meshb file
-# through meshio. The Thingi10k benchmarks stay local (ignored tests): the meshes
-# carry Thingiverse licences and are never committed.
+# through meshio; and on both, the Python wheel built, installed and run on
+# every synthetic input against the CLI. The Thingi10k benchmarks stay local
+# (ignored tests): the meshes carry Thingiverse licences and are never
+# committed.
 name: CI
 
 on:
@@ -47,8 +49,10 @@ jobs:
       # Release: the oracle and shape tests mesh real models and are slow in
       # debug builds.
       - run: cargo test --workspace --release
+      # Also writes every run's input, for the Python exit run below.
       - name: Synthetic suite precision and recall
-        run: cargo test --release -p mesher-synthetic -- --nocapture
+        shell: bash
+        run: SUITE_INPUT_DIR="$PWD/target/suite_inputs" cargo test --release -p mesher-synthetic -- --nocapture
       # OpenFOAM is GPL: it runs as a separate process, from OpenCFD's
       # runtime image (v2512, pinned by digest), and is never a dependency.
       # Each synthetic mesh as an OpenFOAM case and a Fluent file; checkMesh
@@ -64,18 +68,40 @@ jobs:
           -v "$PWD/target/foam:/cases" -v "$PWD/tests/foam:/check:ro"
           opencfd/openfoam-run@sha256:707421ab7d1e5201d86723945a6649490e292a0c46ed03d36982449e6b3b7243
           bash /check/check.sh /cases
-      # Each .meshb file through meshio (MIT; pinned), then meshio's copy
-      # back through our reader.
       - uses: actions/setup-python@v5
-        if: runner.os == 'Linux'
         with:
           python-version: "3.12"
+      # Each .meshb file through meshio (MIT; pinned), then meshio's copy
+      # back through our reader.
       - name: .meshb round trip through meshio
         if: runner.os == 'Linux'
         run: |
           python -m pip install meshio==5.3.5
           python -I tests/meshb/meshio_roundtrip.py target/foam
           MESHB_MESHIO_DIR="$PWD/target/foam" cargo test --release -p mesher-synthetic --test meshb_meshio -- --nocapture
+      # Milestone 20: the wheel (maturin pinned) with the worker in it,
+      # installed in a fresh environment; the smoke test, then every
+      # synthetic input meshed by the CLI and by `mesher.run`, whose files
+      # (report.json among them) must be the same byte for byte.
+      - name: Python wheel
+        shell: bash
+        run: |
+          python -m pip install maturin==1.16.0
+          python -I crates/mesher-py/build_wheel.py --out target/wheels
+          cargo build --release -p mesher-cli
+      - name: Python against the CLI
+        shell: bash
+        run: |
+          python -m venv target/wheel-env
+          py=target/wheel-env/bin/python
+          [ -x "$py" ] || py=target/wheel-env/Scripts/python
+          "$py" -m pip install --no-index --find-links target/wheels exodusmesher
+          "$py" -I crates/mesher-py/tests/python/smoke.py target/smoke
+          "$py" -I crates/mesher-py/tests/python/compare_cli.py target/suite_inputs target/release/mesher --out target/compare
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: target/wheels/*.whl
       - name: checkMesh logs
         if: failure() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4

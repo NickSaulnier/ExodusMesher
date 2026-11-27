@@ -567,6 +567,46 @@ struct Run {
 /// Coarser than the default, to keep the suite fast.
 const SUITE_ELEMENT_SIZE: f64 = 0.06;
 
+/// A run's label as a directory name.
+fn dir_name(label: &str) -> String {
+    label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Milestone 20 stage 6: with `SUITE_INPUT_DIR`, each run's input as a file
+/// there (`<run>/input.obj`) with the options that run it as the suite does
+/// (`<run>/options.json`: `parts` and `element_size`, as `mesher.run`'s
+/// keywords), for `crates/mesher-py/tests/python/compare_cli.py` to mesh
+/// with the CLI and with Python.
+fn write_input(label: &str, scene: &Scene, parts: &[&str]) {
+    let Some(root) = std::env::var_os("SUITE_INPUT_DIR").filter(|d| !d.is_empty()) else {
+        return;
+    };
+    let dir = std::path::Path::new(&root).join(dir_name(label));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("input.obj"), scene.to_obj()).unwrap();
+    let options = serde_json::json!({
+        "label": label,
+        "parts": parts,
+        "element_size": SUITE_ELEMENT_SIZE,
+    });
+    std::fs::write(
+        dir.join("options.json"),
+        serde_json::to_string_pretty(&options).unwrap()
+            + "
+",
+    )
+    .unwrap();
+}
+
 fn run(scene: &Scene, parts: &[&str]) -> Run {
     run_with(
         scene,
@@ -782,17 +822,7 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
         .filter(|_| !run.meshes.meshed.is_empty())
     {
         let mesh = mesher_core::volume::assemble(&run.meshes.meshed);
-        let name: String = label
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let case = std::path::Path::new(&root).join(name);
+        let case = std::path::Path::new(&root).join(dir_name(label));
         let mut log = RecordLog::new();
         match mesher_io::foam::foam_files(&mesh, &mut log) {
             Ok(files) => {
@@ -1339,6 +1369,7 @@ fn synthetic_suite() {
             let label = format!("{} [x{scale} +{offset}]", c.name);
             let started = std::time::Instant::now();
             let scene = c.scene.transformed(scale, offset);
+            write_input(&label, &scene, &c.parts);
             let outcome = run(&scene, &c.parts);
             if std::env::var("SUITE_TIMING").is_ok() {
                 eprintln!("{:>8.2?} {label}", started.elapsed());
