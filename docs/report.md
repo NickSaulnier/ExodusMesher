@@ -53,6 +53,7 @@ Each part is an OBJ object (`o`), or in a file without objects an OBJ group (`g`
 | `selected` | Whether the job meshed it |
 | `repair` | `faces_before`, `faces_after`, `vertices_before`, `vertices_after`, and `gate_passed`: whether the repaired surface is a valid closed solid; `rung`: the highest repair rung that changed the surface (1 for local fixes or none, 2 when its intersections were resolved, 3 when it was wrapped as the last resort); `components_before`, `components_after`, `euler_before`, `euler_after`: the surface's connected pieces and Euler characteristic (vertices − edges + faces, 2 per sphere-like shell, 0 for a ring) entering repair and after it |
 | `mesh` | Present when a volume mesh was attempted; see [Mesh quality](#mesh-quality) |
+| `dual` | Present when the polyhedral dual of the part's tet mesh was built; see [The polyhedral dual](#the-polyhedral-dual) |
 | `features` | Present when the part was repaired: the feature lines of its final surface (the wrap, for a wrapped part), as the remesher keeps them. `feature_angle_degrees` (the angle used); `edges` in all, of them `angle_edges` (turning by more than the angle, or with a degenerate face), `group_edges` (between faces of different OBJ groups; fill faces are a group of their own) and `forced_edges` (`feature_edges`); `smoothed_edges` (`smooth_edges` that took effect); `corners` (feature vertices not on one smooth line: never moved); `curves` (chains of feature edges between corners, or closed loops); `length` (total, in model units). The lines are in `features.vtp` |
 
 ## Records
@@ -181,6 +182,7 @@ Severity is the code's default; records can be upgraded or downgraded where the 
 | `VOL_LOW_QUALITY` | warning | Non-orthogonality, skewness or volume ratio out of bounds | Warning or error by threshold |
 | `VOL_BOUNDARY_DEVIATION` | error | Hausdorff distance to input over tolerance | Error |
 | `VOL_GRADATION` | warning | Neighbouring cells' sizes differ beyond the gradation limit | Warning, located at the face with the largest ratio of its cells' longest edges (`max_size_ratio` against 4; `element`, `neighbour`, `point`). Conformal meshes are graded to the limit before the gate, so it is rare: where a cell could not be split, or grading ran out of budget |
+| `VOL_DUAL_INVALID` | warning | Polyhedral dual cells a solver cannot use (an inverted face pyramid), merged away or left | Merging that leaves every cell valid: information, `merge` / `applied` (`invalid_cells_before_merging`, `merges`). Cells still invalid, or a tet mesh with no dual: a warning, `fallback` / `applied`, the part keeps its tet mesh (`invalid_cells`, `merges`, `cell` and `point`: one of them, by its 1-based cell number in the part's dual and its centre). See [The polyhedral dual](#the-polyhedral-dual) |
 | `EXO_NAME_TRUNCATED` | warning | Part or set name over the Exodus limit | Truncate, warning |
 | `EXO_CAPACITY_EXCEEDED` | error | Mesh too large for the 64-bit-offset format | Error |
 | `OUT_NAME_CHANGED` | warning | A part or patch name was changed to one the output format accepts | Rename, warning (info when only the letter case changed, as Fluent's lowercase names often do): `format` (`openfoam` or `fluent`), `entity` (`patch` or `cell_zone`), `name`, `written_as`. OpenFOAM names here are ASCII letters, digits, `_`, `.` and `-`, starting with a letter or `_`; Fluent zone names lowercase letters, digits, `_`, `.`, `+` and `-`, starting with a letter or `_` (capitals are lowered, and the interior zone is `interior`). Other characters become `_`, and a repeated name takes `_2`, `_3`, ... |
@@ -214,6 +216,26 @@ Each meshing attempt, in the order tried: `part`, `kernel` (`delaunay`, the cons
 | `worst_cells` | Where the worst cells are, one entry per measure: `measure` (`min_dihedral`, `non_orthogonality`, `skewness` or `size_ratio`), `wall` (present for the worst over the wall-adjacent cells, those with a boundary face; their boundary faces count for non-orthogonality, by the line from the cell's centroid to the face's), `value`, `element` (the cell's 1-based number in the part's element block; for a face, the first of its two cells), `neighbour` (for an interior face, the cell across it) and `point` (the cell's centroid, or the face's). Entries in order: smallest dihedral angle, then non-orthogonality and skewness over every interior face, then both over the wall-adjacent cells. Ties go to the lowest element number |
 
 Every number is finite: JSON has no infinity or NaN. A value that could not be measured (the deviation of an empty mesh, for one) is written as -1.
+
+
+## The polyhedral dual
+
+A part's `dual` summarizes the polyhedral dual of its tet mesh: one cell around each vertex of the tets (one per connected piece of the vertex's tets, where they fall apart), about one cell for every four to five tets. Its faces are rings of tet and face centroids around each edge; its boundary is the tet mesh's surface exactly, a face per boundary vertex and patch where the surface is flat. A cell is valid when it is closed and every face's pyramid on the cell's centre (as a solver computes it) is positive. Invalid cells, thin ones at the wall, are merged into neighbours (`merges`); a dual with cells still invalid is not written, and the part keeps its tet mesh (`VOL_DUAL_INVALID`).
+
+| Field | Meaning |
+| --- | --- |
+| `accepted` | Every cell valid, so the dual is written in place of the tets |
+| `cells`, `faces`, `nodes` | Its size |
+| `merges`, `invalid_cells` | Merges made, and cells still invalid after them |
+| `min_faces_per_cell`, `max_faces_per_cell` | Faces per cell |
+| `volume` | The cells' volume, which is the tets' |
+| `max_non_orthogonality_degrees`, `mean_non_orthogonality_degrees`, `max_skewness`, `max_volume_ratio` | As the mesh's, on interior faces, between the cell centres a solver computes |
+| `max_size_ratio` | As the mesh's, each cell's size the cube root of its volume |
+| `wall_max_non_orthogonality_degrees`, `wall_max_skewness` | Over the faces of wall-adjacent cells, boundary faces by the line from the cell's centre to the face's: where the dual is weakest |
+| `max_flatness_degrees` | The largest angle between a face's triangles (about its nodes' average) and the face: the rings are not planar |
+| `worst_cells` | As the mesh's, `element` and `neighbour` 1-based cell numbers in the part's dual |
+
+An accepted dual's quality beyond the tet limits is `VOL_LOW_QUALITY` (non-orthogonality over 70°, skewness over 2) and `VOL_GRADATION` (size ratio over 4), as for tets, with `cells` `dual` among the measured values and `cell`, `neighbour` and `point` locating the worst.
 
 ## Summary and exit code
 

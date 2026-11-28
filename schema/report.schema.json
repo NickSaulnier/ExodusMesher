@@ -363,6 +363,11 @@
           "const": "VOL_GRADATION"
         },
         {
+          "description": "Polyhedral dual cells a solver cannot use (an inverted face pyramid), merged away or left",
+          "type": "string",
+          "const": "VOL_DUAL_INVALID"
+        },
+        {
           "description": "Part or set name over the Exodus limit",
           "type": "string",
           "const": "EXO_NAME_TRUNCATED"
@@ -382,6 +387,118 @@
           "type": "string",
           "const": "OUT_WRITE_FAILED"
         }
+      ]
+    },
+    "DualSummary": {
+      "description": "The polyhedral dual of a part's tet mesh (Milestone 21): one cell around\neach vertex, invalid cells merged into neighbours. Its quality is\nmeasured as `mesh`'s, on the centres a solver computes; there are no\ndihedral angles, and a cell's size is the cube root of its volume.",
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "description": "Whether every cell is valid (closed, every face pyramid positive), so\nthe dual is written in place of the tets.",
+          "type": "boolean"
+        },
+        "cells": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "faces": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "invalid_cells": {
+          "description": "Cells still invalid after merging.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_faces_per_cell": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_flatness_degrees": {
+          "description": "The largest angle between a face's triangles (about its nodes'\naverage) and the face: 0 for planar faces.",
+          "type": "number",
+          "format": "double"
+        },
+        "max_non_orthogonality_degrees": {
+          "description": "As `mesh`'s, on interior faces.",
+          "type": "number",
+          "format": "double"
+        },
+        "max_size_ratio": {
+          "type": "number",
+          "format": "double"
+        },
+        "max_skewness": {
+          "type": "number",
+          "format": "double"
+        },
+        "max_volume_ratio": {
+          "type": "number",
+          "format": "double"
+        },
+        "mean_non_orthogonality_degrees": {
+          "type": "number",
+          "format": "double"
+        },
+        "merges": {
+          "description": "Merges of an invalid cell into a neighbour (each one cell fewer).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "min_faces_per_cell": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "nodes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "volume": {
+          "type": "number",
+          "format": "double"
+        },
+        "wall_max_non_orthogonality_degrees": {
+          "description": "Over the faces of wall-adjacent cells (boundary faces by the line\nfrom the cell's centre to the face's).",
+          "type": "number",
+          "format": "double"
+        },
+        "wall_max_skewness": {
+          "type": "number",
+          "format": "double"
+        },
+        "worst_cells": {
+          "description": "As `mesh`'s; `element` and `neighbour` are 1-based cell numbers in\nthe part's dual.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorstCell"
+          }
+        }
+      },
+      "required": [
+        "accepted",
+        "cells",
+        "faces",
+        "nodes",
+        "merges",
+        "invalid_cells",
+        "min_faces_per_cell",
+        "max_faces_per_cell",
+        "volume",
+        "max_non_orthogonality_degrees",
+        "mean_non_orthogonality_degrees",
+        "max_skewness",
+        "max_volume_ratio",
+        "max_size_ratio",
+        "wall_max_non_orthogonality_degrees",
+        "wall_max_skewness",
+        "max_flatness_degrees"
       ]
     },
     "FeatureSummary": {
@@ -936,6 +1053,17 @@
           },
           "maxItems": 2,
           "minItems": 2
+        },
+        "dual": {
+          "description": "Present when the polyhedral dual of the part's tet mesh was built.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DualSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "features": {
           "description": "The feature lines of the repaired surface (the final one: the wrap,\nfor a wrapped part), present when the part was repaired.",

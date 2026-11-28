@@ -118,6 +118,7 @@ defect_codes! {
     VolLowQuality = "VOL_LOW_QUALITY", Warning, "Non-orthogonality, skewness or volume ratio out of bounds";
     VolBoundaryDeviation = "VOL_BOUNDARY_DEVIATION", Error, "Hausdorff distance to input over tolerance";
     VolGradation = "VOL_GRADATION", Warning, "Neighbouring cells' sizes differ beyond the gradation limit";
+    VolDualInvalid = "VOL_DUAL_INVALID", Warning, "Polyhedral dual cells a solver cannot use (an inverted face pyramid), merged away or left";
     ExoNameTruncated = "EXO_NAME_TRUNCATED", Warning, "Part or set name over the Exodus limit";
     ExoCapacityExceeded = "EXO_CAPACITY_EXCEEDED", Error, "Mesh too large for the 64-bit-offset format";
     OutNameChanged = "OUT_NAME_CHANGED", Warning, "A part or patch name was changed to one the output format accepts";
@@ -849,6 +850,9 @@ pub struct PartSummary {
     /// Present when a volume mesh was attempted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh: Option<MeshSummary>,
+    /// Present when the polyhedral dual of the part's tet mesh was built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dual: Option<DualSummary>,
     /// The feature lines of the repaired surface (the final one: the wrap,
     /// for a wrapped part), present when the part was repaired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -934,6 +938,44 @@ pub struct MeshSummary {
     /// Where the worst cells are: the smallest dihedral angle, and the
     /// largest non-orthogonality and skewness over interior faces and,
     /// separately, over the faces of wall-adjacent cells.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worst_cells: Vec<WorstCell>,
+}
+
+/// The polyhedral dual of a part's tet mesh (Milestone 21): one cell around
+/// each vertex, invalid cells merged into neighbours. Its quality is
+/// measured as `mesh`'s, on the centres a solver computes; there are no
+/// dihedral angles, and a cell's size is the cube root of its volume.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DualSummary {
+    /// Whether every cell is valid (closed, every face pyramid positive), so
+    /// the dual is written in place of the tets.
+    pub accepted: bool,
+    pub cells: u64,
+    pub faces: u64,
+    pub nodes: u64,
+    /// Merges of an invalid cell into a neighbour (each one cell fewer).
+    pub merges: u64,
+    /// Cells still invalid after merging.
+    pub invalid_cells: u64,
+    pub min_faces_per_cell: u64,
+    pub max_faces_per_cell: u64,
+    pub volume: f64,
+    /// As `mesh`'s, on interior faces.
+    pub max_non_orthogonality_degrees: f64,
+    pub mean_non_orthogonality_degrees: f64,
+    pub max_skewness: f64,
+    pub max_volume_ratio: f64,
+    pub max_size_ratio: f64,
+    /// Over the faces of wall-adjacent cells (boundary faces by the line
+    /// from the cell's centre to the face's).
+    pub wall_max_non_orthogonality_degrees: f64,
+    pub wall_max_skewness: f64,
+    /// The largest angle between a face's triangles (about its nodes'
+    /// average) and the face: 0 for planar faces.
+    pub max_flatness_degrees: f64,
+    /// As `mesh`'s; `element` and `neighbour` are 1-based cell numbers in
+    /// the part's dual.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worst_cells: Vec<WorstCell>,
 }

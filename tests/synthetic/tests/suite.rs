@@ -896,6 +896,10 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
 }
 
 /// The exact constrained kernel's totals over the suite.
+/// A valid dual's (tet, dual) worst non-orthogonality, mean
+/// non-orthogonality and worst skewness, and its label.
+type DualQuality = ([f64; 2], [f64; 2], [f64; 2], String);
+
 /// Milestone 21 stage 2: the median duals of the meshed parts.
 #[derive(Default)]
 struct DualTally {
@@ -914,6 +918,12 @@ struct DualTally {
     fixed: u32,
     merges: usize,
     still_invalid: Vec<String>,
+    /// Per valid dual: (tet, dual) worst non-orthogonality, mean
+    /// non-orthogonality and worst skewness, and the label.
+    quality: Vec<DualQuality>,
+    /// The gate's records (`volume::dual_gate`), by code and severity.
+    gate: BTreeMap<String, u32>,
+    accepted: u32,
 }
 
 /// The median dual of every meshed part: it must build, every cell must
@@ -925,6 +935,34 @@ struct DualTally {
 /// there, for `tests/foam/check.sh`.
 fn check_dual(run: &Run, label: &str, failures: &mut Vec<String>, t: &mut DualTally) {
     for m in &run.meshes.meshed {
+        // The gate: its summary and records agree.
+        let mut log = RecordLog::new();
+        let out = mesher_core::volume::dual_gate(m, &mut log);
+        let fallbacks = log
+            .records()
+            .iter()
+            .filter(|r| r.code == DefectCode::VolDualInvalid && r.severity == Severity::Warning)
+            .count();
+        let s = &out.summary;
+        if s.accepted != out.dual.is_some()
+            || usize::from(!s.accepted) != fallbacks
+            || (s.accepted && s.invalid_cells > 0)
+            || out
+                .dual
+                .as_ref()
+                .is_some_and(|d| d.faces.cells as u64 != s.cells)
+        {
+            failures.push(format!(
+                "{label}: part {}'s dual gate disagrees with itself: {s:?}, {fallbacks} fallbacks",
+                m.name
+            ));
+        }
+        t.accepted += u32::from(s.accepted);
+        for r in log.records() {
+            *t.gate
+                .entry(format!("{} {}", r.code.as_str(), serde_name(&r.severity)))
+                .or_default() += 1;
+        }
         let mesh = mesher_core::volume::assemble(std::slice::from_ref(m));
         let mut d = match dual::dual(&mesh) {
             Ok(d) => d,
@@ -993,7 +1031,22 @@ fn check_dual(run: &Run, label: &str, failures: &mut Vec<String>, t: &mut DualTa
             d = merged.dual;
             g = mg;
         }
-        let _ = &g;
+        if dual::check(&d.points, &d.faces, &g).valid() {
+            let q = dual::quality(&d.points, &d.faces, &g);
+            let tq = mesher_tet::fv_quality(&m.points, &m.tets);
+            t.quality.push((
+                [
+                    tq.max_non_orthogonality_degrees,
+                    q.max_non_orthogonality_degrees,
+                ],
+                [
+                    tq.mean_non_orthogonality_degrees,
+                    q.mean_non_orthogonality_degrees,
+                ],
+                [tq.max_skewness, q.max_skewness],
+                format!("{label}, part {}", m.name),
+            ));
+        }
         if let Some(root) = std::env::var_os("SUITE_DUAL_DIR").filter(|d| !d.is_empty()) {
             let case = std::path::Path::new(&root).join(format!(
                 "{}_{}",
@@ -1620,6 +1673,13 @@ fn synthetic_suite() {
     for line in &duals.invalid {
         eprintln!("  dual invalid: {line}");
     }
+    let gate: Vec<String> = duals.gate.iter().map(|(k, n)| format!("{n} {k}")).collect();
+    eprintln!(
+        "dual gate: {} of {} accepted; records: {}",
+        duals.accepted,
+        duals.parts,
+        gate.join(", ")
+    );
     eprintln!(
         "dual merging: {} of {} invalid duals made valid by {} merges",
         duals.fixed,
@@ -1628,6 +1688,41 @@ fn synthetic_suite() {
     );
     for line in &duals.still_invalid {
         eprintln!("  still invalid: {line}");
+    }
+    if !duals.quality.is_empty() {
+        let median = |f: &dyn Fn(&DualQuality) -> f64| {
+            let mut v: Vec<f64> = duals.quality.iter().map(f).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let n = duals.quality.len();
+        let worse = |f: &dyn Fn(&DualQuality) -> [f64; 2]| {
+            duals.quality.iter().filter(|x| f(x)[1] > f(x)[0]).count()
+        };
+        eprintln!(
+            "dual quality ({n} valid duals; tet → dual medians): worst non-orthogonality {:.1}° → {:.1}° (dual worse on {}), mean {:.1}° → {:.1}° (worse on {}), worst skewness {:.2} → {:.2} (worse on {}); skewness over 2: {} tet meshes, {} duals; over 4: {} tet meshes, {} duals",
+            median(&|x| x.0[0]),
+            median(&|x| x.0[1]),
+            worse(&|x| x.0),
+            median(&|x| x.1[0]),
+            median(&|x| x.1[1]),
+            worse(&|x| x.1),
+            median(&|x| x.2[0]),
+            median(&|x| x.2[1]),
+            worse(&|x| x.2),
+            duals.quality.iter().filter(|x| x.2[0] > 2.0).count(),
+            duals.quality.iter().filter(|x| x.2[1] > 2.0).count(),
+            duals.quality.iter().filter(|x| x.2[0] > 4.0).count(),
+            duals.quality.iter().filter(|x| x.2[1] > 4.0).count(),
+        );
+        if std::env::var_os("DUAL_QUALITY").is_some() {
+            for (no, mean, skew, label) in &duals.quality {
+                eprintln!(
+                    "  quality: non-orthogonality {:.1}/{:.1}°, mean {:.1}/{:.1}°, skewness {:.2}/{:.2}: {label}",
+                    no[0], no[1], mean[0], mean[1], skew[0], skew[1]
+                );
+            }
+        }
     }
 
     check_golden(&goldens, &mut failures);

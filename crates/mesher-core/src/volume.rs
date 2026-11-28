@@ -38,8 +38,8 @@ use crate::mesh::{Block, SideSet, VolumeMesh, tet_side_nodes};
 use crate::model::SurfaceModel;
 use crate::repair::{RepairedPart, gate_failures, wrap_part};
 use crate::report::{
-    Action, Attempt, AttemptOutcome, DefectCode, JobConfig, Kernel, KernelChoice, MeshSummary,
-    Outcome, QualityMeasure, Record, RecordLog, Severity, Stage, WorstCell,
+    Action, Attempt, AttemptOutcome, DefectCode, DualSummary, JobConfig, Kernel, KernelChoice,
+    MeshSummary, Outcome, QualityMeasure, Record, RecordLog, Severity, Stage, WorstCell,
 };
 
 /// Slivers below this dihedral angle in a conformal mesh earn a quality warning.
@@ -1315,6 +1315,189 @@ fn volume_gate(
         worst_cells: worst_cells(&q),
     };
     Ok((accepted, summary))
+}
+
+/// What [`dual_gate`] gives a part: its dual when accepted, and the dual's
+/// summary.
+#[derive(Debug, Clone)]
+pub struct DualOutcome {
+    pub dual: Option<crate::dual::Dual>,
+    pub summary: DualSummary,
+}
+
+/// Milestone 21: the median dual of a part's accepted tet mesh
+/// ([`crate::dual`]), its invalid cells merged into neighbours, gated as
+/// the tets are. Merging that leaves every cell valid is recorded
+/// (`VOL_DUAL_INVALID`, information, `merge` / `applied`); cells still
+/// invalid, or a mesh with no dual, leave the part its tet mesh
+/// (`VOL_DUAL_INVALID`, a warning, `fallback` / `applied`, located at an
+/// invalid cell's centre). An accepted dual's quality beyond the tets'
+/// limits is `VOL_LOW_QUALITY` and `VOL_GRADATION`, as for tets, with
+/// `cells` `dual` among the measured values.
+pub fn dual_gate(part: &MeshedPart, log: &mut RecordLog) -> DualOutcome {
+    use crate::dual;
+    let name = part.name.as_str();
+    let mesh = assemble(std::slice::from_ref(part));
+    let gate = |code| {
+        Record::new(code, Stage::VolumeGate)
+            .part(name)
+            .measured("cells", "dual")
+    };
+    let mut d = match dual::dual(&mesh) {
+        Ok(d) => d,
+        Err(problem) => {
+            log.push(
+                gate(DefectCode::VolDualInvalid)
+                    .severity(Severity::Warning)
+                    .measured("problem", format!("{problem:?}"))
+                    .action(Action::Fallback, Outcome::Applied)
+                    .hint("the tet mesh has no dual (an edge or vertex its tets do not surround as a fan); the part keeps its tet mesh"),
+            );
+            return DualOutcome {
+                dual: None,
+                summary: DualSummary::default(),
+            };
+        }
+    };
+    let mut g = dual::geometry(&d.points, &d.faces);
+    let mut c = dual::check(&d.points, &d.faces, &g);
+    let before = c.inverted_pyramids.1 + c.open.1;
+    let mut merges = 0;
+    if !c.valid() {
+        let m = dual::merge(&d);
+        merges = m.merges;
+        d = m.dual;
+        g = dual::geometry(&d.points, &d.faces);
+        c = dual::check(&d.points, &d.faces, &g);
+    }
+    let q = dual::quality(&d.points, &d.faces, &g);
+    let invalid = c.inverted_pyramids.1 + c.open.1;
+    let summary = DualSummary {
+        accepted: c.valid(),
+        cells: q.cells as u64,
+        faces: q.faces as u64,
+        nodes: q.nodes as u64,
+        merges: merges as u64,
+        invalid_cells: invalid as u64,
+        min_faces_per_cell: q.min_faces_per_cell as u64,
+        max_faces_per_cell: q.max_faces_per_cell as u64,
+        volume: c.volume,
+        max_non_orthogonality_degrees: q.max_non_orthogonality_degrees,
+        mean_non_orthogonality_degrees: q.mean_non_orthogonality_degrees,
+        max_skewness: q.max_skewness,
+        max_volume_ratio: q.max_volume_ratio,
+        max_size_ratio: q.max_size_ratio,
+        wall_max_non_orthogonality_degrees: q.wall_max_non_orthogonality_degrees,
+        wall_max_skewness: q.wall_max_skewness,
+        max_flatness_degrees: q.max_flatness_degrees,
+        worst_cells: located_worst(&[
+            (
+                QualityMeasure::NonOrthogonality,
+                false,
+                q.worst_non_orthogonality,
+            ),
+            (QualityMeasure::Skewness, false, q.worst_skewness),
+            (
+                QualityMeasure::NonOrthogonality,
+                true,
+                q.wall_worst_non_orthogonality,
+            ),
+            (QualityMeasure::Skewness, true, q.wall_worst_skewness),
+            (QualityMeasure::SizeRatio, false, q.worst_size_ratio),
+        ]),
+    };
+    if !c.valid() {
+        let cell = c.inverted_pyramids.0.first().or(c.open.0.first()).copied();
+        let mut rec = gate(DefectCode::VolDualInvalid)
+            .severity(Severity::Warning)
+            .measured("invalid_cells", invalid as u64)
+            .measured("invalid_cells_before_merging", before as u64)
+            .measured("merges", merges as u64)
+            .threshold("invalid_cells", 0u64)
+            .action(Action::Fallback, Outcome::Applied)
+            .hint("cells whose centre, as a solver computes it, is outside one of their faces remain after merging (located: one of them, by its 1-based cell number and centre); the part keeps its tet mesh");
+        if let Some(cell) = cell {
+            rec = rec
+                .measured("cell", u64::from(cell) + 1)
+                .point(g.cell_centres[cell as usize]);
+        }
+        log.push(rec);
+        return DualOutcome {
+            dual: None,
+            summary,
+        };
+    }
+    if merges > 0 {
+        log.push(
+            gate(DefectCode::VolDualInvalid)
+                .severity(Severity::Info)
+                .measured("invalid_cells_before_merging", before as u64)
+                .measured("merges", merges as u64)
+                .action(Action::Merge, Outcome::Applied)
+                .hint("cells whose centre a solver would compute outside one of their faces (thin cells at the wall) were merged into neighbours; every cell is now valid"),
+        );
+    }
+    let located = |rec: Record, w: Option<WorstAt>| match w {
+        Some(w) => {
+            let rec = rec.measured("cell", w.tet as u64 + 1).point(w.point);
+            match w.neighbour {
+                Some(n) => rec.measured("neighbour", n as u64 + 1),
+                None => rec,
+            }
+        }
+        None => rec,
+    };
+    if q.max_non_orthogonality_degrees > MAX_NON_ORTHOGONALITY_DEGREES {
+        log.push(located(
+            gate(DefectCode::VolLowQuality)
+                .measured("max_non_orthogonality_degrees", q.max_non_orthogonality_degrees)
+                .threshold("max_non_orthogonality_degrees", MAX_NON_ORTHOGONALITY_DEGREES)
+                .hint("dual faces whose normal is far from the line joining their cells' centres (located: the worst); a solver needs strong non-orthogonal correction there"),
+            q.worst_non_orthogonality,
+        ));
+    }
+    if q.max_skewness > MAX_SKEWNESS {
+        log.push(located(
+            gate(DefectCode::VolLowQuality)
+                .measured("max_skewness", q.max_skewness)
+                .threshold("max_skewness", MAX_SKEWNESS)
+                .hint("dual faces whose centre is far from where the line joining their cells' centres crosses them (located: the worst); interpolation to the face loses accuracy there"),
+            q.worst_skewness,
+        ));
+    }
+    if q.max_size_ratio > MAX_SIZE_RATIO {
+        log.push(located(
+            gate(DefectCode::VolGradation)
+                .measured("max_size_ratio", q.max_size_ratio)
+                .threshold("max_size_ratio", MAX_SIZE_RATIO)
+                .hint(
+                    "a small dual cell meets a much larger one across a face (located: the worst)",
+                ),
+            q.worst_size_ratio,
+        ));
+    }
+    DualOutcome {
+        dual: Some(d),
+        summary,
+    }
+}
+
+/// Worst values, located, for a summary: each measure, whether over the
+/// wall-adjacent cells, and where (cells 1-based).
+fn located_worst(list: &[(QualityMeasure, bool, Option<WorstAt>)]) -> Vec<WorstCell> {
+    list.iter()
+        .filter_map(|&(measure, wall, w)| {
+            let w = w?;
+            w.value.is_finite().then(|| WorstCell {
+                measure,
+                wall,
+                value: w.value,
+                element: w.tet as u64 + 1,
+                neighbour: w.neighbour.map(|n| n as u64 + 1),
+                point: w.point,
+            })
+        })
+        .collect()
 }
 
 /// The located worst values of a mesh's quality, for its summary.

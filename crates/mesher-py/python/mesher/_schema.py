@@ -20,6 +20,7 @@ __all__ = [
     "AttemptOutcome",
     "CodeCount",
     "DefectCode",
+    "DualSummary",
     "FeatureSummary",
     "InputInfo",
     "InputStats",
@@ -215,6 +216,8 @@ class DefectCode(str, Enum):
     VOL_BOUNDARY_DEVIATION = "VOL_BOUNDARY_DEVIATION"
     #: Neighbouring cells' sizes differ beyond the gradation limit
     VOL_GRADATION = "VOL_GRADATION"
+    #: Polyhedral dual cells a solver cannot use (an inverted face pyramid), merged away or left
+    VOL_DUAL_INVALID = "VOL_DUAL_INVALID"
     #: Part or set name over the Exodus limit
     EXO_NAME_TRUNCATED = "EXO_NAME_TRUNCATED"
     #: Mesh too large for the 64-bit-offset format
@@ -223,6 +226,89 @@ class DefectCode(str, Enum):
     OUT_NAME_CHANGED = "OUT_NAME_CHANGED"
     #: An output file could not be written
     OUT_WRITE_FAILED = "OUT_WRITE_FAILED"
+
+
+@dataclass(frozen=True)
+class DualSummary:
+    """The polyhedral dual of a part's tet mesh (Milestone 21): one cell around
+    each vertex, invalid cells merged into neighbours. Its quality is
+    measured as `mesh`'s, on the centres a solver computes; there are no
+    dihedral angles, and a cell's size is the cube root of its volume.
+    """
+
+    accepted: bool
+    """Whether every cell is valid (closed, every face pyramid positive), so
+    the dual is written in place of the tets.
+    """
+
+    cells: int
+
+    faces: int
+
+    invalid_cells: int
+    """Cells still invalid after merging."""
+
+    max_faces_per_cell: int
+
+    max_flatness_degrees: float
+    """The largest angle between a face's triangles (about its nodes'
+    average) and the face: 0 for planar faces.
+    """
+
+    max_non_orthogonality_degrees: float
+    """As `mesh`'s, on interior faces."""
+
+    max_size_ratio: float
+
+    max_skewness: float
+
+    max_volume_ratio: float
+
+    mean_non_orthogonality_degrees: float
+
+    merges: int
+    """Merges of an invalid cell into a neighbour (each one cell fewer)."""
+
+    min_faces_per_cell: int
+
+    nodes: int
+
+    volume: float
+
+    wall_max_non_orthogonality_degrees: float
+    """Over the faces of wall-adjacent cells (boundary faces by the line
+    from the cell's centre to the face's).
+    """
+
+    wall_max_skewness: float
+
+    worst_cells: Tuple[WorstCell, ...] = ()
+    """As `mesh`'s; `element` and `neighbour` are 1-based cell numbers in
+    the part's dual.
+    """
+
+    @classmethod
+    def _parse(cls, v: Mapping[str, Any]) -> DualSummary:
+        return cls(
+            accepted=v["accepted"],
+            cells=v["cells"],
+            faces=v["faces"],
+            invalid_cells=v["invalid_cells"],
+            max_faces_per_cell=v["max_faces_per_cell"],
+            max_flatness_degrees=float(v["max_flatness_degrees"]),
+            max_non_orthogonality_degrees=float(v["max_non_orthogonality_degrees"]),
+            max_size_ratio=float(v["max_size_ratio"]),
+            max_skewness=float(v["max_skewness"]),
+            max_volume_ratio=float(v["max_volume_ratio"]),
+            mean_non_orthogonality_degrees=float(v["mean_non_orthogonality_degrees"]),
+            merges=v["merges"],
+            min_faces_per_cell=v["min_faces_per_cell"],
+            nodes=v["nodes"],
+            volume=float(v["volume"]),
+            wall_max_non_orthogonality_degrees=float(v["wall_max_non_orthogonality_degrees"]),
+            wall_max_skewness=float(v["wall_max_skewness"]),
+            worst_cells=(tuple(WorstCell._parse(e0) for e0 in v["worst_cells"])) if "worst_cells" in v else (),
+        )
 
 
 @dataclass(frozen=True)
@@ -641,6 +727,9 @@ class PartSummary:
     vertices: int
     """Distinct vertices after merging duplicates."""
 
+    dual: Optional[DualSummary] = None
+    """Present when the polyhedral dual of the part's tet mesh was built."""
+
     features: Optional[FeatureSummary] = None
     """The feature lines of the repaired surface (the final one: the wrap,
     for a wrapped part), present when the part was repaired.
@@ -663,6 +752,7 @@ class PartSummary:
             source=PartSource(v["source"]),
             triangles=v["triangles"],
             vertices=v["vertices"],
+            dual=(None if v["dual"] is None else DualSummary._parse(v["dual"])) if "dual" in v else None,
             features=(None if v["features"] is None else FeatureSummary._parse(v["features"])) if "features" in v else None,
             mesh=(None if v["mesh"] is None else MeshSummary._parse(v["mesh"])) if "mesh" in v else None,
             repair=(None if v["repair"] is None else RepairSummary._parse(v["repair"])) if "repair" in v else None,

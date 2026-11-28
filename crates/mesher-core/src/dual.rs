@@ -20,7 +20,11 @@
 //!   quadrilateral: the vertex, its two edges' midpoints and the triangle's
 //!   centroid, in the triangle's plane and its outward order, in the
 //!   triangle's patch. So the dual's boundary is the tet mesh's surface
-//!   exactly, with its patches.
+//!   exactly, with its patches. A cell's quadrilaterals from triangles of a
+//!   patch that share an edge at its vertex and lie exactly in one plane
+//!   (by exact orientation) are joined into one face, so on a flat wall a
+//!   cell has one boundary face, centred over the cell rather than off to
+//!   its side.
 //!
 //! Cells are numbered by block, vertex and first tet, so each block is a zone;
 //! faces are in [`FaceMesh`]'s order. Deterministic. The construction is
@@ -31,6 +35,7 @@
 use mesher_geom::predicates::orient3d;
 use mesher_geom::vec3::{add, cross, dot, norm, scale, sub};
 use mesher_geom::{Point3, Sign};
+use mesher_tet::quality::WorstAt;
 
 use crate::mesh::{CellShape, FaceMesh, MeshProblem, Patch, Polygons, VolumeMesh, Zone};
 
@@ -260,33 +265,92 @@ pub fn dual(mesh: &VolumeMesh) -> Result<Dual, MeshProblem> {
         faces.neighbour.push(*n);
     }
     for patch in &tf.patches {
-        let mut quads: Vec<(u32, [u32; 4])> = Vec::with_capacity(3 * patch.count);
+        // Each triangle's quadrilateral per vertex: (cell, triangle, vertex).
+        let mut quads: Vec<(u32, u32, u32)> = Vec::with_capacity(3 * patch.count);
         for k in patch.start..patch.start + patch.count {
-            let tri = tf.faces.get(k);
             let owner = tf.owner[k];
-            for i in 0..tri.len() {
-                let (v, next, prev) = (tri[i], tri[(i + 1) % 3], tri[(i + 2) % 3]);
-                quads.push((
-                    cell(&mut star, owner, v),
-                    [
-                        vertex_point(v),
-                        edge_point(v, next),
-                        face_point(k as u32),
-                        edge_point(prev, v),
-                    ],
-                ));
+            for &v in tf.faces.get(k) {
+                quads.push((cell(&mut star, owner, v), k as u32, v));
             }
         }
-        quads.sort_by_key(|&(c, _)| c);
+        quads.sort_unstable();
+        let quad = |k: u32, v: u32| -> Vec<u32> {
+            let tri = tf.faces.get(k as usize);
+            let i = tri.iter().position(|&x| x == v).unwrap_or(0);
+            let (next, prev) = (tri[(i + 1) % 3], tri[(i + 2) % 3]);
+            vec![
+                vertex_point(v),
+                edge_point(v, next),
+                face_point(k),
+                edge_point(prev, v),
+            ]
+        };
+        let start = faces.faces.len();
+        let mut s = 0;
+        while s < quads.len() {
+            let c = quads[s].0;
+            let e = (s..quads.len())
+                .find(|&e| quads[e].0 != c)
+                .unwrap_or(quads.len());
+            // A cell's quadrilaterals from triangles that share an edge at
+            // the vertex and lie exactly in one plane are one face: on a
+            // flat wall, the whole of the cell's wall.
+            let group = &quads[s..e];
+            let mut flat = UnionFind::new(group.len());
+            for x in 0..group.len() {
+                for y in x + 1..group.len() {
+                    let (tx, ty) = (
+                        tf.faces.get(group[x].1 as usize),
+                        tf.faces.get(group[y].1 as usize),
+                    );
+                    let shared = tx.iter().filter(|v| ty.contains(v)).count();
+                    let Some(&other) = ty.iter().find(|v| !tx.contains(v)) else {
+                        continue;
+                    };
+                    if group[x].2 == group[y].2
+                        && shared == 2
+                        && orient3d(p(tx[0]), p(tx[1]), p(tx[2]), p(other)) == Sign::Zero
+                    {
+                        flat.union(x, y);
+                    }
+                }
+            }
+            let mut done = vec![false; group.len()];
+            for x in 0..group.len() {
+                let root = flat.find(x);
+                if done[root] {
+                    continue;
+                }
+                done[root] = true;
+                let members: Vec<Vec<u32>> = (0..group.len())
+                    .filter(|&y| flat.find(y) == root)
+                    .map(|y| quad(group[y].1, group[y].2))
+                    .collect();
+                let joined = if members.len() > 1 {
+                    join(&members.iter().collect::<Vec<_>>())
+                } else {
+                    None
+                };
+                match joined {
+                    Some(nodes) => {
+                        faces.faces.push(&nodes);
+                        faces.owner.push(c);
+                    }
+                    None => {
+                        for q in &members {
+                            faces.faces.push(q);
+                            faces.owner.push(c);
+                        }
+                    }
+                }
+            }
+            s = e;
+        }
         faces.patches.push(Patch {
             name: patch.name.clone(),
-            start: faces.faces.len(),
-            count: quads.len(),
+            start,
+            count: faces.faces.len() - start,
         });
-        for (c, q) in quads {
-            faces.faces.push(&q);
-            faces.owner.push(c);
-        }
     }
     let mut start = 0;
     for (block, count) in mesh.blocks.iter().zip(zone_counts) {
@@ -556,6 +620,166 @@ pub fn check(points: &[Point3], faces: &FaceMesh, geometry: &Geometry) -> CellCh
         volume,
         min_volume,
     }
+}
+
+/// Finite-volume quality of a polyhedral mesh, as [`mesher_tet::fv_quality`]
+/// measures tets, on the centres a solver computes ([`Geometry`]).
+/// Non-orthogonality and skewness are measured on interior faces, and over
+/// the faces of wall-adjacent cells (their boundary faces by the line from
+/// the cell's centre to the face's) separately; a cell's size is the cube
+/// root of its volume. Worst values are located by cell (`WorstAt::tet` is
+/// a cell of the face view).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PolyQuality {
+    pub cells: usize,
+    pub faces: usize,
+    /// Points the faces use.
+    pub nodes: usize,
+    pub min_faces_per_cell: usize,
+    pub max_faces_per_cell: usize,
+    pub max_non_orthogonality_degrees: f64,
+    pub mean_non_orthogonality_degrees: f64,
+    pub max_skewness: f64,
+    pub max_volume_ratio: f64,
+    pub max_size_ratio: f64,
+    /// The largest angle, over every face, between one of its triangles
+    /// (about its nodes' average) and the face's area vector: 0 for a
+    /// planar face.
+    pub max_flatness_degrees: f64,
+    pub wall_cells: usize,
+    pub wall_max_non_orthogonality_degrees: f64,
+    pub wall_max_skewness: f64,
+    pub worst_non_orthogonality: Option<WorstAt>,
+    pub worst_skewness: Option<WorstAt>,
+    pub wall_worst_non_orthogonality: Option<WorstAt>,
+    pub wall_worst_skewness: Option<WorstAt>,
+    pub worst_size_ratio: Option<WorstAt>,
+}
+
+/// Keep `c` in `slot` if it is larger (ties to the lower cells).
+fn keep_larger(slot: &mut Option<WorstAt>, c: WorstAt) {
+    let worse = match slot {
+        None => !c.value.is_nan(),
+        Some(w) => {
+            c.value > w.value || (c.value == w.value && (c.tet, c.neighbour) < (w.tet, w.neighbour))
+        }
+    };
+    if worse {
+        *slot = Some(c);
+    }
+}
+
+/// The angle between `a` and `b`, in degrees (0 when either is zero).
+fn angle_degrees(a: Point3, b: Point3) -> Option<f64> {
+    let (na, nb) = (norm(a), norm(b));
+    (na > 0.0 && nb > 0.0)
+        .then(|| libm::acos((dot(a, b) / (na * nb)).clamp(-1.0, 1.0)).to_degrees())
+}
+
+/// The quality of the cells of `faces` on `points` with their `geometry`.
+#[must_use]
+pub fn quality(points: &[Point3], faces: &FaceMesh, geometry: &Geometry) -> PolyQuality {
+    let g = geometry;
+    let mut q = PolyQuality {
+        cells: faces.cells,
+        faces: faces.faces.len(),
+        ..PolyQuality::default()
+    };
+    let mut used = faces.faces.nodes().to_vec();
+    used.sort_unstable();
+    used.dedup();
+    q.nodes = used.len();
+    let mut per_cell = vec![0usize; faces.cells];
+    let mut wall = vec![false; faces.cells];
+    for (k, face) in faces.faces.iter().enumerate() {
+        for (c, _) in sides(faces, k) {
+            per_cell[c] += 1;
+        }
+        let a = average(points, face);
+        for (i, &u) in face.iter().enumerate() {
+            let w = face[(i + 1) % face.len()];
+            let t = cross(sub(points[u as usize], a), sub(points[w as usize], a));
+            if let Some(angle) = angle_degrees(t, g.face_areas[k]) {
+                q.max_flatness_degrees = q.max_flatness_degrees.max(angle);
+            }
+        }
+    }
+    q.min_faces_per_cell = per_cell.iter().copied().min().unwrap_or(0);
+    q.max_faces_per_cell = per_cell.iter().copied().max().unwrap_or(0);
+    for k in faces.internal()..faces.faces.len() {
+        let c = faces.owner[k] as usize;
+        wall[c] = true;
+        let fc = g.face_centres[k];
+        if let Some(angle) = angle_degrees(sub(fc, g.cell_centres[c]), g.face_areas[k]) {
+            q.wall_max_non_orthogonality_degrees = q.wall_max_non_orthogonality_degrees.max(angle);
+            keep_larger(
+                &mut q.wall_worst_non_orthogonality,
+                WorstAt {
+                    value: angle,
+                    tet: c,
+                    neighbour: None,
+                    point: fc,
+                },
+            );
+        }
+    }
+    q.wall_cells = wall.iter().filter(|&&w| w).count();
+    let size: Vec<f64> = g
+        .cell_volumes
+        .iter()
+        .map(|&v| libm::cbrt(v.max(0.0)))
+        .collect();
+    let (mut sum, mut count) = (0.0f64, 0usize);
+    for k in 0..faces.internal() {
+        let (o, n) = (faces.owner[k] as usize, faces.neighbour[k] as usize);
+        let (co, cn) = (g.cell_centres[o], g.cell_centres[n]);
+        let fc = g.face_centres[k];
+        let s = g.face_areas[k];
+        let d = sub(cn, co);
+        let (Some(angle), true) = (angle_degrees(d, s), norm(d) > 0.0) else {
+            continue;
+        };
+        q.max_non_orthogonality_degrees = q.max_non_orthogonality_degrees.max(angle);
+        sum += angle;
+        count += 1;
+        let unit = scale(s, 1.0 / norm(s));
+        let dd = norm(d);
+        let skew = if dot(d, unit) > 0.0 {
+            let t = dot(sub(fc, co), unit) / dot(d, unit);
+            norm(sub(fc, add(co, scale(d, t)))) / dd
+        } else {
+            norm(sub(fc, co)) / dd
+        };
+        q.max_skewness = q.max_skewness.max(skew);
+        let at = |value| WorstAt {
+            value,
+            tet: o,
+            neighbour: Some(n),
+            point: fc,
+        };
+        keep_larger(&mut q.worst_non_orthogonality, at(angle));
+        keep_larger(&mut q.worst_skewness, at(skew));
+        if wall[o] || wall[n] {
+            q.wall_max_non_orthogonality_degrees = q.wall_max_non_orthogonality_degrees.max(angle);
+            q.wall_max_skewness = q.wall_max_skewness.max(skew);
+            keep_larger(&mut q.wall_worst_non_orthogonality, at(angle));
+            keep_larger(&mut q.wall_worst_skewness, at(skew));
+        }
+        let (vo, vn) = (g.cell_volumes[o], g.cell_volumes[n]);
+        if vo > 0.0 && vn > 0.0 {
+            q.max_volume_ratio = q
+                .max_volume_ratio
+                .max((vo.max(vn) / vo.min(vn)).min(f64::MAX));
+        }
+        let (so, sn) = (size[o], size[n]);
+        if so > 0.0 && sn > 0.0 {
+            let ratio = (so.max(sn) / so.min(sn)).min(f64::MAX);
+            q.max_size_ratio = q.max_size_ratio.max(ratio);
+            keep_larger(&mut q.worst_size_ratio, at(ratio));
+        }
+    }
+    q.mean_non_orthogonality_degrees = if count > 0 { sum / count as f64 } else { 0.0 };
+    q
 }
 
 /// The most rounds [`merge`] runs.
@@ -1236,6 +1460,58 @@ mod tests {
             t.swap(1, 2);
         }
         t
+    }
+
+    /// The quality of a dual: positive and finite measures, faces per cell
+    /// counted, and a planar face's flatness zero.
+    #[test]
+    fn dual_quality() {
+        let points: Vec<Point3> = (0..8)
+            .map(|i| {
+                [
+                    f64::from(i & 1),
+                    f64::from((i >> 1) & 1),
+                    f64::from((i >> 2) & 1),
+                ]
+            })
+            .collect();
+        let mut tets = Vec::new();
+        for (x, y) in [(1, 2), (1, 4), (2, 1), (2, 4), (4, 1), (4, 2)] {
+            tets.push(positive(&points, [0u32, x, x | y, 7]));
+        }
+        let d = dual(&one_part(points, tets)).unwrap();
+        let g = geometry(&d.points, &d.faces);
+        let q = quality(&d.points, &d.faces, &g);
+        assert_eq!(
+            (q.cells, q.faces, q.wall_cells),
+            (8, d.faces.faces.len(), 8)
+        );
+        assert_eq!(q.nodes, d.points.len());
+        assert!(q.min_faces_per_cell >= 4 && q.max_faces_per_cell >= q.min_faces_per_cell);
+        assert!(q.max_non_orthogonality_degrees > 0.0 && q.max_non_orthogonality_degrees < 90.0);
+        assert!(q.mean_non_orthogonality_degrees <= q.max_non_orthogonality_degrees);
+        assert!(q.max_skewness.is_finite() && q.max_volume_ratio >= 1.0 && q.max_size_ratio >= 1.0);
+        assert!(q.worst_non_orthogonality.is_some() && q.wall_worst_non_orthogonality.is_some());
+        // One square face: flat.
+        let mut planar = Polygons::default();
+        planar.push(&[0, 1, 3, 2]);
+        let square = FaceMesh {
+            faces: planar,
+            owner: vec![0],
+            neighbour: Vec::new(),
+            patches: Vec::new(),
+            zones: Vec::new(),
+            cells: 1,
+            shape: CellShape::Polyhedron,
+        };
+        let flat_points = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let q = quality(&flat_points, &square, &geometry(&flat_points, &square));
+        assert!(q.max_flatness_degrees < 1e-12, "{}", q.max_flatness_degrees);
     }
 
     #[test]

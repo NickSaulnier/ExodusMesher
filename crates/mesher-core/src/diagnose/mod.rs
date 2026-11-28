@@ -144,6 +144,7 @@ impl Diagnosis {
                 selected: selected.contains(&i),
                 repair: None,
                 mesh: None,
+                dual: None,
                 features: None,
             })
             .collect()
