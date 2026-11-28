@@ -2,6 +2,7 @@
 //! crate. Later milestones add parts, diagnosis, repair, gates and sizing here.
 
 pub mod diagnose;
+pub mod dual;
 pub mod exit;
 pub mod features;
 pub mod mesh;

@@ -82,6 +82,16 @@ pub enum MeshProblem {
         face: u32,
         problem: &'static str,
     },
+    /// A vertex in tets of two blocks (parts share no vertices).
+    SharedVertex {
+        node: u32,
+    },
+    /// The tets around an edge do not form one fan (an open one for a
+    /// boundary edge, a closed one otherwise).
+    NonManifoldEdge {
+        a: u32,
+        b: u32,
+    },
 }
 
 /// Faces as polygons, in one flat list: face `k` is the nodes

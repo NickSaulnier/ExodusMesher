@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
+use mesher_core::dual;
 use mesher_core::remedy;
 use mesher_core::repair::{RepairedPart, repair};
 use mesher_core::report::MAX_LOCATION_ITEMS;
@@ -895,6 +896,123 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
 }
 
 /// The exact constrained kernel's totals over the suite.
+/// Milestone 21 stage 2: the median duals of the meshed parts.
+#[derive(Default)]
+struct DualTally {
+    parts: u32,
+    valid: u32,
+    /// Per kernel: parts, and valid duals.
+    by_kernel: BTreeMap<String, (u32, u32)>,
+    triangles: u32,
+    pyramids: u32,
+    cells: usize,
+    tets: usize,
+    worst_volume_error: f64,
+    invalid: Vec<String>,
+    /// Invalid duals merging made valid, the merges, and the duals still
+    /// invalid after it.
+    fixed: u32,
+    merges: usize,
+    still_invalid: Vec<String>,
+}
+
+/// The median dual of every meshed part: it must build, every cell must
+/// close and the cells' volume must be the tets'. Whether every face
+/// pyramid is positive (the dual valid, as `checkMesh` requires) and how
+/// many cells have a face triangle leaning past their centre are measured
+/// (stage 3 decides the gate).
+/// With `SUITE_DUAL_DIR`, each dual as an OpenFOAM case and a Fluent file
+/// there, for `tests/foam/check.sh`.
+fn check_dual(run: &Run, label: &str, failures: &mut Vec<String>, t: &mut DualTally) {
+    for m in &run.meshes.meshed {
+        let mesh = mesher_core::volume::assemble(std::slice::from_ref(m));
+        let mut d = match dual::dual(&mesh) {
+            Ok(d) => d,
+            Err(e) => {
+                failures.push(format!("{label}: part {} has no dual: {e:?}", m.name));
+                continue;
+            }
+        };
+        let mut g = dual::geometry(&d.points, &d.faces);
+        let c = dual::check(&d.points, &d.faces, &g);
+        t.parts += 1;
+        t.cells += d.faces.cells;
+        t.tets += mesh.element_count();
+        if c.open.1 > 0 {
+            failures.push(format!(
+                "{label}: part {}'s dual has {} open cells: {:?}",
+                m.name, c.open.1, c.open.0
+            ));
+        }
+        let volume = mesh.volume();
+        let error = (c.volume - volume).abs() / volume.abs();
+        t.worst_volume_error = t.worst_volume_error.max(error);
+        if error.is_nan() || error > 1e-6 {
+            failures.push(format!(
+                "{label}: part {}'s dual has volume {} against the tets' {volume}",
+                m.name, c.volume
+            ));
+        }
+        let kernel = t.by_kernel.entry(format!("{:?}", m.kernel)).or_default();
+        kernel.0 += 1;
+        t.triangles += u32::from(c.inverted_triangles.1 > 0);
+        if c.valid() {
+            t.valid += 1;
+            kernel.1 += 1;
+        } else {
+            t.pyramids += u32::from(c.inverted_pyramids.1 > 0);
+            t.invalid.push(format!(
+                "{label}, part {} ({:?}): {} of {} cells with an inverted face pyramid",
+                m.name, m.kernel, c.inverted_pyramids.1, c.cells
+            ));
+            let merged = dual::merge(&d);
+            let mg = dual::geometry(&merged.dual.points, &merged.dual.faces);
+            let mc = dual::check(&merged.dual.points, &merged.dual.faces, &mg);
+            t.merges += merged.merges;
+            if mc.open.1 > 0 || merged.dual.faces.check(merged.dual.points.len()).is_err() {
+                failures.push(format!(
+                    "{label}: part {}'s merged dual is broken: {mc:?}",
+                    m.name
+                ));
+            }
+            let merged_error = (mc.volume - volume).abs() / volume.abs();
+            if merged_error.is_nan() || merged_error > 1e-6 {
+                failures.push(format!(
+                    "{label}: part {}'s merged dual has volume {} against the tets' {volume}",
+                    m.name, mc.volume
+                ));
+            }
+            if mc.valid() {
+                t.fixed += 1;
+            } else {
+                t.still_invalid.push(format!(
+                    "{label}, part {}: {} of {} cells with an inverted face pyramid after {} merges in {} rounds",
+                    m.name, mc.inverted_pyramids.1, mc.cells, merged.merges, merged.rounds
+                ));
+            }
+            d = merged.dual;
+            g = mg;
+        }
+        let _ = &g;
+        if let Some(root) = std::env::var_os("SUITE_DUAL_DIR").filter(|d| !d.is_empty()) {
+            let case = std::path::Path::new(&root).join(format!(
+                "{}_{}",
+                dir_name(label),
+                dir_name(&m.name)
+            ));
+            let mut log = RecordLog::new();
+            for (file, text) in mesher_io::foam::case_files(&d.points, &d.faces, &mut log).unwrap()
+            {
+                let path = case.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, text).unwrap();
+            }
+            let fluent = mesher_io::fluent::text(&d.points, &d.faces, &mut log).unwrap();
+            std::fs::write(case.join("mesh_fluent.msh"), fluent).unwrap();
+        }
+    }
+}
+
 #[derive(Default)]
 struct ExactTally {
     parts: u32,
@@ -1357,6 +1475,7 @@ fn synthetic_suite() {
     let mut failures = Vec::new();
     let (mut meshed_parts, mut accepted_parts, mut delaunay_parts) = (0u32, 0u32, 0u32);
     let mut exact = ExactTally::default();
+    let mut duals = DualTally::default();
     let variants = [(1.0, 0.0), (1e-3, 1e3), (1e4, -5e4)];
 
     for c in cases() {
@@ -1386,6 +1505,7 @@ fn synthetic_suite() {
             accepted_parts += t.accepted;
             delaunay_parts += t.delaunay;
             check_exact(&c, &outcome, &label, &mut failures, &mut exact);
+            check_dual(&outcome, &label, &mut failures, &mut duals);
             check_remedies(&scene, &outcome, &label, &mut failures);
             let mut detected: BTreeMap<DefectCode, Vec<&Record>> = BTreeMap::new();
             for r in outcome
@@ -1480,6 +1600,35 @@ fn synthetic_suite() {
         exact.parts,
         exact.untangles
     );
+
+    let kernels: Vec<String> = duals
+        .by_kernel
+        .iter()
+        .map(|(k, (n, v))| format!("{k} {v} of {n}"))
+        .collect();
+    eprintln!(
+        "dual: {} of {} parts valid ({}), {} cells from {} tets; {} with an inverted face pyramid, {} with a face triangle leaning past a cell's centre; worst volume error {:.1e}",
+        duals.valid,
+        duals.parts,
+        kernels.join(", "),
+        duals.cells,
+        duals.tets,
+        duals.pyramids,
+        duals.triangles,
+        duals.worst_volume_error
+    );
+    for line in &duals.invalid {
+        eprintln!("  dual invalid: {line}");
+    }
+    eprintln!(
+        "dual merging: {} of {} invalid duals made valid by {} merges",
+        duals.fixed,
+        duals.invalid.len(),
+        duals.merges
+    );
+    for line in &duals.still_invalid {
+        eprintln!("  still invalid: {line}");
+    }
 
     check_golden(&goldens, &mut failures);
 
