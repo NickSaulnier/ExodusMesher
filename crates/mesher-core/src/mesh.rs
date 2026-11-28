@@ -308,6 +308,174 @@ impl FaceMesh {
         }
         Ok(())
     }
+
+    /// Each cell's faces, in face order: cell `c`'s are `get(c)`. A face
+    /// is listed by its owner and, if internal, its neighbour.
+    #[must_use]
+    pub fn cell_faces(&self) -> Polygons {
+        let mut count = vec![0u32; self.cells + 1];
+        let cells = self.owner.iter().chain(&self.neighbour);
+        for &c in cells.clone() {
+            if let Some(n) = count.get_mut(c as usize + 1) {
+                *n += 1;
+            }
+        }
+        for c in 1..count.len() {
+            count[c] += count[c - 1];
+        }
+        let total = count.last().copied().unwrap_or(0) as usize;
+        let mut nodes = vec![0u32; total];
+        let mut next = count.clone();
+        // Faces in order: each cell's list comes out sorted.
+        let mut listed: Vec<(u32, u32)> = self
+            .owner
+            .iter()
+            .enumerate()
+            .map(|(f, &c)| (c, f as u32))
+            .chain(
+                self.neighbour
+                    .iter()
+                    .enumerate()
+                    .map(|(f, &c)| (c, f as u32)),
+            )
+            .collect();
+        listed.sort_unstable_by_key(|&(_, f)| f);
+        for (c, f) in listed {
+            if let Some(at) = next.get_mut(c as usize) {
+                if let Some(slot) = nodes.get_mut(*at as usize) {
+                    *slot = f;
+                }
+                *at += 1;
+            }
+        }
+        Polygons {
+            nodes,
+            starts: count,
+        }
+    }
+}
+
+/// A side set of a [`PolyMesh`]: boundary faces, by face number, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaceSet {
+    pub name: String,
+    pub faces: Vec<u32>,
+}
+
+/// A volume mesh of polyhedral cells for the writers (Milestone 21: the
+/// polyhedral dual, `cells` `dual`): its points, its face view (every cell a
+/// polyhedron, each zone an element block) and side sets of boundary faces,
+/// as [`VolumeMesh`]'s are of sides: a block's `<block>_boundary` set holds
+/// all its boundary faces, an OBJ group's set the faces of its patch.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PolyMesh {
+    pub points: Vec<Point3>,
+    pub faces: FaceMesh,
+    pub side_sets: Vec<FaceSet>,
+}
+
+impl PolyMesh {
+    /// Join the face views of separately meshed parts (each with its own
+    /// points, cells and zones, in part order) into one mesh: points, cells
+    /// and zones in part order, the internal faces in part order (which
+    /// keeps them in owner order), each patch's faces together across parts.
+    /// Patches are ordered as `side_sets` names them (the tet mesh's side
+    /// sets, so the order of [`VolumeMesh::faces`]), others after them in
+    /// the order met. The side sets are `side_sets`, each a block's
+    /// `<block>_boundary` (every boundary face of its zone) or a patch's
+    /// faces; empty ones are kept, as the tet mesh's are.
+    #[must_use]
+    pub fn join(parts: &[(&[Point3], &FaceMesh)], side_sets: &[String]) -> PolyMesh {
+        let mut out = PolyMesh::default();
+        out.faces.shape = CellShape::Polyhedron;
+        // Each part's offsets: points, cells.
+        let mut offsets = Vec::with_capacity(parts.len());
+        for (points, f) in parts {
+            offsets.push((out.points.len() as u32, out.faces.cells as u32));
+            out.points.extend_from_slice(points);
+            out.faces.cells += f.cells;
+        }
+        for ((_, f), &(po, co)) in parts.iter().zip(&offsets) {
+            for k in 0..f.internal() {
+                let face: Vec<u32> = f.faces.get(k).iter().map(|&v| v + po).collect();
+                out.faces.faces.push(&face);
+                out.faces.owner.push(f.owner[k] + co);
+                out.faces.neighbour.push(f.neighbour[k] + co);
+            }
+        }
+        // Patch names in order: `side_sets`, then any other met.
+        let mut names: Vec<&str> = side_sets.iter().map(String::as_str).collect();
+        for (_, f) in parts {
+            for p in &f.patches {
+                if !names.contains(&p.name.as_str()) {
+                    names.push(&p.name);
+                }
+            }
+        }
+        for name in names {
+            let start = out.faces.faces.len();
+            for ((_, f), &(po, co)) in parts.iter().zip(&offsets) {
+                for p in f.patches.iter().filter(|p| p.name == name) {
+                    for k in p.start..p.start + p.count {
+                        let face: Vec<u32> = f.faces.get(k).iter().map(|&v| v + po).collect();
+                        out.faces.faces.push(&face);
+                        out.faces.owner.push(f.owner[k] + co);
+                    }
+                }
+            }
+            let count = out.faces.faces.len() - start;
+            if count > 0 {
+                out.faces.patches.push(Patch {
+                    name: name.to_owned(),
+                    start,
+                    count,
+                });
+            }
+        }
+        for ((_, f), &(_, co)) in parts.iter().zip(&offsets) {
+            for z in &f.zones {
+                out.faces.zones.push(Zone {
+                    name: z.name.clone(),
+                    start: z.start + co as usize,
+                    count: z.count,
+                });
+            }
+        }
+        for name in side_sets {
+            let zone = out
+                .faces
+                .zones
+                .iter()
+                .find(|z| *name == format!("{}_boundary", z.name));
+            let mut faces: Vec<u32> = Vec::new();
+            match zone {
+                Some(z) => {
+                    let cells = z.start..z.start + z.count;
+                    faces.extend(
+                        (out.faces.internal()..out.faces.faces.len())
+                            .filter(|&k| cells.contains(&(out.faces.owner[k] as usize)))
+                            .map(|k| k as u32),
+                    );
+                }
+                None => {
+                    for p in out.faces.patches.iter().filter(|p| p.name == *name) {
+                        faces.extend((p.start..p.start + p.count).map(|k| k as u32));
+                    }
+                }
+            }
+            out.side_sets.push(FaceSet {
+                name: name.clone(),
+                faces,
+            });
+        }
+        out
+    }
+
+    /// The number of cells.
+    #[must_use]
+    pub fn cell_count(&self) -> usize {
+        self.faces.cells
+    }
 }
 
 impl VolumeMesh {

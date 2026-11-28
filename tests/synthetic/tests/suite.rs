@@ -868,6 +868,38 @@ fn check_meshes(c: &Case, run: &Run, label: &str, failures: &mut Vec<String>) ->
             }
             Err(e) => failures.push(format!("{label}: .meshb file: {e:?}")),
         }
+        // Milestone 21 stage 4: the files `cells` `dual` writes (each
+        // part's dual where its gate accepts it, else its tets), as a case
+        // and a Fluent file beside the tets'. `checkMesh` may fail them on
+        // skewness alone (the user's decision, Nov 27, 2026: such duals are
+        // written, and stage 6 decides), which `allowed_failures` tells
+        // `check.sh`.
+        match mesher_core::volume::dual_mesh(&run.meshes.meshed, &mut log) {
+            Ok(d) => {
+                let case = std::path::Path::new(&root).join(format!("{}__dual", dir_name(label)));
+                match mesher_io::foam::case_files(&d.mesh.points, &d.mesh.faces, &mut log) {
+                    Ok(files) => {
+                        for (file, text) in files {
+                            let path = case.join(file);
+                            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                            std::fs::write(&path, text).unwrap();
+                        }
+                        std::fs::write(
+                            case.join("allowed_failures"),
+                            "skewness
+",
+                        )
+                        .unwrap();
+                    }
+                    Err(e) => failures.push(format!("{label}: dual OpenFOAM case: {e:?}")),
+                }
+                match mesher_io::fluent::text(&d.mesh.points, &d.mesh.faces, &mut log) {
+                    Ok(text) => std::fs::write(case.join("mesh_fluent.msh"), text).unwrap(),
+                    Err(e) => failures.push(format!("{label}: dual Fluent file: {e:?}")),
+                }
+            }
+            Err(e) => failures.push(format!("{label}: dual mesh: {e:?}")),
+        }
     }
     for code in [
         DefectCode::VolInvertedTet,

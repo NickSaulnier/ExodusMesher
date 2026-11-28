@@ -30,7 +30,7 @@ from . import report as _report
 from ._mesher import __version__, _build_job, _run, _run_request
 from .mesh import Mesh, read_mesh
 from .report import *  # noqa: F401,F403 (the report's types)
-from .report import KernelChoice, OutputFormat, Report
+from .report import CellChoice, KernelChoice, OutputFormat, Report
 
 __all__ = [
     "RawRun",
@@ -94,7 +94,7 @@ def build_job(request: dict[str, Any]) -> Optional[dict[str, Any]]:
     """The job a request builds, exactly as ``mesher run`` builds it: the
     request names an ``input`` (an OBJ or ``.meshb`` file, or a project file)
     and the command line's options (``out``, ``parts``, ``element_size``,
-    ``kernel``, ``formats``, ...). ``None`` for a project file that cannot be
+    ``kernel``, ``formats``, ``cells``, ...). ``None`` for a project file that cannot be
     used. Raises ``ValueError`` for an unknown option or one out of range."""
     text = _build_job(json.dumps(_paths(request)))
     return None if text is None else json.loads(text)
@@ -134,6 +134,7 @@ def run(
     max_deviation: Optional[float] = None,
     kernel: Optional[Union[KernelChoice, str]] = None,
     formats: Iterable[Union[OutputFormat, str]] = (),
+    cells: Optional[Union[CellChoice, str]] = None,
     strict: bool = False,
     no_repair: bool = False,
     no_remesh: bool = False,
@@ -154,7 +155,10 @@ def run(
     ``wrap_alpha`` are relative to each part's bounding-box diagonal (or,
     for the alpha, the element size), ``feature_angle`` in degrees; unset,
     each keeps the project's value or the default. ``formats`` are written
-    sorted, each once (default: Exodus, Gmsh and VTU). Raises
+    sorted, each once (default: Exodus, Gmsh and VTU). ``cells`` is
+    ``"tet"`` or ``"dual"`` (experimental: the polyhedral dual of each
+    part's tet mesh, written to Exodus, VTU, OpenFOAM and Fluent; default:
+    the project's, else tets). Raises
     ``ValueError`` before anything runs for an option out of range.
 
     ``timeout`` is in seconds and ``memory_limit`` in MiB (``None``: no cap).
@@ -170,6 +174,7 @@ def run(
         "max_deviation": max_deviation,
         "kernel": _value(kernel),
         "formats": [_value(f) for f in formats],
+        "cells": _value(cells),
         "strict": strict,
         "no_repair": no_repair,
         "no_remesh": no_remesh,

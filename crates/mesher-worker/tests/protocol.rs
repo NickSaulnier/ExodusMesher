@@ -469,6 +469,83 @@ fn a_fluent_file_is_written_when_chosen() {
     );
 }
 
+/// Milestone 21 stage 4: `cells` `dual` writes each part's dual to the
+/// formats that hold polyhedra, and records those that do not: a warning
+/// when chosen, information under the default formats (the exit code stays
+/// clean).
+#[test]
+fn the_dual_is_written_where_a_format_holds_polyhedra() {
+    use mesher_core::{CellChoice, OutputFormat};
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("two_objects.obj"), dir.path());
+    job.config.cells = CellChoice::Dual;
+    job.config.formats = OutputFormat::ALL.to_vec();
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 10, "the unsupported formats are warnings");
+    let report = run.report_file.unwrap();
+    assert_eq!(report.config.cells, CellChoice::Dual);
+    let mut cells = 0;
+    for p in &report.parts {
+        let d = p.dual.as_ref().unwrap();
+        assert!(d.accepted, "{d:?}");
+        assert!(d.cells > 0 && d.cells < p.mesh.as_ref().unwrap().tets);
+        cells += d.cells;
+    }
+    for file in [
+        "mesh.exo",
+        "mesh.vtu",
+        "mesh_fluent.msh",
+        "openfoam/constant/polyMesh/faces",
+    ] {
+        assert!(dir.path().join(file).exists(), "{file} missing");
+    }
+    for file in ["mesh.msh", "mesh.meshb", "mesh_refs.txt"] {
+        assert!(!dir.path().join(file).exists(), "{file} written");
+    }
+    let unsupported: Vec<(&str, Severity)> = report
+        .records
+        .iter()
+        .filter(|r| r.code == DefectCode::OutFormatUnsupported)
+        .map(|r| {
+            let format = r.measured.get("format").and_then(|v| v.as_str()).unwrap();
+            (format, r.severity)
+        })
+        .collect();
+    assert_eq!(
+        unsupported,
+        [("gmsh", Severity::Warning), ("meshb", Severity::Warning)]
+    );
+    let owner =
+        std::fs::read_to_string(dir.path().join("openfoam/constant/polyMesh/owner")).unwrap();
+    assert!(owner.contains(&format!("nCells:{cells} ")), "{owner:.400}");
+    let vtu = std::fs::read_to_string(dir.path().join("mesh.vtu")).unwrap();
+    assert!(vtu.contains("Name=\"faceoffsets\""));
+    let (ds, _) = netcdf3::FileReader::open(dir.path().join("mesh.exo"))
+        .unwrap()
+        .close();
+    assert_eq!(ds.dim_size("num_elem"), Some(cells as usize));
+    assert_eq!(
+        ds.get_var_attr_as_string("facconn1", "elem_type"),
+        Some("NFACED".into())
+    );
+
+    // The default formats: Gmsh's record is information.
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = job_for(&fixture("cube.obj"), dir.path());
+    job.config.cells = CellChoice::Dual;
+    let run = run_job(&job, dir.path());
+    assert_eq!(run.exit_code, 0);
+    let report = run.report_file.unwrap();
+    let records: Vec<_> = report
+        .records
+        .iter()
+        .filter(|r| r.code == DefectCode::OutFormatUnsupported)
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].severity, Severity::Info);
+    assert!(dir.path().join("mesh.exo").exists() && !dir.path().join("mesh.msh").exists());
+}
+
 #[test]
 fn cube_end_to_end_writes_a_valid_exodus_mesh() {
     let dir = tempfile::tempdir().unwrap();

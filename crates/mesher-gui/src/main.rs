@@ -21,7 +21,7 @@ use std::time::Duration;
 use eframe::egui::{self, Color32, RichText};
 use mesher_core::project::Project;
 use mesher_core::protocol::{MESH_EXODUS_FILE, WorkerMessage};
-use mesher_core::{ExitStatus, KernelChoice, Record, Severity};
+use mesher_core::{CellChoice, ExitStatus, KernelChoice, Record, Severity};
 use mesher_gui::camera::Camera;
 use mesher_gui::scene::{Scene, severity_slot};
 use mesher_gui::session::Session;
@@ -412,6 +412,19 @@ impl App {
                         };
                     }
                     ui.label(theme::dim("exact surface, no refinement").small());
+                    ui.end_row();
+                    ui.label("Polyhedral dual").on_hover_text(
+                        "Experimental: write each part's median dual (one polyhedron                          around each tet vertex) where its gate accepts it, to Exodus                          (NFACED), VTU, OpenFOAM and Fluent; Gmsh and meshb hold no                          polyhedra and are not written",
+                    );
+                    let mut dual = s.cells == CellChoice::Dual;
+                    if theme::switch(ui, &mut dual).changed() {
+                        s.cells = if dual {
+                            CellChoice::Dual
+                        } else {
+                            CellChoice::Tet
+                        };
+                    }
+                    ui.label(theme::dim("polyhedra instead of tets (experimental)").small());
                     ui.end_row();
                 });
             ui.add_space(4.0);

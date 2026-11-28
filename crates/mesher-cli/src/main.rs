@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use mesher_client::JobRequest;
-use mesher_core::{ExitStatus, KernelChoice, Outcome, OutputFormat, Report, Severity, Stage};
+use mesher_core::{
+    CellChoice, ExitStatus, KernelChoice, Outcome, OutputFormat, Report, Severity, Stage,
+};
 
 #[derive(Parser)]
 #[command(
@@ -89,6 +91,12 @@ struct RunArgs {
     /// mesh_refs.txt) [default: exodus, gmsh and vtu].
     #[arg(long, value_enum, value_delimiter = ',', num_args = 1..)]
     formats: Vec<FormatArg>,
+    /// The cells written: `tet`, or `dual` (experimental: the polyhedral
+    /// dual of each part's tet mesh, one cell around each vertex, where its
+    /// gate accepts it; written to exodus (NFACED), vtu, openfoam and
+    /// fluent, not to gmsh or meshb) [default: tet].
+    #[arg(long, value_enum)]
+    cells: Option<CellsArg>,
     /// Kill the worker after this many seconds.
     #[arg(long, default_value_t = 3600.0, value_parser = positive)]
     timeout: f64,
@@ -121,6 +129,12 @@ impl FormatArg {
             FormatArg::Meshb => OutputFormat::Meshb,
         }
     }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum CellsArg {
+    Tet,
+    Dual,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -161,6 +175,10 @@ impl RunArgs {
             wrap_alpha: self.wrap_alpha,
             feature_angle: self.feature_angle,
             formats: self.formats.iter().map(|f| f.format()).collect(),
+            cells: self.cells.map(|c| match c {
+                CellsArg::Tet => CellChoice::Tet,
+                CellsArg::Dual => CellChoice::Dual,
+            }),
         }
     }
 }
@@ -374,6 +392,10 @@ mod tests {
             (
                 &["m.obj", "--formats", "vtu,openfoam,vtu,meshb"],
                 r#"{"input": "m.obj", "formats": ["vtu", "openfoam", "vtu", "meshb"]}"#,
+            ),
+            (
+                &["m.obj", "--cells", "dual"],
+                r#"{"input": "m.obj", "cells": "dual"}"#,
             ),
         ];
         for (args, json) in cases {

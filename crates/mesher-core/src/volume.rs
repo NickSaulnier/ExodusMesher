@@ -34,7 +34,7 @@ use mesher_tet::{
 };
 
 use crate::diagnose::{InternalError, Tolerances};
-use crate::mesh::{Block, SideSet, VolumeMesh, tet_side_nodes};
+use crate::mesh::{Block, FaceMesh, MeshProblem, PolyMesh, SideSet, VolumeMesh, tet_side_nodes};
 use crate::model::SurfaceModel;
 use crate::repair::{RepairedPart, gate_failures, wrap_part};
 use crate::report::{
@@ -1480,6 +1480,56 @@ pub fn dual_gate(part: &MeshedPart, log: &mut RecordLog) -> DualOutcome {
         dual: Some(d),
         summary,
     }
+}
+
+/// The meshed parts as polyhedra, for `cells` `dual`
+/// ([`dual_mesh`]), with each part's dual summary by part position.
+#[derive(Debug, Clone)]
+pub struct DualMesh {
+    pub mesh: PolyMesh,
+    pub summaries: Vec<(usize, DualSummary)>,
+    /// Parts written as their dual (the others keep their tets).
+    pub accepted: usize,
+}
+
+/// Milestone 21 stage 4: the mesh files' cells under `cells` `dual`. Each
+/// part's dual where [`dual_gate`] accepts it, else its tets, each a
+/// polyhedron of four triangles (the gate's `VOL_DUAL_INVALID` warning
+/// records the fallback), joined in part order with the tet mesh's side
+/// sets ([`PolyMesh::join`]).
+///
+/// # Errors
+/// A tet mesh with no face view: a bug, as the volume gate rejects those.
+pub fn dual_mesh(parts: &[MeshedPart], log: &mut RecordLog) -> Result<DualMesh, MeshProblem> {
+    let mut views: Vec<(Vec<Point3>, FaceMesh)> = Vec::with_capacity(parts.len());
+    let mut summaries = Vec::with_capacity(parts.len());
+    let mut accepted = 0;
+    for part in parts {
+        let out = dual_gate(part, log);
+        summaries.push((part.part, out.summary));
+        match out.dual {
+            Some(d) => {
+                accepted += 1;
+                views.push((d.points, d.faces));
+            }
+            None => {
+                let faces = assemble(std::slice::from_ref(part)).faces()?;
+                views.push((part.points.clone(), faces));
+            }
+        }
+    }
+    let names: Vec<String> = assemble(parts)
+        .side_sets
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    let joined: Vec<(&[Point3], &FaceMesh)> =
+        views.iter().map(|(p, f)| (p.as_slice(), f)).collect();
+    Ok(DualMesh {
+        mesh: PolyMesh::join(&joined, &names),
+        summaries,
+        accepted,
+    })
 }
 
 /// Worst values, located, for a summary: each measure, whether over the

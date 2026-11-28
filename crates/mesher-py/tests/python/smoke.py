@@ -136,6 +136,11 @@ def typed(out, cube, run):
     assert opts.config.element_size == 0.2
     assert (out / "opts" / "mesh.vtu").is_file() and not (out / "opts" / "mesh.msh").exists()
     assert opts.parts[0].mesh.tets < report.parts[0].mesh.tets
+    # The polyhedral dual (Milestone 21).
+    dual = mesher.run(cube, out / "dual", element_size=0.2, formats=["vtu"], cells="dual", timeout=600)
+    assert dual.config.cells is mesher.CellChoice.DUAL, dual.config.cells
+    assert dual.parts[0].dual.accepted and 0 < dual.parts[0].dual.cells < dual.parts[0].mesh.tets
+    assert "faceoffsets" in (out / "dual" / "mesh.vtu").read_text()
     for bad in [dict(element_size=0), dict(kernel="fastest"), dict(formats=["stl"])]:
         try:
             mesher.run(cube, out / "bad", **bad)

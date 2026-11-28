@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use mesher_core::project::{Project, ProjectError};
 use mesher_core::protocol::{Job, REPORT_FILE, WorkerMessage};
 use mesher_core::{
-    Action, DefectCode, JobConfig, KernelChoice, Outcome, OutputFormat, Record, RecordLog, Report,
-    Stage,
+    Action, CellChoice, DefectCode, JobConfig, KernelChoice, Outcome, OutputFormat, Record,
+    RecordLog, Report, Stage,
 };
 
 use crate::Limits;
@@ -58,6 +58,10 @@ pub struct JobRequest {
     /// VTU]; written sorted, each once.
     #[serde(default)]
     pub formats: Vec<OutputFormat>,
+    /// The cells written: tets, or the polyhedral dual [default: the
+    /// project's, else tets].
+    #[serde(default)]
+    pub cells: Option<CellChoice>,
 }
 
 /// Why a request could not become a job.
@@ -162,6 +166,9 @@ impl JobRequest {
             formats.dedup();
             c.formats = formats;
         }
+        if let Some(cells) = self.cells {
+            c.cells = cells;
+        }
         Ok(job)
     }
 
@@ -256,6 +263,7 @@ mod tests {
             element_size: Some(0.05),
             feature_angle: Some(30.0),
             formats: vec![OutputFormat::Vtu, OutputFormat::Exodus, OutputFormat::Vtu],
+            cells: Some(CellChoice::Dual),
             ..request("m.obj")
         };
         let job = r.job().unwrap();
@@ -267,6 +275,7 @@ mod tests {
         assert_eq!(c.element_size, 0.05);
         assert_eq!(c.feature_angle, Some(30.0));
         assert_eq!(c.formats, [OutputFormat::Exodus, OutputFormat::Vtu]);
+        assert_eq!(c.cells, CellChoice::Dual);
     }
 
     #[test]

@@ -217,8 +217,18 @@ mod tests {
             settings: JobConfig::default(),
         };
         assert!(!default.to_toml(Path::new("")).contains("formats"));
+        assert!(!default.to_toml(Path::new("")).contains("cells"));
+        // Cells: the dual is kept.
+        let p = Project::from_toml(
+            "input = \"m.obj\"\noutput = \"o\"\n[settings]\ncells = \"dual\"\n",
+            Path::new(""),
+        )
+        .unwrap();
+        assert_eq!(p.settings.cells, crate::report::CellChoice::Dual);
+        assert!(p.to_toml(Path::new("")).contains("cells = \"dual\""));
         for bad in [
             "input = \"m.obj\"\n",
+            "input = \"m.obj\"\noutput = \"o\"\n[settings]\ncells = \"hex\"\n",
             "input = \"m.obj\"\noutput = \"o\"\nunknown = 1\n",
             "input = \"m.obj\"\noutput = \"o\"\n[settings]\nelement_size = -1.0\n",
             "input = \"m.obj\"\noutput = \"o\"\n[settings]\nfeature_angle = 180.0\n",

@@ -18,6 +18,7 @@ __all__ = [
     "Action",
     "Attempt",
     "AttemptOutcome",
+    "CellChoice",
     "CodeCount",
     "DefectCode",
     "DualSummary",
@@ -115,6 +116,19 @@ class AttemptOutcome(str, Enum):
 
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+class CellChoice(str, Enum):
+    """The cells of the mesh files (`cells`)."""
+
+    #: Tetrahedra.
+    TET = "tet"
+    #: The median dual of each part's tet mesh, one polyhedron around each
+    #: vertex (experimental). A part whose dual fails its gate keeps its
+    #: tets, written as polyhedra of four faces (`VOL_DUAL_INVALID`). Gmsh
+    #: and libMeshb hold no polyhedra and are not written
+    #: (`OUT_FORMAT_UNSUPPORTED`).
+    DUAL = "dual"
 
 
 @dataclass(frozen=True)
@@ -224,6 +238,8 @@ class DefectCode(str, Enum):
     EXO_CAPACITY_EXCEEDED = "EXO_CAPACITY_EXCEEDED"
     #: A part or patch name was changed to one the output format accepts
     OUT_NAME_CHANGED = "OUT_NAME_CHANGED"
+    #: A requested mesh format cannot hold the mesh's cells, so it was not written
+    OUT_FORMAT_UNSUPPORTED = "OUT_FORMAT_UNSUPPORTED"
     #: An output file could not be written
     OUT_WRITE_FAILED = "OUT_WRITE_FAILED"
 
@@ -419,6 +435,11 @@ class InputStats:
 class JobConfig:
     """User-facing job settings (the policy flags). Recorded in the report."""
 
+    cells: Optional[CellChoice] = None
+    """The cells written: tetrahedra, or the polyhedral dual of each part's
+    tet mesh where its gate accepts it (Milestone 21, experimental).
+    """
+
     element_size: float = 0.03
     """Target element size (the stuffing lattice spacing), relative to the
     part's bounding-box diagonal.
@@ -490,6 +511,7 @@ class JobConfig:
     @classmethod
     def _parse(cls, v: Mapping[str, Any]) -> JobConfig:
         return cls(
+            cells=(CellChoice(v["cells"])) if "cells" in v else None,
             element_size=(float(v["element_size"])) if "element_size" in v else 0.03,
             feature_angle=(None if v["feature_angle"] is None else float(v["feature_angle"])) if "feature_angle" in v else None,
             feature_edges=(tuple(tuple(e0) for e0 in v["feature_edges"])) if "feature_edges" in v else (),
@@ -672,9 +694,11 @@ class Outcome(str, Enum):
 class OutputFormat(str, Enum):
     """A mesh file format the worker writes."""
 
-    #: Exodus II (`mesh.exo`): a `TETRA4` block per part, side sets.
+    #: Exodus II (`mesh.exo`): a `TETRA4` block per part (with `cells`
+    #: `dual`, an `NSIDED` face block and an `NFACED` element block), side
+    #: sets.
     EXODUS = "exodus"
-    #: Gmsh MSH 4.1 (`mesh.msh`).
+    #: Gmsh MSH 4.1 (`mesh.msh`); tetrahedra only.
     GMSH = "gmsh"
     #: VTK unstructured grid (`mesh.vtu`).
     VTU = "vtu"
@@ -687,7 +711,7 @@ class OutputFormat(str, Enum):
     FLUENT = "fluent"
     #: A libMeshb binary file (`mesh.meshb`): tetrahedra referenced by part,
     #: boundary triangles by patch, with `mesh_refs.txt` naming each
-    #: reference. Not written by default.
+    #: reference; tetrahedra only. Not written by default.
     MESHB = "meshb"
 
 

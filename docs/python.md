@@ -41,6 +41,7 @@ Meshes `input` (an OBJ or `.meshb` file, or a project file) as `mesher run` does
 | `max_deviation` | `--max-deviation` | Largest acceptable fallback deviation, relative to the diagonal (default 0.05) |
 | `kernel` | `--kernel` | `"conformal"` (default) or `"exact"`, or a `KernelChoice` |
 | `formats` | `--formats` | Any of `"exodus"`, `"gmsh"`, `"vtu"`, `"openfoam"`, `"fluent"`, `"meshb"`, or `OutputFormat`s (default the first three) |
+| `cells` | `--cells` | `"tet"` (default) or `"dual"` (experimental: the polyhedral dual, not written to Gmsh or `.meshb`), or a `CellChoice` |
 | `strict` | `--strict` | Conformal meshes only; never the stuffing fallback |
 | `no_repair` | `--no-repair` | Diagnose and report only |
 | `no_remesh` | `--no-remesh` | Never remesh a part's surface |

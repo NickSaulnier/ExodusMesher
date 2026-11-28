@@ -122,6 +122,7 @@ defect_codes! {
     ExoNameTruncated = "EXO_NAME_TRUNCATED", Warning, "Part or set name over the Exodus limit";
     ExoCapacityExceeded = "EXO_CAPACITY_EXCEEDED", Error, "Mesh too large for the 64-bit-offset format";
     OutNameChanged = "OUT_NAME_CHANGED", Warning, "A part or patch name was changed to one the output format accepts";
+    OutFormatUnsupported = "OUT_FORMAT_UNSUPPORTED", Warning, "A requested mesh format cannot hold the mesh's cells, so it was not written";
     OutWriteFailed = "OUT_WRITE_FAILED", Fatal, "An output file could not be written";
 }
 
@@ -616,6 +617,41 @@ pub struct JobConfig {
         skip_serializing_if = "OutputFormat::are_defaults"
     )]
     pub formats: Vec<OutputFormat>,
+    /// The cells written: tetrahedra, or the polyhedral dual of each part's
+    /// tet mesh where its gate accepts it (Milestone 21, experimental).
+    #[serde(default, skip_serializing_if = "CellChoice::is_default")]
+    pub cells: CellChoice,
+}
+
+/// The cells of the mesh files (`cells`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CellChoice {
+    /// Tetrahedra.
+    #[default]
+    Tet,
+    /// The median dual of each part's tet mesh, one polyhedron around each
+    /// vertex (experimental). A part whose dual fails its gate keeps its
+    /// tets, written as polyhedra of four faces (`VOL_DUAL_INVALID`). Gmsh
+    /// and libMeshb hold no polyhedra and are not written
+    /// (`OUT_FORMAT_UNSUPPORTED`).
+    Dual,
+}
+
+impl CellChoice {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == CellChoice::Tet
+    }
+
+    /// The name used on the command line and in the project file.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CellChoice::Tet => "tet",
+            CellChoice::Dual => "dual",
+        }
+    }
 }
 
 /// A mesh file format the worker writes.
@@ -624,9 +660,11 @@ pub struct JobConfig {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
-    /// Exodus II (`mesh.exo`): a `TETRA4` block per part, side sets.
+    /// Exodus II (`mesh.exo`): a `TETRA4` block per part (with `cells`
+    /// `dual`, an `NSIDED` face block and an `NFACED` element block), side
+    /// sets.
     Exodus,
-    /// Gmsh MSH 4.1 (`mesh.msh`).
+    /// Gmsh MSH 4.1 (`mesh.msh`); tetrahedra only.
     Gmsh,
     /// VTK unstructured grid (`mesh.vtu`).
     Vtu,
@@ -639,7 +677,7 @@ pub enum OutputFormat {
     Fluent,
     /// A libMeshb binary file (`mesh.meshb`): tetrahedra referenced by part,
     /// boundary triangles by patch, with `mesh_refs.txt` naming each
-    /// reference. Not written by default.
+    /// reference; tetrahedra only. Not written by default.
     Meshb,
 }
 
@@ -667,6 +705,12 @@ impl OutputFormat {
         f.sort_unstable();
         f.dedup();
         f == OutputFormat::defaults()
+    }
+
+    /// Whether the format can hold polyhedral cells (`cells` `dual`).
+    #[must_use]
+    pub fn holds_polyhedra(self) -> bool {
+        !matches!(self, OutputFormat::Gmsh | OutputFormat::Meshb)
     }
 
     /// The name used on the command line and in the project file.
@@ -738,6 +782,7 @@ impl Default for JobConfig {
             smooth_edges: Vec::new(),
             sizes: Vec::new(),
             formats: OutputFormat::defaults(),
+            cells: CellChoice::Tet,
         }
     }
 }
@@ -747,6 +792,12 @@ impl JobConfig {
     #[must_use]
     pub fn writes(&self, format: OutputFormat) -> bool {
         self.formats.contains(&format)
+    }
+
+    /// Whether the mesh files hold the polyhedral dual.
+    #[must_use]
+    pub fn dual_cells(&self) -> bool {
+        self.cells == CellChoice::Dual
     }
 
     /// The remesher's feature angle, degrees.

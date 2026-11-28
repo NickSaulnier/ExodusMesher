@@ -49,6 +49,7 @@ mesher: model.obj
 | `--kernel exact` | Try the exact constrained Delaunay kernel first: the surface tetrahedralized exactly and rounded to f64, without refinement (so few, often thin, tets); the conformal kernel and stuffing follow if it fails. Default `conformal` |
 | `--wrap-alpha F` | The wrap's α for repair rung 3, relative to the element size (default 1): a part still not a valid solid after local repairs and resolving its intersections, whose stuffing fallback is rejected, is wrapped as the last resort, closing openings narrower than about 2α |
 | `--formats exodus,gmsh,vtu,openfoam,fluent,meshb` | The mesh files written: `mesh.exo`, `mesh.msh`, `mesh.vtu`, an OpenFOAM case in `openfoam/`, a Fluent mesh `mesh_fluent.msh`, and a libMeshb `mesh.meshb` with `mesh_refs.txt` (default the first three) |
+| `--cells dual` | Experimental: write each part's polyhedral dual (one cell around each vertex of its tet mesh, about a quarter as many cells) where its gate accepts it, to Exodus (`NFACED`), VTU, OpenFOAM and Fluent; Gmsh and libMeshb hold no polyhedra and are not written (`OUT_FORMAT_UNSUPPORTED`). Default `tet` |
 | `--no-repair` | Diagnose and report only (a linter) |
 | `--timeout S`, `--memory-limit MiB` | Limits for the worker (defaults 3600 s, 8192 MiB) |
 

@@ -57,7 +57,8 @@ jobs:
       # runtime image (v2512, pinned by digest), and is never a dependency.
       # Each synthetic mesh as an OpenFOAM case and a Fluent file; checkMesh
       # checks the case, and the Fluent file goes round through OpenFOAM's
-      # fluent3DMeshToFoam to the same counts.
+      # fluent3DMeshToFoam to the same counts. Each case's polyhedral dual
+      # too (`<case>__dual/`), which may fail skewness alone.
       - name: Synthetic meshes as OpenFOAM cases, Fluent and .meshb files
         if: runner.os == 'Linux'
         run: SUITE_FOAM_DIR="$PWD/target/foam" cargo test --release -p mesher-synthetic --test suite --test side_sets --test polyhedra

@@ -142,6 +142,21 @@
         "failed"
       ]
     },
+    "CellChoice": {
+      "description": "The cells of the mesh files (`cells`).",
+      "oneOf": [
+        {
+          "description": "Tetrahedra.",
+          "type": "string",
+          "const": "tet"
+        },
+        {
+          "description": "The median dual of each part's tet mesh, one polyhedron around each\nvertex (experimental). A part whose dual fails its gate keeps its\ntets, written as polyhedra of four faces (`VOL_DUAL_INVALID`). Gmsh\nand libMeshb hold no polyhedra and are not written\n(`OUT_FORMAT_UNSUPPORTED`).",
+          "type": "string",
+          "const": "dual"
+        }
+      ]
+    },
     "CodeCount": {
       "description": "Per-code totals in the summary.",
       "type": "object",
@@ -381,6 +396,11 @@
           "description": "A part or patch name was changed to one the output format accepts",
           "type": "string",
           "const": "OUT_NAME_CHANGED"
+        },
+        {
+          "description": "A requested mesh format cannot hold the mesh's cells, so it was not written",
+          "type": "string",
+          "const": "OUT_FORMAT_UNSUPPORTED"
         },
         {
           "description": "An output file could not be written",
@@ -651,6 +671,10 @@
       "description": "User-facing job settings (the policy flags). Recorded in the report.",
       "type": "object",
       "properties": {
+        "cells": {
+          "description": "The cells written: tetrahedra, or the polyhedral dual of each part's\ntet mesh where its gate accepts it (Milestone 21, experimental).",
+          "$ref": "#/$defs/CellChoice"
+        },
         "element_size": {
           "description": "Target element size (the stuffing lattice spacing), relative to the\npart's bounding-box diagonal.",
           "type": "number",
@@ -984,12 +1008,12 @@
       "description": "A mesh file format the worker writes.",
       "oneOf": [
         {
-          "description": "Exodus II (`mesh.exo`): a `TETRA4` block per part, side sets.",
+          "description": "Exodus II (`mesh.exo`): a `TETRA4` block per part (with `cells`\n`dual`, an `NSIDED` face block and an `NFACED` element block), side\nsets.",
           "type": "string",
           "const": "exodus"
         },
         {
-          "description": "Gmsh MSH 4.1 (`mesh.msh`).",
+          "description": "Gmsh MSH 4.1 (`mesh.msh`); tetrahedra only.",
           "type": "string",
           "const": "gmsh"
         },
@@ -1009,7 +1033,7 @@
           "const": "fluent"
         },
         {
-          "description": "A libMeshb binary file (`mesh.meshb`): tetrahedra referenced by part,\nboundary triangles by patch, with `mesh_refs.txt` naming each\nreference. Not written by default.",
+          "description": "A libMeshb binary file (`mesh.meshb`): tetrahedra referenced by part,\nboundary triangles by patch, with `mesh_refs.txt` naming each\nreference; tetrahedra only. Not written by default.",
           "type": "string",
           "const": "meshb"
         }

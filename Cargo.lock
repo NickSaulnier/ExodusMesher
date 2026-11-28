@@ -2054,6 +2054,7 @@ dependencies = [
  "jsonschema",
  "mesher-core",
  "mesher-io",
+ "netcdf3",
  "serde_json",
  "tempfile",
 ]

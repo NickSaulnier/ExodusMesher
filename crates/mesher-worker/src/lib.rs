@@ -4,13 +4,15 @@
 //!
 //! Pipeline: parse, diagnose, select, then (unless `no_repair`) repair, the
 //! surface gate, volume meshing (conforming Delaunay, with isosurface stuffing
-//! as the fallback), the volume gate, and the mesh files. Diagnosis runs if parsing
+//! as the fallback), the volume gate, under `cells` `dual` the polyhedral
+//! dual and its gate, and the mesh files. Diagnosis runs if parsing
 //! produced geometry; repair and meshing run on every selected part without a
 //! fatal defect of its own.
 
 use std::path::Path;
 
 use mesher_core::diagnose::{Tolerances, check_part_pairs, diagnose, select_parts};
+use mesher_core::mesh::{PolyMesh, VolumeMesh};
 use mesher_core::model::SurfaceModel;
 use mesher_core::protocol::{
     FEATURES_FILE, Job, MESH_EXODUS_FILE, MESH_FLUENT_FILE, MESH_FOAM_DIR, MESH_MESHB_FILE,
@@ -18,11 +20,12 @@ use mesher_core::protocol::{
     WorkerMessage,
 };
 use mesher_core::repair::{RepairedPart, repair};
-use mesher_core::volume::{assemble, mesh_parts};
+use mesher_core::volume::{MeshedPart, assemble, dual_mesh, mesh_parts};
 use mesher_core::{
-    Action, DefectCode, ExitStatus, Outcome, OutputFormat, Record, RecordLog, Report, Stage,
+    Action, DefectCode, ExitStatus, Outcome, OutputFormat, Record, RecordLog, Report, Severity,
+    Stage,
 };
-use mesher_io::exodus::{ExodusError, ExodusOptions, QaRecord, write_exodus};
+use mesher_io::exodus::{ExodusError, ExodusOptions, QaRecord, write_exodus, write_exodus_poly};
 
 /// Run a job to completion, sending progress, records and the final result to
 /// `emit`. Returns the exit code. Never panics on bad input.
@@ -208,8 +211,26 @@ fn process(
         return Ok(files);
     }
     let mesh = assemble(&meshes.meshed);
-    report.stages_run.push(Stage::Emit);
     let config = &job.config;
+    // Milestone 21: under `cells` `dual`, the files hold each part's dual
+    // where its gate accepts it (the tets otherwise, as polyhedra).
+    let poly = if config.dual_cells() {
+        let d = dual_mesh(&meshes.meshed, log)
+            .map_err(|p| format!("the mesh has no face view: {p:?}"))?;
+        for (i, summary) in d.summaries {
+            if let Some(p) = report.parts.get_mut(i) {
+                p.dual = Some(summary);
+            }
+        }
+        Some(d.mesh)
+    } else {
+        None
+    };
+    report.stages_run.push(Stage::Emit);
+    if let Some(poly) = &poly {
+        write_poly(job, poly, &meshes.meshed, log, &mut files)?;
+        return Ok(files);
+    }
     if config.writes(OutputFormat::Gmsh) {
         files.push((
             MESH_MSH_FILE.to_owned(),
@@ -244,18 +265,77 @@ fn process(
         files.push((MESH_MESHB_REFS_FILE.to_owned(), m.refs.into_bytes()));
     }
     if config.writes(OutputFormat::Exodus) {
-        write_mesh_exodus(job, &mesh, &meshes.meshed, log);
+        write_mesh_exodus(job, Cells::Tets(&mesh), &meshes.meshed, log);
     }
     Ok(files)
 }
 
-/// Write `mesh.exo`, recording any failure.
-fn write_mesh_exodus(
+/// The mesh files of a polyhedral mesh (`cells` `dual`): Exodus (`NFACED`),
+/// VTU (`VTK_POLYHEDRON`), OpenFOAM and Fluent; Gmsh and `.meshb` hold no
+/// polyhedra, so each one asked for is recorded (`OUT_FORMAT_UNSUPPORTED`):
+/// information when the formats are the default set, a warning when they
+/// were chosen.
+fn write_poly(
     job: &Job,
-    mesh: &mesher_core::mesh::VolumeMesh,
-    parts: &[mesher_core::volume::MeshedPart],
+    poly: &PolyMesh,
+    parts: &[MeshedPart],
     log: &mut RecordLog,
-) {
+    files: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let config = &job.config;
+    for format in OutputFormat::ALL {
+        if !config.writes(format) || format.holds_polyhedra() {
+            continue;
+        }
+        let severity = if OutputFormat::are_defaults(&config.formats) {
+            Severity::Info
+        } else {
+            Severity::Warning
+        };
+        log.push(
+            Record::new(DefectCode::OutFormatUnsupported, Stage::Emit)
+                .severity(severity)
+                .measured("format", format.as_str())
+                .measured("cells", config.cells.as_str())
+                .hint(format!(
+                    "{} holds tetrahedra only, not the polyhedral dual; mesh with `cells` `tet` for it",
+                    format.as_str()
+                )),
+        );
+    }
+    if config.writes(OutputFormat::Vtu) {
+        files.push((
+            MESH_VTU_FILE.to_owned(),
+            mesher_io::vtu::vtu_poly_text(poly).into_bytes(),
+        ));
+    }
+    if config.writes(OutputFormat::Openfoam) {
+        let case = mesher_io::foam::case_files(&poly.points, &poly.faces, log)
+            .map_err(|p| format!("the dual has no face view: {p:?}"))?;
+        files.extend(
+            case.into_iter()
+                .map(|(name, text)| (format!("{MESH_FOAM_DIR}/{name}"), text.into_bytes())),
+        );
+    }
+    if config.writes(OutputFormat::Fluent) {
+        let text = mesher_io::fluent::text(&poly.points, &poly.faces, log)
+            .map_err(|p| format!("the dual has no face view: {p:?}"))?;
+        files.push((MESH_FLUENT_FILE.to_owned(), text.into_bytes()));
+    }
+    if config.writes(OutputFormat::Exodus) {
+        write_mesh_exodus(job, Cells::Poly(poly), parts, log);
+    }
+    Ok(())
+}
+
+/// The cells `mesh.exo` holds.
+enum Cells<'a> {
+    Tets(&'a VolumeMesh),
+    Poly(&'a PolyMesh),
+}
+
+/// Write `mesh.exo`, recording any failure.
+fn write_mesh_exodus(job: &Job, cells: Cells<'_>, parts: &[MeshedPart], log: &mut RecordLog) {
     let dir = Path::new(&job.output_dir);
     let path = dir.join(MESH_EXODUS_FILE);
     let failed = |log: &mut RecordLog, why: String| {
@@ -277,13 +357,30 @@ fn write_mesh_exodus(
             job.config.element_size, job.config.max_deviation
         ),
     ];
-    info.extend(parts.iter().map(|p| {
+    info.extend(parts.iter().enumerate().map(|(b, p)| {
         let kernel = match p.kernel {
             mesher_core::Kernel::Delaunay => "conforming Delaunay",
             mesher_core::Kernel::Stuffing => "isosurface stuffing",
             mesher_core::Kernel::Exact => "exact constrained Delaunay",
         };
-        format!("block {}: {} tets ({kernel})", p.name, p.tets.len())
+        match &cells {
+            Cells::Tets(_) => format!("block {}: {} tets ({kernel})", p.name, p.tets.len()),
+            Cells::Poly(poly) => {
+                let n = poly.faces.zones.get(b).map_or(0, |z| z.count);
+                if n == p.tets.len() {
+                    format!(
+                        "block {}: {n} tets as polyhedra ({kernel}; no dual)",
+                        p.name
+                    )
+                } else {
+                    format!(
+                        "block {}: {n} polyhedra, the dual of {} tets ({kernel})",
+                        p.name,
+                        p.tets.len()
+                    )
+                }
+            }
+        }
     }));
     let options = ExodusOptions {
         title: format!("ExodusMesher mesh of {}", job.input),
@@ -294,7 +391,11 @@ fn write_mesh_exodus(
         }],
         info,
     };
-    match write_exodus(&path, mesh, &options, log) {
+    let written = match cells {
+        Cells::Tets(mesh) => write_exodus(&path, mesh, &options, log),
+        Cells::Poly(poly) => write_exodus_poly(&path, poly, &options, log),
+    };
+    match written {
         Ok(()) | Err(ExodusError::Empty) => {}
         Err(ExodusError::Capacity { variable, bytes }) => {
             log.push(
